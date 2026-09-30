@@ -1,0 +1,14 @@
+[package]
+name = "maestro-protocol"
+description = "Maestro 协议层：数据模型、事件类型、API schema（零 IO）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]

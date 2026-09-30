@@ -1,0 +1,22 @@
+[package]
+name = "maestro-cli"
+description = "Maestro 命令行客户端：status/task/worker/inbox/stop/resume/doctor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "maestro"
+path = "src/main.rs"
+
+[dependencies]
+maestro-protocol.workspace = true
+maestro-client.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"

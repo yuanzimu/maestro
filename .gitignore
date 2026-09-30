@@ -1,0 +1,7 @@
+target/
+data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+.DS_Store
+reference/herdr

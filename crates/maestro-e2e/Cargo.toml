@@ -1,0 +1,27 @@
+[package]
+name = "maestro-e2e"
+description = "Maestro 端到端测试：用例组 A（suspended）/ B（emergency）/ 持久化恢复"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+maestro-protocol.workspace = true
+maestro-daemon.workspace = true
+maestro-testkit.workspace = true
+serde_json.workspace = true
+tempfile = "3"
+serial_test = "3"
+
+[[test]]
+name = "a_suspended"
+path = "tests/a_suspended.rs"
+
+[[test]]
+name = "b_emergency"
+path = "tests/b_emergency.rs"
+
+[[test]]
+name = "persistence"
+path = "tests/persistence.rs"

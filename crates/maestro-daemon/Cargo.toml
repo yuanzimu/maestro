@@ -1,0 +1,26 @@
+[package]
+name = "maestro-daemon"
+description = "Maestro 守护进程：事件循环、Worker 运行时、急停、checkpoint、持久化"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+maestro-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+nix.workspace = true
+rusqlite.workspace = true
+
+[[bin]]
+name = "maestro-daemon"
+path = "src/main.rs"
+
+[dev-dependencies]
+maestro-testkit.workspace = true
+tempfile = "3"
+serial_test = "3"

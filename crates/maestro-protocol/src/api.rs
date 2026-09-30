@@ -1,0 +1,228 @@
+//! JSON-RPC API schema（P0 面：~12 方法）。
+//! 扁平枚举 + schemars 自动生成 schema，对应 herdr api/schema.rs 的模式。
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+use crate::events::Task;
+use crate::types::*;
+
+/// JSON-RPC 请求
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct Request {
+    pub id: String,
+    pub method: Method,
+    pub params: serde_json::Value,
+}
+
+/// JSON-RPC 响应
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Response {
+    Ok { id: String, result: serde_json::Value },
+    Err { id: String, error: RpcError },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RpcError {
+    pub code: i32,
+    pub message: String,
+}
+
+/// API 方法（P0 全集 + P1 预留）。新方法只追加不删除（协议双轨制）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Method {
+    // ---- server ----
+    ServerStatus,
+    ServerShutdown,
+    /// 全局急停：FREEZE→SNAPSHOT→DECIDE 的入口（设计 §3.2）
+    ServerEmergencyStop,
+    /// 急停恢复（steering: flush=投递冻结期积压轻推 | hold=丢弃）
+    ServerResumeAll,
+
+    // ---- task ----
+    TaskCreate,
+    TaskList,
+    TaskGet,
+    TaskPause,
+    TaskResume,
+    TaskCancel,
+    /// 轻推：向运行中任务注入补充指示，下一轮生效
+    TaskSteer,
+
+    // ---- worker ----
+    WorkerList,
+    WorkerGet,
+
+    // ---- inbox ----
+    InboxList,
+
+    // ---- events ----
+    /// 订阅事件流（from_seq 断点续订）
+    EventsSubscribe,
+
+    // ---- checkpoint ----
+    CheckpointList,
+    CheckpointCreate,
+    CheckpointRollback,
+}
+
+// ---------------------------------------------------------------------------
+// 方法参数/结果类型（强类型化高频方法；其余经 serde_json::Value）
+// ---------------------------------------------------------------------------
+
+/// `server.emergency_stop` 参数
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct EmergencyStopParams {
+    /// 审计用原因（可选）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// `server.emergency_stop` 结果
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct EmergencyStopResult {
+    pub frozen_workers: Vec<WorkerId>,
+    pub suspended_tasks: Vec<TaskId>,
+    pub checkpoints: Vec<CheckpointRef>,
+    /// 现场是否完整保全（SNAPSHOT 完成）
+    pub sessions_preserved: bool,
+    /// FREEZE 阶段耗时（毫秒，不变量 I1：< 100）
+    pub freeze_ms: u64,
+}
+
+/// `server.resume_all` 参数
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ResumeAllParams {
+    /// flush=投递冻结期间积压的轻推 | hold=丢弃（每条发 SteeringDropped 事件）
+    #[serde(default = "default_steering_mode")]
+    pub steering: SteeringMode,
+}
+
+fn default_steering_mode() -> SteeringMode {
+    SteeringMode::Flush
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SteeringMode {
+    /// 投递冻结期间积压的轻推
+    Flush,
+    /// 丢弃（不静默，每条发 SteeringDropped 事件）
+    Hold,
+}
+
+/// `task.steer` 参数
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TaskSteerParams {
+    pub task: TaskId,
+    pub message: String,
+}
+
+/// `task.create` 参数
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TaskCreateParams {
+    pub title: String,
+    pub prompt: String,
+    /// 工作目录（默认当前目录）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workdir: Option<String>,
+}
+
+/// `task.create` 结果
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TaskCreateResult {
+    pub task: Task,
+    pub worker: WorkerId,
+}
+
+/// `events.subscribe` 参数
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct EventsSubscribeParams {
+    /// 断点续订游标（0 = 从现在开始）
+    #[serde(default)]
+    pub from_seq: u64,
+}
+
+/// `server.status` 结果
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ServerStatusResult {
+    pub version: String,
+    pub pid: u32,
+    pub uptime_secs: u64,
+    pub tasks_total: u64,
+    pub workers_active: u64,
+    pub event_seq: u64,
+}
+
+/// `checkpoint.rollback` 参数
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CheckpointRollbackParams {
+    pub task: TaskId,
+    pub to: CheckpointRef,
+}
+
+/// `checkpoint.rollback` 结果：pre-rollback 安全垫（不变量 I4）
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CheckpointRollbackResult {
+    pub rolled_back_to: CheckpointRef,
+    pub pre_rollback: CheckpointRef,
+}
+
+/// `checkpoint.list` 参数
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CheckpointListParams {
+    pub task: TaskId,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 方法名 wire 稳定性
+    #[test]
+    fn method_names() {
+        let m = serde_json::to_string(&Method::ServerEmergencyStop).unwrap();
+        assert_eq!(m, "\"server_emergency_stop\"");
+        let m = serde_json::to_string(&Method::TaskSteer).unwrap();
+        assert_eq!(m, "\"task_steer\"");
+    }
+
+    /// Request 信封
+    #[test]
+    fn request_envelope() {
+        let req = Request {
+            id: "req-1".into(),
+            method: Method::ServerEmergencyStop,
+            params: serde_json::to_value(EmergencyStopParams { reason: Some("user_panic".into()) })
+                .unwrap(),
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["method"], "server_emergency_stop");
+        assert_eq!(json["params"]["reason"], "user_panic");
+    }
+
+    /// steering 默认 flush
+    #[test]
+    fn resume_all_default_flush() {
+        let params: ResumeAllParams =
+            serde_json::from_str("{}").expect("空对象应可解析");
+        assert_eq!(params.steering, SteeringMode::Flush);
+    }
+
+    /// EmergencyStopResult 形状（含 freeze_ms 计量）
+    #[test]
+    fn emergency_stop_result_shape() {
+        let r = EmergencyStopResult {
+            frozen_workers: vec![WorkerId::new("w1")],
+            suspended_tasks: vec![TaskId::new("t1")],
+            checkpoints: vec![CheckpointRef::new("cp:t1:r7")],
+            sessions_preserved: true,
+            freeze_ms: 47,
+        };
+        let json = serde_json::to_value(&r).unwrap();
+        assert_eq!(json["freeze_ms"], 47);
+        assert_eq!(json["sessions_preserved"], true);
+    }
+}
