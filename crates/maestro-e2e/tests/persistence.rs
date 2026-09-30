@@ -18,7 +18,10 @@ fn events_replay_restores_tasks() {
         let d = TestDaemon::start_with("/bin/sh", &["-c", "sleep 300"], Some(data_dir.clone()));
         let t = d.create_task("persist-me", &work);
         assert!(d.wait_state(&t, WorkerState::Working, 5000));
-        d.api(Method::TaskSteer, serde_json::json!({ "task": t.as_str(), "message": "留到重启后" }));
+        d.api(
+            Method::TaskSteer,
+            serde_json::json!({ "task": t.as_str(), "message": "留到重启后" }),
+        );
         d.api(Method::ServerEmergencyStop, serde_json::json!({}));
         assert!(d.wait_state(&t, WorkerState::Suspended, 2000));
         drop(d); // 不 shutdown = kill -9 语义
@@ -44,17 +47,29 @@ fn events_replay_restores_tasks() {
     let all = store.replay_all();
     let steered = all
         .iter()
-        .filter(|e| matches!(&e.event, maestro_protocol::events::Event::SteeringQueued { .. }))
+        .filter(|e| {
+            matches!(
+                &e.event,
+                maestro_protocol::events::Event::SteeringQueued { .. }
+            )
+        })
         .count();
     assert_eq!(steered, 1, "steering 事件应在事件流");
     // 恢复后 resume（手动）应 flush 该轻推
     let tid = tasks[0]["id"].as_str().unwrap().to_string();
     d2.api(Method::TaskResume, serde_json::json!({ "task": tid }));
     assert!(d2.wait_state(&TaskId::new(tid), WorkerState::Working, 5000));
-    let all2 = maestro_daemon::persist::EventStore::open(&data_dir).unwrap().replay_all();
+    let all2 = maestro_daemon::persist::EventStore::open(&data_dir)
+        .unwrap()
+        .replay_all();
     let delivered = all2
         .iter()
-        .filter(|e| matches!(&e.event, maestro_protocol::events::Event::SteeringDelivered { .. }))
+        .filter(|e| {
+            matches!(
+                &e.event,
+                maestro_protocol::events::Event::SteeringDelivered { .. }
+            )
+        })
         .count();
     assert_eq!(delivered, 1, "轻推在恢复后投递");
 }
@@ -87,6 +102,10 @@ fn seq_floor_continues_after_recovery() {
     let mut seqs: Vec<u64> = all.iter().map(|e| e.seq).collect();
     seqs.sort_unstable();
     seqs.dedup();
-    assert_eq!(seqs.len(), all.len(), "seq 不得重复（恢复后不得与历史冲突）");
+    assert_eq!(
+        seqs.len(),
+        all.len(),
+        "seq 不得重复（恢复后不得与历史冲突）"
+    );
     let _ = t2;
 }

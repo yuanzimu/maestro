@@ -1,6 +1,6 @@
 //! EventHub：事件总线。序号分配、持久化挂钩、订阅（有界队列防背压）。
 
-use maestro_protocol::{events::Envelope, Priority};
+use maestro_protocol::events::Envelope;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
@@ -18,12 +18,15 @@ pub struct Subscription {
 }
 
 /// 事件总线
+/// 持久化回调类型（EventStore 挂这里；测试可挂 no-op）
+pub type Sink = Box<dyn FnMut(&Envelope) + Send>;
+
 pub struct EventHub {
     next_seq: AtomicU64,
     subscribers: Mutex<Subs>,
     next_sub_id: AtomicU64,
-    /// 持久化回调（EventStore 挂这里；测试可挂 no-op）
-    sink: Mutex<Option<Box<dyn FnMut(&Envelope) + Send>>>,
+    /// 持久化回调
+    sink: Mutex<Option<Sink>>,
 }
 
 struct Subs {
@@ -42,14 +45,17 @@ impl EventHub {
     pub fn new() -> Self {
         Self {
             next_seq: AtomicU64::new(1),
-            subscribers: Mutex::new(Subs { map: HashMap::new(), dropped: vec![] }),
+            subscribers: Mutex::new(Subs {
+                map: HashMap::new(),
+                dropped: vec![],
+            }),
             next_sub_id: AtomicU64::new(1),
             sink: Mutex::new(None),
         }
     }
 
     /// 挂持久化 sink（追加即写）
-    pub fn set_sink(&self, f: Box<dyn FnMut(&Envelope) + Send>) {
+    pub fn set_sink(&self, f: Sink) {
         *self.sink.lock().unwrap() = Some(f);
     }
 
@@ -131,12 +137,10 @@ impl EventHub {
     pub fn set_seq_floor(&self, floor: u64) {
         let mut cur = self.next_seq.load(Ordering::SeqCst);
         while cur < floor {
-            match self.next_seq.compare_exchange(
-                cur,
-                floor,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            ) {
+            match self
+                .next_seq
+                .compare_exchange(cur, floor, Ordering::SeqCst, Ordering::SeqCst)
+            {
                 Ok(_) => break,
                 Err(now) => cur = now,
             }
@@ -164,6 +168,7 @@ mod tests {
     use super::*;
     use maestro_protocol::events::Event;
     use maestro_protocol::types::TaskId;
+    use maestro_protocol::Priority;
 
     fn ev(i: u64) -> Event {
         Event::TaskCreated {
@@ -192,9 +197,15 @@ mod tests {
         let sub = hub.subscribe(None, 0);
         hub.publish(ev(1));
         hub.publish(ev(2));
-        let got = sub.rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
+        let got = sub
+            .rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
         assert_eq!(got.seq, 1);
-        let got2 = sub.rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
+        let got2 = sub
+            .rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
         assert_eq!(got2.seq, 2);
         hub.unsubscribe(sub.id);
     }
@@ -212,11 +223,11 @@ mod tests {
         }
         let elapsed = start.elapsed();
         // 全部发布不应阻塞超过 1s（慢者被断开后继续）
-        assert!(elapsed < std::time::Duration::from_secs(1), "publish 被拖死: {elapsed:?}");
         assert!(
-            !hub.dropped_subscribers().is_empty(),
-            "慢订阅者应被断开"
+            elapsed < std::time::Duration::from_secs(1),
+            "publish 被拖死: {elapsed:?}"
         );
+        assert!(!hub.dropped_subscribers().is_empty(), "慢订阅者应被断开");
         // 断开的订阅者 rx 应耗尽（剩余的旧事件）后无新事件
         drop(sub);
     }
@@ -245,10 +256,19 @@ mod tests {
         };
         let sub = hub.subscribe(Some(&replay), 2);
         // 先收 seq=2,3（重放），再收 4（新发布）
-        let a = sub.rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
-        let b = sub.rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
+        let a = sub
+            .rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        let b = sub
+            .rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
         hub.publish(ev(4));
-        let c = sub.rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
+        let c = sub
+            .rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
         assert_eq!((a.seq, b.seq, c.seq), (2, 3, 4));
     }
 
@@ -262,7 +282,10 @@ mod tests {
             worker: maestro_protocol::WorkerId::new("w"),
             error: "x".into(),
         });
-        let env = sub.rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
+        let env = sub
+            .rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
         assert_eq!(env.priority, Priority::Critical);
     }
 }

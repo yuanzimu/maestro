@@ -2,9 +2,11 @@
 //!
 //! - API socket：UnixStream，每连接一线程，请求→CoreMsg::Api→响应
 //! - 事件 socket：UnixStream，每连接一线程，订阅后持续推送 Envelope JSONL
+//!
 //! 慢客户端由 EventHub 的有界队列兜底（满即断开，客户端凭 seq 重连重放）
 
-use crate::core::{Core, CoreMsg};
+use crate::core::CoreMsg;
+use crate::eventhub::EventHub;
 use maestro_protocol::api::{Method, Request, Response};
 use maestro_protocol::events::Envelope;
 use std::io::{BufRead, BufReader, Write};
@@ -47,7 +49,7 @@ fn remove_stale_socket(path: &Path) {
 
 /// 启动双 socket 服务（返回各 listener 的 join handles）
 pub fn serve(
-    core: &Arc<std::sync::Mutex<Core>>,
+    hub: Arc<EventHub>,
     core_tx: Sender<CoreMsg>,
     paths: &IpcPaths,
     store: Option<Arc<std::sync::Mutex<crate::persist::EventStore>>>,
@@ -66,17 +68,15 @@ pub fn serve(
 
     let mut handles = vec![];
 
-    // ---- API socket：每连接一线程 ----
+    // ---- API socket：每连接一线程（经 channel，不碰 Core 锁）----
     {
-        let core = core.clone();
         let tx = core_tx.clone();
         handles.push(std::thread::spawn(move || {
             for stream in api_listener.incoming() {
                 let Ok(stream) = stream else { continue };
-                let core = core.clone();
                 let tx = tx.clone();
                 std::thread::spawn(move || {
-                    if let Err(e) = handle_api_conn(stream, &core, &tx) {
+                    if let Err(e) = handle_api_conn(stream, &tx) {
                         tracing::debug!("api conn closed: {e}");
                     }
                 });
@@ -84,15 +84,17 @@ pub fn serve(
         }));
     }
 
-    // ---- 事件 socket：每连接一线程，推送 JSONL ----
+    // ---- 事件 socket：每连接一线程（直接用 hub Arc，不需要 Core 锁）----
     {
-        let core = core.clone();
+        let hub = hub.clone();
+        let store = store.clone();
         handles.push(std::thread::spawn(move || {
             for stream in events_listener.incoming() {
                 let Ok(stream) = stream else { continue };
-                let core = core.clone();
+                let hub = hub.clone();
+                let store = store.clone();
                 std::thread::spawn(move || {
-                    if let Err(e) = handle_events_conn(stream, &core) {
+                    if let Err(e) = handle_events_conn(stream, &hub, store.as_ref()) {
                         tracing::debug!("events conn closed: {e}");
                     }
                 });
@@ -104,11 +106,7 @@ pub fn serve(
 }
 
 /// API 连接：逐行读 JSON-RPC 请求 → Core → 回响应
-fn handle_api_conn(
-    stream: UnixStream,
-    core: &Arc<std::sync::Mutex<Core>>,
-    tx: &Sender<CoreMsg>,
-) -> std::io::Result<()> {
+fn handle_api_conn(stream: UnixStream, tx: &Sender<CoreMsg>) -> std::io::Result<()> {
     let reader = BufReader::new(stream.try_clone()?);
     let mut writer = stream;
     for line in reader.lines() {
@@ -164,7 +162,11 @@ fn handle_api_conn(
 }
 
 /// 事件连接：首行可选 {"from_seq":N} 订阅，之后持续推送
-fn handle_events_conn(stream: UnixStream, core: &Arc<std::sync::Mutex<Core>>) -> std::io::Result<()> {
+fn handle_events_conn(
+    stream: UnixStream,
+    hub: &EventHub,
+    store: Option<&Arc<std::sync::Mutex<crate::persist::EventStore>>>,
+) -> std::io::Result<()> {
     let mut stream = stream;
     let mut reader = BufReader::new(stream.try_clone()?);
 
@@ -179,36 +181,28 @@ fn handle_events_conn(stream: UnixStream, core: &Arc<std::sync::Mutex<Core>>) ->
         }
     }
 
-    // 在 Core 的 hub 上订阅（带重放）
-    let subscription = {
-        let core_guard = core.lock().unwrap();
-        let store = core_guard.event_store_handle();
-        let replay: Option<Box<dyn Fn(u64) -> Vec<Envelope> + '_>> = store.map(|s| {
-            Box::new(move |from: u64| s.lock().unwrap().replay_from(from)) as Box<dyn Fn(u64) -> Vec<Envelope>>
-        });
-        if let Some(r) = replay {
-            core_guard.ctx.hub.subscribe(Some(&*r), from_seq)
-        } else {
-            core_guard.ctx.hub.subscribe(None, from_seq)
-        }
+    // 订阅（带重放 —— hub 线程安全，不经 Core 锁）
+    let replay = store.map(|s| {
+        let s = s.clone();
+        move |from: u64| -> Vec<Envelope> { s.lock().unwrap().replay_from(from) }
+    });
+    let subscription = if let Some(r) = &replay {
+        hub.subscribe(Some(r), from_seq)
+    } else {
+        hub.subscribe(None, from_seq)
     };
 
     // 推送循环
-    loop {
-        match subscription.rx.recv() {
-            Ok(env) => {
-                let line = serde_json::to_string(&env).unwrap_or_default();
-                if writeln!(stream, "{line}").and_then(|_| stream.flush()).is_err() {
-                    break; // 客户端断开
-                }
-            }
-            Err(_) => break, // hub 侧断开（背压）
+    while let Ok(env) = subscription.rx.recv() {
+        let line = serde_json::to_string(&env).unwrap_or_default();
+        if writeln!(stream, "{line}")
+            .and_then(|_| stream.flush())
+            .is_err()
+        {
+            break; // 客户端断开
         }
     }
-    // 清理订阅
-    {
-        let core_guard = core.lock().unwrap();
-        core_guard.ctx.hub.unsubscribe(subscription.id);
-    }
+    // 清理订阅（hub 线程安全）
+    hub.unsubscribe(subscription.id);
     Ok(())
 }

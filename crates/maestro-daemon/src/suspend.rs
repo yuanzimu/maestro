@@ -4,7 +4,7 @@
 //! - 恢复调度：对 auto 策略的挂起任务按退避表定时尝试（线程池 → 回消息给 Core）
 //! - 孤儿清理：daemon 启动时扫 pidfile，绝不收养一律杀（设计 §2.5）
 
-use crate::worker::{self, PidFile};
+use crate::worker::{self};
 use maestro_protocol::types::*;
 use std::path::Path;
 use std::sync::mpsc::Sender;
@@ -97,7 +97,7 @@ fn nix_kill_hard(pgid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::worker::{spawn_worker, SpawnSpec};
+    use crate::worker::{spawn_worker, PidFile, SpawnSpec};
     use maestro_protocol::types::{TaskId, WorkerId};
 
     fn reap_dir() -> tempfile::TempDir {

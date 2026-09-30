@@ -4,12 +4,17 @@
 //! **串行执行**（worktree 并发写共享 .git 会随机锁冲突）。
 
 use maestro_protocol::types::*;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 /// checkpoint 引用命名空间：refs/maestro/cp/<task>/<seq>-<label>
 pub fn cp_ref(task: &TaskId, seq: u32, reason: CpReason) -> CheckpointRef {
-    CheckpointRef(format!("refs/maestro/cp/{}/{}-{}", task, seq, reason_label(reason)))
+    CheckpointRef(format!(
+        "refs/maestro/cp/{}/{}-{}",
+        task,
+        seq,
+        reason_label(reason)
+    ))
 }
 
 fn reason_label(r: CpReason) -> &'static str {
@@ -107,7 +112,12 @@ pub fn capture(
 
 /// restore 原语（设计 §4.4）：
 /// pre-rollback 安全垫 → `reset --hard <cp>` → `clean -fd`
-pub fn restore(worktree: &Path, task: &TaskId, to: &CheckpointRef, clock: &dyn maestro_protocol::Clock) -> Result<CheckpointRef, String> {
+pub fn restore(
+    worktree: &Path,
+    task: &TaskId,
+    to: &CheckpointRef,
+    clock: &dyn maestro_protocol::Clock,
+) -> Result<CheckpointRef, String> {
     // I4：回滚本身可撤销 —— 先快照当前状态
     let pre = capture(worktree, task, 0, CpReason::PreRollback, clock)?;
     let _ = git(worktree, &["reset", "--hard", to.as_str()])?;
@@ -118,8 +128,10 @@ pub fn restore(worktree: &Path, task: &TaskId, to: &CheckpointRef, clock: &dyn m
 /// 列出任务全部 checkpoint（时间序）
 pub fn list(worktree: &Path, task: &TaskId) -> Vec<CheckpointInfo> {
     let prefix = format!("refs/maestro/cp/{}/", task);
-    let Ok(out) = git(worktree, &["for-each-ref", "--format=%(refname) %(objectname)", &prefix])
-    else {
+    let Ok(out) = git(
+        worktree,
+        &["for-each-ref", "--format=%(refname) %(objectname)", &prefix],
+    ) else {
         return vec![];
     };
     let mut infos: Vec<CheckpointInfo> = out
@@ -274,7 +286,9 @@ mod tests {
         assert!(deleted >= 4, "应清理早期 rolling cp: {deleted}");
         let remaining = list(p, &t);
         // baseline 必在
-        assert!(remaining.iter().any(|i| i.reason == Some(CpReason::Baseline)));
+        assert!(remaining
+            .iter()
+            .any(|i| i.reason == Some(CpReason::Baseline)));
         // rolling 只剩最近 3 个
         let rolling: Vec<_> = remaining
             .iter()
@@ -293,8 +307,14 @@ mod tests {
         let before = git(p, &["status", "--porcelain"]).unwrap();
         let _ = capture(p, &t, 1, CpReason::RoundStart, &SystemClock).unwrap();
         let after = git(p, &["status", "--porcelain"]).unwrap();
-        assert_eq!(before, after, "capture 不得扰动 status（前: {before:?} 后: {after:?}）");
+        assert_eq!(
+            before, after,
+            "capture 不得扰动 status（前: {before:?} 后: {after:?}）"
+        );
         // 未跟踪文件仍是未跟踪（不被意外 staged）
-        assert!(after.contains("?? dirty.txt"), "untracked 应保持 untracked: {after}");
+        assert!(
+            after.contains("?? dirty.txt"),
+            "untracked 应保持 untracked: {after}"
+        );
     }
 }

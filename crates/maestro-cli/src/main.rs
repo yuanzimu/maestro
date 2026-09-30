@@ -108,7 +108,11 @@ fn run(client: &MaestroClient, cmd: Cmd) -> Result<(), String> {
             println!("{}", serde_json::to_string_pretty(&v).unwrap());
         }
         Cmd::Task { action } => match action {
-            TaskAction::Create { title, prompt, workdir } => {
+            TaskAction::Create {
+                title,
+                prompt,
+                workdir,
+            } => {
                 let v = client
                     .call(
                         "task-create",
@@ -126,25 +130,41 @@ fn run(client: &MaestroClient, cmd: Cmd) -> Result<(), String> {
             }
             TaskAction::Get { id } => {
                 let v = client
-                    .call("task-get", Method::TaskGet, serde_json::json!({ "task": id }))
+                    .call(
+                        "task-get",
+                        Method::TaskGet,
+                        serde_json::json!({ "task": id }),
+                    )
                     .map_err(fmt_err)?;
                 println!("{}", serde_json::to_string_pretty(&v).unwrap());
             }
             TaskAction::Pause { id } => {
                 let v = client
-                    .call("task-pause", Method::TaskPause, serde_json::json!({ "task": id }))
+                    .call(
+                        "task-pause",
+                        Method::TaskPause,
+                        serde_json::json!({ "task": id }),
+                    )
                     .map_err(fmt_err)?;
                 println!("{}", serde_json::to_string_pretty(&v).unwrap());
             }
             TaskAction::Resume { id } => {
                 let v = client
-                    .call("task-resume", Method::TaskResume, serde_json::json!({ "task": id }))
+                    .call(
+                        "task-resume",
+                        Method::TaskResume,
+                        serde_json::json!({ "task": id }),
+                    )
                     .map_err(fmt_err)?;
                 println!("{}", serde_json::to_string_pretty(&v).unwrap());
             }
             TaskAction::Cancel { id } => {
                 let v = client
-                    .call("task-cancel", Method::TaskCancel, serde_json::json!({ "task": id }))
+                    .call(
+                        "task-cancel",
+                        Method::TaskCancel,
+                        serde_json::json!({ "task": id }),
+                    )
                     .map_err(fmt_err)?;
                 println!("{}", serde_json::to_string_pretty(&v).unwrap());
             }

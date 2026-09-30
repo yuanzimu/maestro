@@ -17,7 +17,10 @@ fn b1_b5_emergency_freeze_snapshot_resume() {
     // worker 进程 pid
     let workers = d.api(Method::WorkerList, serde_json::json!({}));
     let pid = workers["workers"][0]["pid"].as_u64().expect("pid") as u32;
-    assert!(maestro_daemon::worker::proc_stat(pid).is_some(), "worker 应存活");
+    assert!(
+        maestro_daemon::worker::proc_stat(pid).is_some(),
+        "worker 应存活"
+    );
 
     // 急停
     let result = d.api(Method::ServerEmergencyStop, serde_json::json!({}));
@@ -37,12 +40,18 @@ fn b1_b5_emergency_freeze_snapshot_resume() {
     assert_eq!(v["suspend_reason"], "emergency_stop");
     // 快照存在（EmergencyStopped 结果带 checkpoint）
     assert!(
-        result["checkpoints"].as_array().map(|a| !a.is_empty()).unwrap_or(false),
+        result["checkpoints"]
+            .as_array()
+            .map(|a| !a.is_empty())
+            .unwrap_or(false),
         "急停应产生 checkpoint: {result}"
     );
 
     // resume_all → worker 恢复运行（S 态，不再 T）
-    d.api(Method::ServerResumeAll, serde_json::json!({ "steering": "flush" }));
+    d.api(
+        Method::ServerResumeAll,
+        serde_json::json!({ "steering": "flush" }),
+    );
     assert!(d.wait_state(&t, WorkerState::Working, 2000));
     std::thread::sleep(std::time::Duration::from_millis(100));
     assert_ne!(
@@ -52,7 +61,10 @@ fn b1_b5_emergency_freeze_snapshot_resume() {
     );
 
     // 清理
-    d.api(Method::TaskCancel, serde_json::json!({ "task": t.as_str() }));
+    d.api(
+        Method::TaskCancel,
+        serde_json::json!({ "task": t.as_str() }),
+    );
     assert!(d.wait_state(&t, WorkerState::Cancelled, 5000));
 }
 
@@ -66,13 +78,22 @@ fn b7_steering_hold_drops_not_silently() {
     assert!(d.wait_state(&t, WorkerState::Working, 5000));
 
     // 两条轻推
-    d.api(Method::TaskSteer, serde_json::json!({ "task": t.as_str(), "message": "轻推1" }));
-    d.api(Method::TaskSteer, serde_json::json!({ "task": t.as_str(), "message": "轻推2" }));
+    d.api(
+        Method::TaskSteer,
+        serde_json::json!({ "task": t.as_str(), "message": "轻推1" }),
+    );
+    d.api(
+        Method::TaskSteer,
+        serde_json::json!({ "task": t.as_str(), "message": "轻推2" }),
+    );
 
     // 急停 + hold 丢弃
     d.api(Method::ServerEmergencyStop, serde_json::json!({}));
     assert!(d.wait_state(&t, WorkerState::Suspended, 2000));
-    d.api(Method::ServerResumeAll, serde_json::json!({ "steering": "hold" }));
+    d.api(
+        Method::ServerResumeAll,
+        serde_json::json!({ "steering": "hold" }),
+    );
     assert!(d.wait_state(&t, WorkerState::Working, 2000));
 
     // 断言事件流有 2 条 SteeringDropped（经 checkpoint 列表外的途径：直接读事件库）
@@ -80,12 +101,20 @@ fn b7_steering_hold_drops_not_silently() {
     let all = store.replay_all();
     let dropped = all
         .iter()
-        .filter(|e| matches!(&e.event, maestro_protocol::events::Event::SteeringDropped { .. }))
+        .filter(|e| {
+            matches!(
+                &e.event,
+                maestro_protocol::events::Event::SteeringDropped { .. }
+            )
+        })
         .count();
     assert_eq!(dropped, 2, "两条轻推都应有 SteeringDropped 事件（不静默）");
 
     // 清理
-    d.api(Method::TaskCancel, serde_json::json!({ "task": t.as_str() }));
+    d.api(
+        Method::TaskCancel,
+        serde_json::json!({ "task": t.as_str() }),
+    );
     assert!(d.wait_state(&t, WorkerState::Cancelled, 5000));
 }
 
@@ -106,7 +135,10 @@ fn b8_rollback_then_resume() {
     // 急停
     let stop = d.api(Method::ServerEmergencyStop, serde_json::json!({}));
     assert!(d.wait_state(&t, WorkerState::Suspended, 2000));
-    let cp = stop["checkpoints"][0].as_str().expect("checkpoint ref").to_string();
+    let cp = stop["checkpoints"][0]
+        .as_str()
+        .expect("checkpoint ref")
+        .to_string();
 
     // 回滚到急停时刻 checkpoint（I4：应产生 pre-rollback 安全垫）
     let rb = d.api(
@@ -114,17 +146,28 @@ fn b8_rollback_then_resume() {
         serde_json::json!({ "task": t.as_str(), "to": cp }),
     );
     assert!(
-        rb["pre_rollback"].as_str().is_some_and(|s| s.contains("pre_rollback")),
+        rb["pre_rollback"]
+            .as_str()
+            .is_some_and(|s| s.contains("pre_rollback")),
         "回滚应带 pre-rollback 安全垫: {rb}"
     );
     // worktree 回到 v2-改坏了（急停时刻的真实状态，如实记录）
-    assert_eq!(std::fs::read_to_string(work.join("code.txt")).unwrap(), "v2-改坏了");
+    assert_eq!(
+        std::fs::read_to_string(work.join("code.txt")).unwrap(),
+        "v2-改坏了"
+    );
 
     // resume
-    d.api(Method::ServerResumeAll, serde_json::json!({ "steering": "flush" }));
+    d.api(
+        Method::ServerResumeAll,
+        serde_json::json!({ "steering": "flush" }),
+    );
     assert!(d.wait_state(&t, WorkerState::Working, 2000));
 
-    d.api(Method::TaskCancel, serde_json::json!({ "task": t.as_str() }));
+    d.api(
+        Method::TaskCancel,
+        serde_json::json!({ "task": t.as_str() }),
+    );
     assert!(d.wait_state(&t, WorkerState::Cancelled, 5000));
 }
 
@@ -156,14 +199,20 @@ fn b12_new_task_queues_during_freeze() {
     assert_eq!(st, WorkerState::Queued, "冻结期新任务应为 Queued");
 
     // resume_all 后新任务应被启动（调度器解冻）
-    d.api(Method::ServerResumeAll, serde_json::json!({ "steering": "flush" }));
+    d.api(
+        Method::ServerResumeAll,
+        serde_json::json!({ "steering": "flush" }),
+    );
     assert!(
         d.wait_state(&TaskId::new(new_id), WorkerState::Working, 5000),
         "解冻后新任务应启动"
     );
 
     // 清理
-    d.api(Method::TaskCancel, serde_json::json!({ "task": t1.as_str() }));
+    d.api(
+        Method::TaskCancel,
+        serde_json::json!({ "task": t1.as_str() }),
+    );
     let v = d.api(Method::TaskList, serde_json::json!({}));
     for t in v["tasks"].as_array().unwrap() {
         let id = t["id"].as_str().unwrap().to_string();
@@ -188,12 +237,21 @@ fn b13_emergency_stop_idempotent() {
     // 第二次急停：不报错，返回当前冻结状态
     let r2 = d.api(Method::ServerEmergencyStop, serde_json::json!({}));
     assert!(
-        r2["frozen_workers"].as_array().map(|a| a.is_empty()).unwrap_or(true),
+        r2["frozen_workers"]
+            .as_array()
+            .map(|a| a.is_empty())
+            .unwrap_or(true),
         "第二次应无新冻结 worker: {r2}"
     );
     assert!(
-        r2["checkpoints"].as_array().map(|a| a.is_empty()).unwrap_or(true),
+        r2["checkpoints"]
+            .as_array()
+            .map(|a| a.is_empty())
+            .unwrap_or(true),
         "第二次不应重复快照: {r2}"
     );
-    d.api(Method::TaskCancel, serde_json::json!({ "task": t.as_str() }));
+    d.api(
+        Method::TaskCancel,
+        serde_json::json!({ "task": t.as_str() }),
+    );
 }

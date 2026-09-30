@@ -2,7 +2,6 @@
 //! 运行环境：真实子进程 + MockClock 虚拟推进退避
 
 use maestro_daemon::core::CoreMsg;
-use maestro_daemon::worker::WorkerExit;
 use maestro_e2e::*;
 use maestro_protocol::api::Method;
 use maestro_protocol::types::*;
@@ -15,7 +14,10 @@ fn a6_user_pause_never_auto_resumes() {
     let (_repo, work) = git_repo();
     let d = TestDaemon::start("/bin/sh", &["-c", "sleep 300"]);
     let t = d.create_task("pause-test", &work);
-    assert!(d.wait_state(&t, WorkerState::Working, 5000), "应先进入 Working");
+    assert!(
+        d.wait_state(&t, WorkerState::Working, 5000),
+        "应先进入 Working"
+    );
 
     // 用户暂停
     d.api(Method::TaskPause, serde_json::json!({ "task": t.as_str() }));
@@ -29,14 +31,27 @@ fn a6_user_pause_never_auto_resumes() {
     std::thread::sleep(std::time::Duration::from_millis(300));
 
     // 仍 Suspended（UserPause 仅手动）
-    assert_eq!(d.task_state(&t), WorkerState::Suspended, "UserPause 不得自动恢复");
+    assert_eq!(
+        d.task_state(&t),
+        WorkerState::Suspended,
+        "UserPause 不得自动恢复"
+    );
 
     // 手动恢复 → Working
-    d.api(Method::TaskResume, serde_json::json!({ "task": t.as_str() }));
-    assert!(d.wait_state(&t, WorkerState::Working, 2000), "手动恢复应生效");
+    d.api(
+        Method::TaskResume,
+        serde_json::json!({ "task": t.as_str() }),
+    );
+    assert!(
+        d.wait_state(&t, WorkerState::Working, 2000),
+        "手动恢复应生效"
+    );
 
     // 清理：取消任务
-    d.api(Method::TaskCancel, serde_json::json!({ "task": t.as_str() }));
+    d.api(
+        Method::TaskCancel,
+        serde_json::json!({ "task": t.as_str() }),
+    );
     assert!(d.wait_state(&t, WorkerState::Cancelled, 3000));
 }
 
@@ -48,10 +63,16 @@ fn a10_disconnect_stderr_maps_to_suspended() {
     // worker 跑 2 秒后以断连错误退出
     let d = TestDaemon::start(
         "/bin/sh",
-        &["-c", "sleep 1; echo 'Error: connection reset by peer' >&2; exit 1"],
+        &[
+            "-c",
+            "sleep 1; echo 'Error: connection reset by peer' >&2; exit 1",
+        ],
     );
     let t = d.create_task("disc-test", &work);
-    assert!(d.wait_state(&t, WorkerState::Suspended, 8000), "断连应映射 Suspended 而非 Failed");
+    assert!(
+        d.wait_state(&t, WorkerState::Suspended, 8000),
+        "断连应映射 Suspended 而非 Failed"
+    );
     let v = d.api(Method::TaskGet, serde_json::json!({ "task": t.as_str() }));
     assert_eq!(v["suspend_reason"], "network_lost", "断连原因: {v}");
     assert_ne!(d.task_state(&t), WorkerState::Failed);
@@ -65,7 +86,10 @@ fn disconnect_auto_resumes_when_network_returns() {
     // 第一次跑 1 秒断连；daemon 会自动重排退避
     let d = TestDaemon::start(
         "/bin/sh",
-        &["-c", "sleep 1; echo 'fetch failed: network error' >&2; exit 1"],
+        &[
+            "-c",
+            "sleep 1; echo 'fetch failed: network error' >&2; exit 1",
+        ],
     );
     let t = d.create_task("auto-resume", &work);
     assert!(d.wait_state(&t, WorkerState::Suspended, 8000));
@@ -113,6 +137,10 @@ fn recover_reaps_and_marks_daemon_crash() {
     let tasks = v["tasks"].as_array().unwrap();
     assert!(!tasks.is_empty(), "事件重放应带回任务");
     let state = serde_json::from_value::<WorkerState>(tasks[0]["state"].clone()).unwrap();
-    assert_eq!(state, WorkerState::Suspended, "DaemonCrash 应标 suspended: {state:?}");
+    assert_eq!(
+        state,
+        WorkerState::Suspended,
+        "DaemonCrash 应标 suspended: {state:?}"
+    );
     let _ = work2;
 }

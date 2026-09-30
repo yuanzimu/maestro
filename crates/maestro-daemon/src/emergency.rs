@@ -60,7 +60,9 @@ pub fn emergency_stop(
     let mut snapshots = vec![];
     for id in &frozen {
         let Some(m) = metas.get(id) else { continue };
-        let Some(task) = ctx.authority.tasks.get(&m.task).cloned() else { continue };
+        let Some(task) = ctx.authority.tasks.get(&m.task).cloned() else {
+            continue;
+        };
 
         let cp_ref = match crate::checkpoints::capture(
             std::path::Path::new(&task.task.workdir),
@@ -81,7 +83,10 @@ pub fn emergency_stop(
             }
         };
 
-        let session_ref = task.session_ref.clone().unwrap_or_else(|| SessionRef::new(""));
+        let session_ref = task
+            .session_ref
+            .clone()
+            .unwrap_or_else(|| SessionRef::new(""));
         ctx.publish(Event::Suspended {
             task: task.task.id.clone(),
             worker: id.clone(),
@@ -99,7 +104,9 @@ pub fn emergency_stop(
             round: task.round,
         });
     }
-    ctx.publish(Event::EmergencySnapshotted { per_task: snapshots });
+    ctx.publish(Event::EmergencySnapshotted {
+        per_task: snapshots,
+    });
 
     EmergencyStopResult {
         frozen_workers: frozen,

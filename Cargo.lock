@@ -412,6 +412,7 @@ dependencies = [
 name = "maestro-e2e"
 version = "0.1.0"
 dependencies = [
+ "maestro-client",
  "maestro-daemon",
  "maestro-protocol",
  "maestro-testkit",

@@ -22,7 +22,12 @@ pub struct Envelope {
 impl Envelope {
     pub fn new(seq: u64, event: Event) -> Self {
         let priority = event.default_priority();
-        Self { seq, ts: now_ms(), priority, event }
+        Self {
+            seq,
+            ts: now_ms(),
+            priority,
+            event,
+        }
     }
 }
 
@@ -31,18 +36,56 @@ impl Envelope {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
     // ---- 生命周期 ----
-    TaskCreated { task: Task, prompt: String },
-    TaskStarted { task: TaskId, worker: WorkerId },
-    TaskCompleted { task: TaskId, worker: WorkerId, summary: String },
-    TaskFailed { task: TaskId, worker: WorkerId, error: String },
-    TaskCancelled { task: TaskId, worker: WorkerId },
-    WorkerSpawned { worker: WorkerId, task: TaskId, pid: u32, pgid: u32 },
-    WorkerDied { worker: WorkerId, exit_code: Option<i32> },
+    TaskCreated {
+        task: Task,
+        prompt: String,
+    },
+    TaskStarted {
+        task: TaskId,
+        worker: WorkerId,
+    },
+    TaskCompleted {
+        task: TaskId,
+        worker: WorkerId,
+        summary: String,
+    },
+    TaskFailed {
+        task: TaskId,
+        worker: WorkerId,
+        error: String,
+    },
+    TaskCancelled {
+        task: TaskId,
+        worker: WorkerId,
+    },
+    WorkerSpawned {
+        worker: WorkerId,
+        task: TaskId,
+        pid: u32,
+        pgid: u32,
+    },
+    WorkerDied {
+        worker: WorkerId,
+        exit_code: Option<i32>,
+    },
 
     // ---- Goal / 验收门 ----
-    GoalProgress { task: TaskId, round: u32, blocked_condition: Option<String> },
-    AcceptanceGatePassed { task: TaskId, round: u32, output: String },
-    AcceptanceGateFailed { task: TaskId, round: u32, failures: u32, output: String },
+    GoalProgress {
+        task: TaskId,
+        round: u32,
+        blocked_condition: Option<String>,
+    },
+    AcceptanceGatePassed {
+        task: TaskId,
+        round: u32,
+        output: String,
+    },
+    AcceptanceGateFailed {
+        task: TaskId,
+        round: u32,
+        failures: u32,
+        output: String,
+    },
 
     // ---- 挂起/恢复（设计 §2.3）----
     Suspended {
@@ -62,37 +105,91 @@ pub enum Event {
         new_session_ref: Option<SessionRef>,
     },
     /// 自动恢复尝试（退避计时到点的一次探测/续跑尝试）
-    ResumeAttempt { task: TaskId, attempt: u32, next_backoff_secs: u64 },
+    ResumeAttempt {
+        task: TaskId,
+        attempt: u32,
+        next_backoff_secs: u64,
+    },
     /// 自动恢复耗尽，升级 blocked(infra)
-    AutoRecoveryExhausted { task: TaskId, attempts: u32 },
+    AutoRecoveryExhausted {
+        task: TaskId,
+        attempts: u32,
+    },
 
     // ---- 急停（设计 §3.2）----
-    EmergencyStopped { workers: Vec<WorkerId>, reason: String },
-    EmergencySnapshotted { per_task: Vec<EmergencySnapshot> },
+    EmergencyStopped {
+        workers: Vec<WorkerId>,
+        reason: String,
+    },
+    EmergencySnapshotted {
+        per_task: Vec<EmergencySnapshot>,
+    },
     /// 冻结期间被丢弃的轻推（hold 模式，不静默 —— 用例 B7）
-    SteeringDropped { task: TaskId, message: String },
+    SteeringDropped {
+        task: TaskId,
+        message: String,
+    },
 
     // ---- steering（UX 埋点）----
-    SteeringQueued { task: TaskId, message: String },
-    SteeringDelivered { task: TaskId, round: u32, message: String },
+    SteeringQueued {
+        task: TaskId,
+        message: String,
+    },
+    SteeringDelivered {
+        task: TaskId,
+        round: u32,
+        message: String,
+    },
 
     // ---- checkpoint（UX 埋点：断点状态）----
-    CheckpointCreated { task: TaskId, cp: CheckpointRef, meta: CheckpointMeta },
-    CheckpointRolledBack { task: TaskId, to: CheckpointRef, pre_rollback: CheckpointRef },
+    CheckpointCreated {
+        task: TaskId,
+        cp: CheckpointRef,
+        meta: CheckpointMeta,
+    },
+    CheckpointRolledBack {
+        task: TaskId,
+        to: CheckpointRef,
+        pre_rollback: CheckpointRef,
+    },
 
     // ---- 叙事（UX 埋点：叙事快照）----
-    NarrativeSnapshot { task: TaskId, round: u32, milestone: String },
+    NarrativeSnapshot {
+        task: TaskId,
+        round: u32,
+        milestone: String,
+    },
 
     // ---- 反馈（UX 埋点）----
-    FeedbackRecorded { task: TaskId, positive: bool, reason: Option<String> },
+    FeedbackRecorded {
+        task: TaskId,
+        positive: bool,
+        reason: Option<String>,
+    },
 
     // ---- 账本（T4）----
-    LedgerEntry { task: TaskId, worker: Option<WorkerId>, usage: UsageEntry },
+    LedgerEntry {
+        task: TaskId,
+        worker: Option<WorkerId>,
+        usage: UsageEntry,
+    },
 
     // ---- provider / batch（U11/T6）----
-    ProviderSwitched { task: Option<TaskId>, from: String, to: String, cause: String },
-    BatchMarkedSuspended { batch: BatchId, task: TaskId },
-    BatchFailed { batch: BatchId, failed_items: u32, reason: String },
+    ProviderSwitched {
+        task: Option<TaskId>,
+        from: String,
+        to: String,
+        cause: String,
+    },
+    BatchMarkedSuspended {
+        batch: BatchId,
+        task: TaskId,
+    },
+    BatchFailed {
+        batch: BatchId,
+        failed_items: u32,
+        reason: String,
+    },
 }
 
 /// 单条急停快照记录
@@ -145,7 +242,10 @@ impl Event {
             | AcceptanceGateFailed { .. } => Priority::Critical,
 
             // blocked 语义的等待项（Goal 3 轮、审批门）也是 Critical
-            GoalProgress { blocked_condition: Some(_), .. } => Priority::Critical,
+            GoalProgress {
+                blocked_condition: Some(_),
+                ..
+            } => Priority::Critical,
 
             // 值得关注但不打扰
             ProviderSwitched { .. }
@@ -192,23 +292,39 @@ mod tests {
     #[test]
     fn priority_classification() {
         assert_eq!(
-            Event::TaskFailed { task: TaskId::new("t"), worker: WorkerId::new("w"), error: "x".into() }
-                .default_priority(),
+            Event::TaskFailed {
+                task: TaskId::new("t"),
+                worker: WorkerId::new("w"),
+                error: "x".into()
+            }
+            .default_priority(),
             Priority::Critical
         );
         assert_eq!(
-            Event::GoalProgress { task: TaskId::new("t"), round: 3, blocked_condition: Some("等权限".into()) }
-                .default_priority(),
+            Event::GoalProgress {
+                task: TaskId::new("t"),
+                round: 3,
+                blocked_condition: Some("等权限".into())
+            }
+            .default_priority(),
             Priority::Critical
         );
         assert_eq!(
-            Event::GoalProgress { task: TaskId::new("t"), round: 1, blocked_condition: None }
-                .default_priority(),
+            Event::GoalProgress {
+                task: TaskId::new("t"),
+                round: 1,
+                blocked_condition: None
+            }
+            .default_priority(),
             Priority::Info
         );
         assert_eq!(
-            Event::TaskCompleted { task: TaskId::new("t"), worker: WorkerId::new("w"), summary: "ok".into() }
-                .default_priority(),
+            Event::TaskCompleted {
+                task: TaskId::new("t"),
+                worker: WorkerId::new("w"),
+                summary: "ok".into()
+            }
+            .default_priority(),
             Priority::Critical
         );
     }

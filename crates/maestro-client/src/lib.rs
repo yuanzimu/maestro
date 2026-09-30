@@ -45,12 +45,20 @@ impl MaestroClient {
     }
 
     /// 发送一个请求（每次新建连接：简单可靠，CLI 场景足够）
-    pub fn call(&self, id: &str, method: Method, params: serde_json::Value) -> Result<serde_json::Value, ClientError> {
+    pub fn call(
+        &self,
+        id: &str,
+        method: Method,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, ClientError> {
         let mut stream =
             UnixStream::connect(&self.api_sock).map_err(|e| ClientError::Connect(e.to_string()))?;
-        let req = Request { id: id.into(), method, params };
-        let line = serde_json::to_string(&req)
-            .map_err(|e| ClientError::Protocol(e.to_string()))?;
+        let req = Request {
+            id: id.into(),
+            method,
+            params,
+        };
+        let line = serde_json::to_string(&req).map_err(|e| ClientError::Protocol(e.to_string()))?;
         stream
             .write_all(line.as_bytes())
             .and_then(|_| stream.write_all(b"\n"))
@@ -61,11 +69,14 @@ impl MaestroClient {
         reader
             .read_line(&mut resp_line)
             .map_err(|e| ClientError::Protocol(e.to_string()))?;
-        let resp: Response = serde_json::from_str(&resp_line)
-            .map_err(|e| ClientError::Protocol(e.to_string()))?;
+        let resp: Response =
+            serde_json::from_str(&resp_line).map_err(|e| ClientError::Protocol(e.to_string()))?;
         match resp {
             Response::Ok { result, .. } => Ok(result),
-            Response::Err { error, .. } => Err(ClientError::Rpc { code: error.code, message: error.message }),
+            Response::Err { error, .. } => Err(ClientError::Rpc {
+                code: error.code,
+                message: error.message,
+            }),
         }
     }
 
@@ -75,8 +86,8 @@ impl MaestroClient {
         from_seq: u64,
         mut on_event: F,
     ) -> Result<(), ClientError> {
-        let mut stream =
-            UnixStream::connect(&self.events_sock).map_err(|e| ClientError::Connect(e.to_string()))?;
+        let mut stream = UnixStream::connect(&self.events_sock)
+            .map_err(|e| ClientError::Connect(e.to_string()))?;
         let hello = serde_json::json!({ "from_seq": from_seq });
         stream
             .write_all(serde_json::to_string(&hello).unwrap().as_bytes())

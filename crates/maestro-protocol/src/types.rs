@@ -35,8 +35,14 @@ macro_rules! id_type {
 
 id_type!(TaskId, "任务唯一标识");
 id_type!(WorkerId, "Worker 唯一标识");
-id_type!(SessionRef, "CLI 会话引用（--resume 用，永远当 argv 数据不当 shell 文本）");
-id_type!(CheckpointRef, "checkpoint 引用（refs/maestro/cp/<task>/<seq>）");
+id_type!(
+    SessionRef,
+    "CLI 会话引用（--resume 用，永远当 argv 数据不当 shell 文本）"
+);
+id_type!(
+    CheckpointRef,
+    "checkpoint 引用（refs/maestro/cp/<task>/<seq>）"
+);
 id_type!(BatchId, "provider batch 标识");
 
 // ---------------------------------------------------------------------------
@@ -69,7 +75,10 @@ pub enum WorkerState {
 impl WorkerState {
     /// 终态判定（不再发生转移）
     pub fn is_terminal(self) -> bool {
-        matches!(self, WorkerState::Done | WorkerState::Failed | WorkerState::Cancelled)
+        matches!(
+            self,
+            WorkerState::Done | WorkerState::Failed | WorkerState::Cancelled
+        )
     }
 }
 
@@ -174,7 +183,9 @@ pub enum BlockedKind {
 // ---------------------------------------------------------------------------
 
 /// 事件/通知优先级。仅 Critical 级弹系统通知，其余进活动流。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Priority {
     /// 普通事件（进活动流，digest 批处理）
@@ -271,7 +282,11 @@ mod tests {
             SuspendReason::DaemonCrash,
         ];
         for r in auto {
-            assert_eq!(r.recovery_policy(), RecoveryPolicy::Auto, "{r:?} 应为自动恢复");
+            assert_eq!(
+                r.recovery_policy(),
+                RecoveryPolicy::Auto,
+                "{r:?} 应为自动恢复"
+            );
         }
         for r in manual {
             assert_eq!(

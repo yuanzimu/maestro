@@ -19,8 +19,14 @@ pub struct Request {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Response {
-    Ok { id: String, result: serde_json::Value },
-    Err { id: String, error: RpcError },
+    Ok {
+        id: String,
+        result: serde_json::Value,
+    },
+    Err {
+        id: String,
+        error: RpcError,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -195,8 +201,10 @@ mod tests {
         let req = Request {
             id: "req-1".into(),
             method: Method::ServerEmergencyStop,
-            params: serde_json::to_value(EmergencyStopParams { reason: Some("user_panic".into()) })
-                .unwrap(),
+            params: serde_json::to_value(EmergencyStopParams {
+                reason: Some("user_panic".into()),
+            })
+            .unwrap(),
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["method"], "server_emergency_stop");
@@ -206,8 +214,7 @@ mod tests {
     /// steering 默认 flush
     #[test]
     fn resume_all_default_flush() {
-        let params: ResumeAllParams =
-            serde_json::from_str("{}").expect("空对象应可解析");
+        let params: ResumeAllParams = serde_json::from_str("{}").expect("空对象应可解析");
         assert_eq!(params.steering, SteeringMode::Flush);
     }
 

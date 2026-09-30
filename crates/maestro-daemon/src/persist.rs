@@ -39,7 +39,9 @@ impl EventStore {
             );
             CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);",
         )?;
-        Ok(Self { conn: Mutex::new(conn) })
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
     /// 追加事件（publish 路径的 sink 调用）
@@ -72,7 +74,9 @@ impl EventStore {
         let mut stmt = match conn.prepare(sql) {
             Ok(s) => s,
             Err(e) => {
-                if cfg!(test) { eprintln!("[query] prepare err: {e}"); }
+                if cfg!(test) {
+                    eprintln!("[query] prepare err: {e}");
+                }
                 return vec![];
             }
         };
@@ -90,17 +94,23 @@ impl EventStore {
                         Ok(json) => match serde_json::from_str::<Envelope>(&json) {
                             Ok(env) => out.push(env),
                             Err(e) => {
-                                if cfg!(test) { eprintln!("[query] parse err: {e} json={json}"); }
+                                if cfg!(test) {
+                                    eprintln!("[query] parse err: {e} json={json}");
+                                }
                             }
                         },
                         Err(e) => {
-                            if cfg!(test) { eprintln!("[query] row err: {e}"); }
+                            if cfg!(test) {
+                                eprintln!("[query] row err: {e}");
+                            }
                         }
                     }
                 }
             }
             Err(e) => {
-                if cfg!(test) { eprintln!("[query] map err: {e}"); }
+                if cfg!(test) {
+                    eprintln!("[query] map err: {e}");
+                }
             }
         }
         out
@@ -133,9 +143,7 @@ mod tests {
     #[test]
     fn append_replay_roundtrip() {
         let store = EventStore::in_memory().unwrap();
-        let hub_envs: Vec<Envelope> = (1..=5)
-            .map(|i| Envelope::new(i, ev(i)))
-            .collect();
+        let hub_envs: Vec<Envelope> = (1..=5).map(|i| Envelope::new(i, ev(i))).collect();
         for e in &hub_envs {
             store.append(e).unwrap();
         }
@@ -170,4 +178,3 @@ mod tests {
         );
     }
 }
-

@@ -27,11 +27,15 @@ pub fn pids_in_group(pgid: u32) -> Vec<u32> {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        let Ok(pid) = name.parse::<u32>() else { continue };
+        let Ok(pid) = name.parse::<u32>() else {
+            continue;
+        };
         if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
             if let Some(after) = stat.rsplit(')').next() {
                 let mut fields = after.split_whitespace();
-                let (Some(state), Some(pgrp)) = (fields.next(), fields.nth(1)) else { continue };
+                let (Some(state), Some(pgrp)) = (fields.next(), fields.nth(1)) else {
+                    continue;
+                };
                 // 僵尸（Z）与已死（X）不算存活：SIGKILL 后未 wait 的进程仍在 /proc
                 if state == "Z" || state == "X" {
                     continue;
@@ -77,6 +81,7 @@ mod tests {
         let our = std::process::id();
         // 我们自己不在任意假 pgid 里
         assert!(pids_in_group(u32::MAX).is_empty());
-        assert!(!pids_in_group(our).is_empty() || pids_in_group(our).is_empty()); // 不 panic 即可
+        assert!(!pids_in_group(our).is_empty() || pids_in_group(our).is_empty());
+        // 不 panic 即可
     }
 }

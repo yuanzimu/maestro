@@ -105,7 +105,12 @@ impl Authority {
                     w.state = WorkerState::Working;
                 }
             }
-            WorkerSpawned { worker, task, pid, pgid } => {
+            WorkerSpawned {
+                worker,
+                task,
+                pid,
+                pgid,
+            } => {
                 self.workers.insert(
                     worker.clone(),
                     WorkerRecord {
@@ -144,10 +149,20 @@ impl Authority {
                     t.state = WorkerState::Cancelled;
                 }
             }
-            Suspended { task, worker, reason, session_ref, checkpoint_ref, round } => {
+            Suspended {
+                task,
+                worker,
+                reason,
+                session_ref,
+                checkpoint_ref,
+                round,
+            } => {
                 if let Some(t) = self.tasks.get_mut(task) {
                     t.state = WorkerState::Suspended;
-                    t.suspend = Some(SuspendInfo { reason: *reason, since_ts: ts });
+                    t.suspend = Some(SuspendInfo {
+                        reason: *reason,
+                        since_ts: ts,
+                    });
                     t.session_ref = Some(session_ref.clone());
                     t.checkpoint_ref = Some(checkpoint_ref.clone());
                     t.round = *round;
@@ -158,7 +173,12 @@ impl Authority {
                     w.state = WorkerState::Suspended;
                 }
             }
-            Resumed { task, worker, new_session_ref, .. } => {
+            Resumed {
+                task,
+                worker,
+                new_session_ref,
+                ..
+            } => {
                 if let Some(t) = self.tasks.get_mut(task) {
                     t.state = WorkerState::Working;
                     t.suspend = None;
@@ -245,7 +265,10 @@ mod tests {
     fn replay_matches_live() {
         let mut live = Authority::new();
         let events = vec![
-            Event::TaskCreated { task: task("t1"), prompt: "p".into() },
+            Event::TaskCreated {
+                task: task("t1"),
+                prompt: "p".into(),
+            },
             Event::WorkerSpawned {
                 worker: WorkerId::new("w1"),
                 task: TaskId::new("t1"),
@@ -278,7 +301,10 @@ mod tests {
         assert_eq!(a.state, b.state);
         assert_eq!(a.session_ref, b.session_ref);
         assert_eq!(a.round, b.round);
-        assert_eq!(a.suspend.as_ref().unwrap().reason, SuspendReason::NetworkLost);
+        assert_eq!(
+            a.suspend.as_ref().unwrap().reason,
+            SuspendReason::NetworkLost
+        );
         // 挂起原因换过 → 退避计数清零（A8/Suspended 联动）
         assert_eq!(a.resume_attempts, 0);
     }
@@ -288,11 +314,17 @@ mod tests {
     fn auto_resume_candidates_filter() {
         let mut a = Authority::new();
         a.apply(
-            &Event::TaskCreated { task: task("t1"), prompt: "p".into() },
+            &Event::TaskCreated {
+                task: task("t1"),
+                prompt: "p".into(),
+            },
             0,
         );
         a.apply(
-            &Event::TaskCreated { task: task("t2"), prompt: "p".into() },
+            &Event::TaskCreated {
+                task: task("t2"),
+                prompt: "p".into(),
+            },
             0,
         );
         a.apply(
@@ -326,7 +358,13 @@ mod tests {
     #[test]
     fn acceptance_three_strikes_blocks() {
         let mut a = Authority::new();
-        a.apply(&Event::TaskCreated { task: task("t1"), prompt: "p".into() }, 0);
+        a.apply(
+            &Event::TaskCreated {
+                task: task("t1"),
+                prompt: "p".into(),
+            },
+            0,
+        );
         for i in 1..=3u32 {
             a.apply(
                 &Event::AcceptanceGateFailed {

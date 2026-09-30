@@ -29,7 +29,9 @@ pub struct SharedCleanup {
 
 impl SharedCleanup {
     pub fn shared() -> Arc<Self> {
-        Arc::new(Self { pgids: Mutex::new(vec![]) })
+        Arc::new(Self {
+            pgids: Mutex::new(vec![]),
+        })
     }
 
     pub fn register(&self, pgid: u32) {
@@ -69,7 +71,13 @@ impl ScriptWorker {
         if let Some(c) = &cleanup {
             c.register(pgid);
         }
-        Ok(Self { child, pid, pgid, script_path, cleanup })
+        Ok(Self {
+            child,
+            pid,
+            pgid,
+            script_path,
+            cleanup,
+        })
     }
 
     /// 进程是否仍在运行（经 /proc 探测，无需 &mut self）
@@ -173,10 +181,12 @@ mod tests {
     fn sigstop_freezes_the_process() {
         let w = ScriptWorker::start(hanging_script(), None).expect("spawn");
         assert!(w.is_alive());
-        w.signal_group(nix::sys::signal::Signal::SIGSTOP).expect("SIGSTOP");
+        w.signal_group(nix::sys::signal::Signal::SIGSTOP)
+            .expect("SIGSTOP");
         std::thread::sleep(std::time::Duration::from_millis(50));
         assert!(w.is_stopped(), "进程组应进入 T 状态");
-        w.signal_group(nix::sys::signal::Signal::SIGCONT).expect("SIGCONT");
+        w.signal_group(nix::sys::signal::Signal::SIGCONT)
+            .expect("SIGCONT");
         std::thread::sleep(std::time::Duration::from_millis(50));
         assert!(!w.is_stopped(), "SIGCONT 后应恢复");
         assert!(w.is_alive());

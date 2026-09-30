@@ -5,7 +5,6 @@
 //! - resume 时 flush（按序投递）或 hold（丢弃但每条发 SteeringDropped 事件，不静默）
 //! - 同一任务排队，投递发生在轮边界（多轮驱动）
 
-use maestro_protocol::events::Event;
 use maestro_protocol::types::TaskId;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -29,7 +28,11 @@ pub struct SteeringQueue {
 impl SteeringQueue {
     pub fn open(data_dir: &Path) -> Self {
         let file = data_dir.join("steering.jsonl");
-        let mut q = Self { queues: Default::default(), next_seq: 1, file };
+        let mut q = Self {
+            queues: Default::default(),
+            next_seq: 1,
+            file,
+        };
         q.load();
         q
     }
@@ -100,7 +103,10 @@ impl SteeringQueue {
             queued_at: maestro_protocol::now_ms(),
         };
         self.next_seq += 1;
-        self.queues.entry(task.clone()).or_default().push_back(msg.clone());
+        self.queues
+            .entry(task.clone())
+            .or_default()
+            .push_back(msg.clone());
         self.persist_append(&msg);
         msg
     }

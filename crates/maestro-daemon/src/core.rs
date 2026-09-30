@@ -10,12 +10,12 @@ use crate::emergency::{self, EmergencyPhase};
 use crate::eventhub::EventHub;
 use crate::state::Authority;
 use crate::steering::SteeringQueue;
-use crate::suspend::{ReapReport, RecoveryMsg};
+use crate::suspend::ReapReport;
 use crate::worker::{self, SpawnSpec, WorkerMeta};
 use maestro_protocol::api::{
-    CheckpointRollbackParams, CheckpointRollbackResult, EmergencyStopParams, EmergencyStopResult,
-    Method, Request, Response, ResumeAllParams, RpcError, ServerStatusResult, SteeringMode,
-    TaskCreateParams, TaskCreateResult, TaskSteerParams,
+    CheckpointRollbackParams, CheckpointRollbackResult, EmergencyStopParams, Method, Request,
+    Response, ResumeAllParams, RpcError, ServerStatusResult, SteeringMode, TaskCreateParams,
+    TaskCreateResult, TaskSteerParams,
 };
 use maestro_protocol::events::{Event, Task};
 use maestro_protocol::types::*;
@@ -63,18 +63,22 @@ impl Default for CoreConfig {
 
 /// 发布即应用的上下文（单一事实源）
 pub struct Ctx {
-    pub hub: EventHub,
+    pub hub: Arc<EventHub>,
     pub authority: Authority,
     pub clock: Arc<dyn maestro_protocol::Clock>,
 }
 
 impl Ctx {
     pub fn new(
-        hub: EventHub,
+        hub: Arc<EventHub>,
         authority: Authority,
         clock: Arc<dyn maestro_protocol::Clock>,
     ) -> Self {
-        Self { hub, authority, clock }
+        Self {
+            hub,
+            authority,
+            clock,
+        }
     }
 
     /// 单一事实源入口：广播 + 状态转移（+ hub sink 持久化）
@@ -116,7 +120,7 @@ impl Core {
         let store = crate::persist::EventStore::open(&cfg.data_dir)
             .ok()
             .map(|s| Arc::new(std::sync::Mutex::new(s)));
-        let hub = EventHub::new();
+        let hub = Arc::new(EventHub::new());
         if let Some(s) = &store {
             let s = s.clone();
             hub.set_sink(Box::new(move |env| {
@@ -158,7 +162,7 @@ impl Core {
 
         // 3. 重建 Core
         let (tx, rx) = channel();
-        let hub = EventHub::new();
+        let hub = Arc::new(EventHub::new());
         hub.set_seq_floor(max_seq + 1);
         if let Some(s) = &store {
             let s = s.clone();
@@ -191,13 +195,21 @@ impl Core {
         self.store.clone()
     }
 
+    /// EventHub 共享句柄（server 事件线程订阅用 —— 不需要 Core 锁）
+    pub fn hub_handle(&self) -> Arc<EventHub> {
+        self.ctx.hub.clone()
+    }
+
     fn mark_recovered_as_daemon_crash(&mut self) {
         let crashed: Vec<TaskId> = self
             .ctx
             .authority
             .tasks
             .values()
-            .filter(|t| t.state == WorkerState::Working || t.state == WorkerState::Queued && t.worker.is_some())
+            .filter(|t| {
+                t.state == WorkerState::Working
+                    || t.state == WorkerState::Queued && t.worker.is_some()
+            })
             .map(|t| t.task.id.clone())
             .collect();
         for task in crashed {
@@ -206,7 +218,9 @@ impl Core {
                 (
                     t.worker.clone().unwrap_or_else(|| WorkerId::new("unknown")),
                     t.session_ref.clone().unwrap_or_else(|| SessionRef::new("")),
-                    t.checkpoint_ref.clone().unwrap_or_else(|| CheckpointRef::new("")),
+                    t.checkpoint_ref
+                        .clone()
+                        .unwrap_or_else(|| CheckpointRef::new("")),
                     t.round,
                 )
             };
@@ -250,8 +264,8 @@ impl Core {
         match req.method {
             Method::ServerStatus => self.api_status(),
             Method::ServerEmergencyStop => {
-                let _params: EmergencyStopParams =
-                    serde_json::from_value(req.params.clone()).unwrap_or(EmergencyStopParams { reason: None });
+                let _params: EmergencyStopParams = serde_json::from_value(req.params.clone())
+                    .unwrap_or(EmergencyStopParams { reason: None });
                 self.api_emergency_stop()
             }
             Method::ServerResumeAll => {
@@ -284,7 +298,11 @@ impl Core {
                 self.ok(&req, serde_json::json!({ "tasks": tasks }))
             }
             Method::TaskGet => {
-                let task_id = req.params.get("task").and_then(|v| v.as_str()).map(TaskId::new);
+                let task_id = req
+                    .params
+                    .get("task")
+                    .and_then(|v| v.as_str())
+                    .map(TaskId::new);
                 match task_id.and_then(|id| self.ctx.authority.get(&id).cloned()) {
                     Some(t) => self.ok(
                         &req,
@@ -306,21 +324,33 @@ impl Core {
                 self.api_steer(&req, &params)
             }
             Method::TaskPause => {
-                let task_id = req.params.get("task").and_then(|v| v.as_str()).map(TaskId::new);
+                let task_id = req
+                    .params
+                    .get("task")
+                    .and_then(|v| v.as_str())
+                    .map(TaskId::new);
                 match task_id {
                     Some(id) => self.api_pause(&req, &id),
                     None => self.err(&req, -400, "missing task"),
                 }
             }
             Method::TaskResume => {
-                let task_id = req.params.get("task").and_then(|v| v.as_str()).map(TaskId::new);
+                let task_id = req
+                    .params
+                    .get("task")
+                    .and_then(|v| v.as_str())
+                    .map(TaskId::new);
                 match task_id {
                     Some(id) => self.api_resume(&req, &id),
                     None => self.err(&req, -400, "missing task"),
                 }
             }
             Method::TaskCancel => {
-                let task_id = req.params.get("task").and_then(|v| v.as_str()).map(TaskId::new);
+                let task_id = req
+                    .params
+                    .get("task")
+                    .and_then(|v| v.as_str())
+                    .map(TaskId::new);
                 match task_id {
                     Some(id) => {
                         let ok = emergency::cancel_task(&mut self.ctx, &self.metas, &id);
@@ -373,11 +403,7 @@ impl Core {
                     serde_json::from_value(req.params.clone());
                 match params {
                     Ok(p) => {
-                        let task = self
-                            .ctx
-                            .authority
-                            .get(&p.task)
-                            .cloned();
+                        let task = self.ctx.authority.get(&p.task).cloned();
                         match task {
                             Some(t) => {
                                 let cps = crate::checkpoints::list(
@@ -403,10 +429,11 @@ impl Core {
             }
             Method::CheckpointCreate => self.err(&req, -501, "not implemented yet"),
             Method::CheckpointRollback => {
-                let params: CheckpointRollbackParams = match serde_json::from_value(req.params.clone()) {
-                    Ok(p) => p,
-                    Err(_) => return self.err(&req, -400, "bad params"),
-                };
+                let params: CheckpointRollbackParams =
+                    match serde_json::from_value(req.params.clone()) {
+                        Ok(p) => p,
+                        Err(_) => return self.err(&req, -400, "bad params"),
+                    };
                 self.api_rollback(&req, params)
             }
         }
@@ -443,8 +470,7 @@ impl Core {
     }
 
     fn api_resume_all(&mut self, mode: SteeringMode) -> Response {
-        let resumed =
-            emergency::resume_all(&mut self.ctx, &self.metas, &mut self.steering, mode);
+        let resumed = emergency::resume_all(&mut self.ctx, &self.metas, &mut self.steering, mode);
         self.emergency = EmergencyPhase::None;
         // B12：调度器解冻 —— 冻结期入队的任务此刻启动
         let queued: Vec<TaskId> = self
@@ -458,7 +484,10 @@ impl Core {
         for task in queued {
             match self.spawn_worker_for(&task) {
                 Ok(w) => {
-                    self.ctx.publish(Event::TaskStarted { task: task.clone(), worker: w });
+                    self.ctx.publish(Event::TaskStarted {
+                        task: task.clone(),
+                        worker: w,
+                    });
                 }
                 Err(e) => {
                     self.ctx.publish(Event::TaskFailed {
@@ -516,8 +545,11 @@ impl Core {
                 );
                 self.ok(
                     req,
-                    serde_json::to_value(TaskCreateResult { task, worker: worker_id })
-                        .unwrap_or_default(),
+                    serde_json::to_value(TaskCreateResult {
+                        task,
+                        worker: worker_id,
+                    })
+                    .unwrap_or_default(),
                 )
             }
             Err(e) => self.err(req, -500, &format!("spawn failed: {e}")),
@@ -556,7 +588,10 @@ impl Core {
                 worker: w.clone(),
                 reason: SuspendReason::UserPause,
                 session_ref: t.session_ref.clone().unwrap_or_else(|| SessionRef::new("")),
-                checkpoint_ref: t.checkpoint_ref.clone().unwrap_or_else(|| CheckpointRef::new("")),
+                checkpoint_ref: t
+                    .checkpoint_ref
+                    .clone()
+                    .unwrap_or_else(|| CheckpointRef::new("")),
                 round: t.round,
             });
             return self.ok(req, serde_json::json!({ "paused": true }));
@@ -656,7 +691,10 @@ impl Core {
                 worker: exit.worker.clone(),
                 reason: SuspendReason::NetworkLost,
                 session_ref: t.session_ref.clone().unwrap_or_else(|| SessionRef::new("")),
-                checkpoint_ref: t.checkpoint_ref.clone().unwrap_or_else(|| CheckpointRef::new("")),
+                checkpoint_ref: t
+                    .checkpoint_ref
+                    .clone()
+                    .unwrap_or_else(|| CheckpointRef::new("")),
                 round: t.round,
             });
             self.schedule_resume(&exit.task, 0);
@@ -714,7 +752,11 @@ impl Core {
                 self.ctx.publish(Event::Resumed {
                     task: task.clone(),
                     worker: w,
-                    from_reason: t.suspend.as_ref().map(|s| s.reason).unwrap_or(SuspendReason::NetworkLost),
+                    from_reason: t
+                        .suspend
+                        .as_ref()
+                        .map(|s| s.reason)
+                        .unwrap_or(SuspendReason::NetworkLost),
                     via: ResumeVia::Auto,
                     new_session_ref: None,
                 });
@@ -805,13 +847,19 @@ impl Core {
     }
 
     fn ok(&self, req: &Request, result: serde_json::Value) -> Response {
-        Response::Ok { id: req.id.clone(), result }
+        Response::Ok {
+            id: req.id.clone(),
+            result,
+        }
     }
 
     fn err(&self, req: &Request, code: i32, msg: &str) -> Response {
         Response::Err {
             id: req.id.clone(),
-            error: RpcError { code, message: msg.into() },
+            error: RpcError {
+                code,
+                message: msg.into(),
+            },
         }
     }
 }
@@ -830,8 +878,4 @@ fn is_disconnect_error(stderr: &str) -> bool {
     ];
     let lower = stderr.to_lowercase();
     PATTERNS.iter().any(|p| lower.contains(p))
-}
-
-fn self_data_dir_placeholder() -> PathBuf {
-    PathBuf::from("/dev/null")
 }

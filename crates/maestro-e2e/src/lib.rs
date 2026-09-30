@@ -49,13 +49,22 @@ impl TestDaemon {
                 core.lock().unwrap().run();
             });
         }
-        Self { tx, clock, data_dir: dir, _tmp: tmp }
+        Self {
+            tx,
+            clock,
+            data_dir: dir,
+            _tmp: tmp,
+        }
     }
 
     /// 直调 API（经 Core 的消息循环 —— 真实路径）
     pub fn api(&self, method: Method, params: serde_json::Value) -> serde_json::Value {
         let (rtx, rrx) = std::sync::mpsc::channel();
-        let req = Request { id: "test".into(), method, params };
+        let req = Request {
+            id: "test".into(),
+            method,
+            params,
+        };
         self.tx.send(CoreMsg::Api(req, rtx)).unwrap();
         match rrx.recv_timeout(std::time::Duration::from_secs(10)) {
             Ok(Response::Ok { result, .. }) => result,
@@ -83,7 +92,10 @@ impl TestDaemon {
 
     /// 读任务当前状态
     pub fn task_state(&self, task: &TaskId) -> WorkerState {
-        let v = self.api(Method::TaskGet, serde_json::json!({ "task": task.as_str() }));
+        let v = self.api(
+            Method::TaskGet,
+            serde_json::json!({ "task": task.as_str() }),
+        );
         serde_json::from_value(v["state"].clone()).expect("state")
     }
 

@@ -157,7 +157,9 @@ fn pids_in_group_alive(pgid: u32) -> Vec<u32> {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        let Ok(pid) = name.parse::<u32>() else { continue };
+        let Ok(pid) = name.parse::<u32>() else {
+            continue;
+        };
         if let Some((state, pgrp, _st)) = proc_stat(pid) {
             if pgrp == pgid && state != "Z" && state != "X" {
                 found.push(pid);
@@ -194,10 +196,7 @@ pub fn proc_stat(pid: u32) -> Option<(String, u32, u64)> {
 
 /// PID 是否仍是我们启动的那个进程（pid + start_time 双因子，防复用）
 pub fn is_our_process(pid: u32, start_time: u64) -> bool {
-    match proc_stat(pid) {
-        Some((_, _, st)) if st == start_time => true,
-        _ => false,
-    }
+    matches!(proc_stat(pid), Some((_, _, st)) if st == start_time)
 }
 
 fn proc_start_time(pid: u32) -> Option<u64> {
@@ -398,7 +397,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (tx, rx) = mpsc::channel();
         spawn_worker(
-            spec("/bin/sh", &["-c", "echo 'connection reset by peer' >&2; exit 1"], tmp.path()),
+            spec(
+                "/bin/sh",
+                &["-c", "echo 'connection reset by peer' >&2; exit 1"],
+                tmp.path(),
+            ),
             "/tmp/maestro.sock",
             tx,
         )
