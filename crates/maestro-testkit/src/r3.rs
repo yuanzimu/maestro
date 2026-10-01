@@ -74,9 +74,26 @@ impl R3Driver {
         if let Some(sid) = &self.session {
             cmd.arg("--resume").arg(sid);
         }
-        let out = cmd
-            .output()
-            .map_err(|e| R3Error::CliFailed(format!("spawn: {e}"), String::new()))?;
+        // ETXTBSY 瞬态保护：脚本刚落盘即 exec 时（写回未完成）偶发，
+        // 短退避重试
+        let mut out = None;
+        for attempt in 0..5 {
+            match cmd.output() {
+                Ok(o) => {
+                    out = Some(o);
+                    break;
+                }
+                Err(e) if attempt < 4 && e.raw_os_error() == Some(26) => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(e) => {
+                    return Err(R3Error::CliFailed(format!("spawn: {e}"), String::new()))
+                }
+            }
+        }
+        let Some(out) = out else {
+            return Err(R3Error::CliFailed("spawn: retries exhausted".into(), String::new()));
+        };
         if !out.status.success() {
             return Err(R3Error::CliFailed(
                 format!("exit={:?}", out.status.code()),

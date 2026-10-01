@@ -281,6 +281,25 @@ P2：U4 完整版（需内置 Executor D2）· U6 v2 检讨（需失败事件库
 
 **P0 验收**：kill -9 恢复无损（**含 steering 队列不丢**）/ 状态判定 100% / blocked<1s / 账本能回答「这个任务花了多少 token」/ **多轮驱动下任务可被中途注入指示并影响下一轮** / **断连后任务呈 suspended 而非 failed，恢复自动续跑** / **emergency_stop：FREEZE<100ms、无孤儿进程残留（kill -9 daemon 后重启验证）、checkpoint 可恢复（含 pre-rollback 安全垫）——不变量 I1~I5 以设计 §3.3/§10-11 用例组 A/B 全绿为准** / **doctor 一条命令定位常见故障**。
 
+#### P0 实施进度（2026-10-01，20 轮迭代 R1~R20）
+
+| 状态 | 任务 | 说明 |
+|---|---|---|
+| ✅ | 0.1 / 0.2 / 0.3 / 0.4 / 0.5 | 六 crate workspace（+testkit/e2e）、protocol schema、单线程 Core、双 socket IPC、Worker 运行时（stdout 落文件防 SIGSTOP 死锁、PID+start_time 双因子、三级升级杀） |
+| ✅ | 0.7 任务队列 + Goal 3 轮 | 并发槽位（默认 4）+ workdir 互斥 + FIFO 补位（queue_seq 消歧）+ MAX_QUEUE_DEPTH=100 防风暴（R12 调研落地：Buildkite/gitlab-runner 语义） |
+| ✅ | 0.10 验收门 v0 | 读回校验（SipHash 内容指纹，修同长碰撞）+ 3 振出局 blocked(AcceptanceFailed) + TaskRequeued 重试路径 + **失败差异反思回喂**（aider 模式，steering 注入） |
+| ✅ | 0.12 持久化 | SQLite WAL 事件溯源 + kill -9 重放恢复 + 恢复时自动重排退避调度（R11 审计补的缺口） |
+| ✅ | 0.13 CLI | status/task/worker/inbox/stop/resume/events/doctor/shutdown + 表格化列表 + 收件箱行动建议（R19） |
+| 🔶 | 0.14 LLM client | 骨架完成：OpenAI 兼容（ureq 阻塞式）+ 牌价表 + 微美分计价 + UsageEntry 口径；T1/U3/U8 消费方在 P1 接入 |
+| 🔶 | 0.15 多轮驱动 | R3 harness 完成（机制层 6 场景绿：session 续接/轻推持久/坏 sid/kill -9 恢复/成本账）；**真实 claude CLI 验证待 API key**，Driver 已兼容真实 CLI 参数 |
+| ✅ | 0.16 steering 队列 | jsonl 持久化 + flush/hold + kill -9 不丢 + 重试轮回喂投递 |
+| ✅ | 0.17 suspended 状态机 | 七值枚举 + 自动恢复矩阵（30s→5m 退避，10 次升 blocked）+ 孤儿清理（绝不收养） |
+| ✅ | 0.18 emergency_stop | FREEZE→SNAPSHOT→DECIDE 三阶段 + 竞态修复（过期退出误杀/死 worker 假恢复，R14） |
+| ✅ | 0.19 checkpoint | git plumbing 零打扰 + pre-rollback 安全垫 + pinned（baseline/验收点）+ 滚动 GC |
+| ⬜ | 0.6 / 0.8 / 0.9 / 0.11 | Claude headless 适配器（待 R2/R3 真实 CLI）、模型路由框架、账本 UI 呈现、allowlist 安全基线 |
+
+**测试**：101 项全绿（daemon 单测 46 + e2e 36 + protocol 12 + testkit 8 + CLI 3，clippy -D warnings 零告警）。里程碑见 git log（d84e300→c580041，11 个提交）。**已知缺陷（v0 接受）**见 [acceptance.rs](../crates/maestro-daemon/src/acceptance.rs) 模块头：无产物型任务误判（0.15 结构化验收断言接管）、workdir 外产物不可见。
+
 ### P1 Desktop MVP（4~6 周）—— 按信任旅程组织为三个 Sprint
 
 目标：跨平台客户端（Win/macOS/Linux）+ Token 经济全量落地 + U 组信任体验。**v2.2 重组：不再按技术模块排列，而是按用户旅程分 Sprint**——每个 Sprint 出口是一个用户可感知的信任断言。
@@ -408,7 +427,7 @@ Worker 市场（G7）/ 插件系统（H1）/ Web 客户端（H2，含移动端�
 |---|---|---|---|---|---|---|
 | R1 | rquickjs 嵌入摸底 | 嵌入 API/异步桥/二进制增量实测是否 ~2MB | 最小示例嵌入 + 测体积 | 技术备忘 + go/no-go（备选：wasmtime wasi-mini） | P1-B6 Code Mode 选型 | P1 Sprint B 开工前 |
 | R2 | 小模型 headless CLI 可用性 | Haiku/Flash/4o-mini 经各家 CLI headless 调用的支持度与 stream-json 格式差异 | 各 CLI 实测 | 适配器矩阵表 → 回填 0.6/B7 适配器计划 | P1-A6 模型路由 L1 池 | P1 Sprint A 开工前 |
-| R3 | 多轮驱动验证 | `claude -p` 单轮 + `--resume` 续接：上下文保持度？每轮成本递增？轮间可注入 steering？并发 resume 行为？ | **验证协议见 [R3_PROTOCOL.md](./R3_PROTOCOL.md)**：9 场景矩阵（Block 项/记录项分级）+ 提前止损顺序（S1→S3→S7c 先跑）+ 报告模板 | 验证报告 → 0.15 形态 go/no-go/调整；失败出口已定义（回退单轮长跑/单写者锁等） | P0 0.15/0.16（**P0 内最优先**） | P0.15 开工前 |
+| R3 | 多轮驱动验证 | `claude -p` 单轮 + `--resume` 续接：上下文保持度？每轮成本递增？轮间可注入 steering？并发 resume 行为？ | **验证协议见 [R3_PROTOCOL.md](./R3_PROTOCOL.md)**：9 场景矩阵（Block 项/记录项分级）+ 提前止损顺序（S1→S3→S7c 先跑）+ 报告模板 | 验证报告 → 0.15 形态 go/no-go/调整；失败出口已定义（回退单轮长跑/单写者锁等） | P0 0.15/0.16（**P0 内最优先**） | P0.15 开工前。**2026-10-01 进展：机制层 harness 完成**（testkit::r3 Driver + mock CLI，S1/S2/S3+S4/S6/S7a/S7c 6 场景绿；真实 CLI 协议待 API key，Driver 参数已兼容） |
 | R4 | **Gemini off-peak 触发机制**（设计 §5 前提） | ① 折扣是自动计费（按时窗）还是需参数/API 开关？② 窗口定义与单位（UTC？本地？滚动？）③ 适用 SKU 与比例（是否全线 -50%）④ 与 Gemini 自家 Batch 的叠加规则 | 官方定价页/API 参考文档研究 + 活探针：测试 key 在窗内/窗外各发最小请求，对比 usageMetadata 与计费字段 | `discount-catalog.toml` 首条实测数据 + 设计 §5 表更新为「已验证」 | **2.17 off-peak 窗口管理实现方式**（自动计费→daemon 只排时间；参数开关→适配器传参）；A4 审批门 ETA 的时区计算 | P2 2.17 开工前；文档部分可立即做 |
 | R5 | **Batch API 工具调用支持边界**（设计 §7.2 前提） | ① batch item 是否支持 tools/tool_choice？② 单 item 能否多轮工具循环，还是一问一答？③ 输出文件中 tool_calls 格式 ④ 限额（OpenAI 50k 请求/200MB/batch）与分片规则 ⑤ 已提交 batch 能否撤销 ⑥ item 级失败语义与计费 | 文档 + 活探针：提交 3-item 批次（1 个带工具调用、1 个多轮、1 个普通），解析输出文件 | eligibility 检查清单（哪些步骤形态可走 batch）→ 回填 2.17 deferrable 分类器；设计 §7.2 约束表改「已验证」 | **batch 路径宽度**（若工具不支持→收窄为纯分析步骤，仍有价值）；**急停与在途 batch 的交互**（若不可撤销→处置定为「标记+轮询」而非「取消」，用例 B14 按此落地） | P2 2.18 开工前；结论影响设计 §3/§7 两处 |
 
