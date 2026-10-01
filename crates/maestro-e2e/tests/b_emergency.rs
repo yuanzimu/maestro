@@ -28,12 +28,17 @@ fn b1_b5_emergency_freeze_snapshot_resume() {
     println!("freeze_ms = {freeze_ms}");
     // I1：<100ms（测试机上留宽限到 500ms，CI 抖动保护）
     assert!(freeze_ms < 500, "FREEZE 超时: {freeze_ms}ms");
-    // worker 进入 T 态
-    assert_eq!(
-        maestro_daemon::worker::proc_stat(pid).map(|(st, _, _)| st),
-        Some("T".to_string()),
-        "worker 应 SIGSTOP"
-    );
+    // worker 进入 T 态（轮询：SIGSTOP 送达前可能瞬态 D —— 不可中断 IO
+    // 中的进程收到 SIGSTOP 要等 IO 完成才转 T，全量套件高负载下常见）
+    let mut stopped = false;
+    for _ in 0..100 {
+        if maestro_daemon::worker::proc_stat(pid).map(|(st, _, _)| st) == Some("T".to_string()) {
+            stopped = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(stopped, "worker 应在 2s 内进入 T 态（SIGSTOP）");
     // 任务 suspended(EmergencyStop)
     assert!(d.wait_state(&t, WorkerState::Suspended, 2000));
     let v = d.api(Method::TaskGet, serde_json::json!({ "task": t.as_str() }));

@@ -4,7 +4,7 @@
 //! → 视为没产出 → AcceptanceGateFailed。三次失败 → blocked(AcceptanceFailed)。
 //!
 //! 局限（v0 明知接受）：
-//! - 只比对 (路径, 大小)：改内容不改大小、改完又还原 → 检测不到
+//! - SipHash 内容比对：改完又还原 → 检测不到（真·无进展）
 //! - 构建产物目录（target/ 等）不算产物 —— 防「只 cargo build 不改代码」的假完成
 //! - 产物写在 workdir 之外（如 /tmp）→ 检测不到（误判为假完成）
 //! - workdir 与 daemon data_dir 重叠 → 读回不可观测，门自动通过（老语义）
@@ -12,9 +12,11 @@
 //!   验收标准升级为「结构化验收断言」
 
 use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
-/// worktree 快照：文件集合（相对路径 + 字节数）
+/// worktree 快照：文件集合（相对路径 + 内容哈希）。
+/// 哈希而非字节数：防「同长度不同内容」的假完成碰撞（R18 负载测试抓到）。
 pub type Snapshot = HashSet<(PathBuf, u64)>;
 
 /// 读回校验的观测能力
@@ -40,6 +42,34 @@ const IGNORED_DIRS: &[&str] = &[
 
 /// 快照条目上限（防超大目录拖慢 Core 线程）
 const MAX_ENTRIES: usize = 50_000;
+/// 单文件哈希读取上限（更大的文件退化为「路径+长度」混合哈希）
+const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
+
+/// 文件指纹：内容哈希（SipHash）。超大文件只哈希首 8MB + 长度。
+fn file_fingerprint(path: &Path) -> u64 {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return 0;
+    };
+    let len = meta.len();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    if len <= MAX_FILE_BYTES {
+        if let Ok(bytes) = std::fs::read(path) {
+            bytes.hash(&mut h);
+            return h.finish();
+        }
+    } else if let Ok(mut f) = std::fs::File::open(path) {
+        use std::io::Read;
+        let mut buf = vec![0u8; MAX_FILE_BYTES as usize];
+        if f.read(&mut buf).is_ok() {
+            buf.hash(&mut h);
+            len.hash(&mut h); // 尾部未读，掺长度
+            return h.finish();
+        }
+    }
+    // 读不了内容：退化为长度
+    len.hash(&mut h);
+    h.finish()
+}
 
 /// 对 workdir 做文件级快照（符号链接跳过，防循环）。
 /// `exclude`：daemon 数据目录等不得计入产物的路径（及其子树）。
@@ -88,10 +118,7 @@ fn walk(root: &Path, rel: PathBuf, out: &mut Snapshot, budget: &mut usize, exclu
             *budget -= 1;
             walk(root, child_rel, out, budget, excluded);
         } else if ft.is_file() {
-            let Ok(meta) = e.metadata() else {
-                continue;
-            };
-            out.insert((child_rel, meta.len()));
+            out.insert((child_rel, file_fingerprint(&e.path())));
         }
         // symlink：不跟进（防循环 + 产物应以真实文件为准）
     }
@@ -144,6 +171,20 @@ mod tests {
         std::fs::write(tmp.path().join("a.txt"), "aaaaaa").unwrap();
         let after = snap(tmp.path());
         assert!(changed(&before, &after), "同路径大小变化应判定为有产物");
+    }
+
+    /// R18 负载测试抓到的碰撞：同字节数不同内容（t-10 vs t-12 覆写同文件）
+    #[test]
+    fn same_length_different_content_detected() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("out.txt"), "t-10\n").unwrap();
+        let before = snap(tmp.path());
+        std::fs::write(tmp.path().join("out.txt"), "t-12\n").unwrap();
+        let after = snap(tmp.path());
+        assert!(
+            changed(&before, &after),
+            "同长度不同内容必须判定为有产物（内容哈希）"
+        );
     }
 
     #[test]
