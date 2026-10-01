@@ -47,7 +47,16 @@ pub struct CoreConfig {
     pub worker_program: String,
     pub worker_args: Vec<String>,
     pub socket_path: String,
+    /// 最大并行 worker 数（槽位上限；超出入队）。
+    /// 槽位语义：活 worker（含 SIGSTOP 挂起中的）各占 1。
+    pub max_parallel_workers: usize,
 }
+
+/// 默认槽位数：本地守护进程的保守起点（调研 R12 校准项）
+pub const DEFAULT_MAX_PARALLEL_WORKERS: usize = 4;
+
+/// 排队深度上限（R12 调研：溢出全排队不拒绝，但要有防风暴闸）
+pub const MAX_QUEUE_DEPTH: usize = 100;
 
 impl Default for CoreConfig {
     fn default() -> Self {
@@ -57,6 +66,7 @@ impl Default for CoreConfig {
             worker_program: "/bin/sh".into(),
             worker_args: vec!["-c".into(), "echo '(maestro placeholder worker)'".into()],
             socket_path: "/tmp/maestro.sock".into(),
+            max_parallel_workers: DEFAULT_MAX_PARALLEL_WORKERS,
         }
     }
 }
@@ -483,41 +493,8 @@ impl Core {
     fn api_resume_all(&mut self, mode: SteeringMode) -> Response {
         let resumed = emergency::resume_all(&mut self.ctx, &self.metas, &mut self.steering, mode);
         self.emergency = EmergencyPhase::None;
-        // B12：调度器解冻 —— 冻结期入队/验收失败重试被搁置的任务此刻启动。
-        // 判据：Queued 未启动，或 Working 但 worker 已退出（gate 重试被冻结拦下）。
-        let pending: Vec<TaskId> = self
-            .ctx
-            .authority
-            .tasks
-            .values()
-            .filter(|t| match t.state {
-                WorkerState::Queued => t.worker.is_none(),
-                WorkerState::Working => t
-                    .worker
-                    .as_ref()
-                    .map(|w| !self.metas.contains_key(w))
-                    .unwrap_or(true),
-                _ => false,
-            })
-            .map(|t| t.task.id.clone())
-            .collect();
-        for task in pending {
-            match self.spawn_worker_for(&task) {
-                Ok(w) => {
-                    self.ctx.publish(Event::TaskStarted {
-                        task: task.clone(),
-                        worker: w,
-                    });
-                }
-                Err(e) => {
-                    self.ctx.publish(Event::TaskFailed {
-                        task: task.clone(),
-                        worker: WorkerId::new("none"),
-                        error: format!("post-unfreeze spawn failed: {e}"),
-                    });
-                }
-            }
-        }
+        // B12：调度器解冻 —— 补位启动冻结期入队/被搁置的任务（受槽位约束）
+        self.try_start_queued();
         Response::Ok {
             id: String::new(),
             result: serde_json::json!({ "resumed": resumed }),
@@ -544,34 +521,55 @@ impl Core {
             task: task.clone(),
             prompt: params.prompt.clone(),
         });
+        // baseline checkpoint：入队即锚点（spawn 前 —— 防快 worker 抢先落盘）
+        let _ = crate::checkpoints::capture(
+            std::path::Path::new(&workdir),
+            &task_id,
+            0,
+            CpReason::Baseline,
+            self.ctx.clock.as_ref(),
+        );
 
-        // 急停期间新任务只入队不启动（用例 B12）
-        if self.emergency == EmergencyPhase::Frozen {
+        // 防风暴闸：排队深度超限直接拒绝（R12 调研建议）
+        let queued_depth = self
+            .ctx
+            .authority
+            .tasks
+            .values()
+            .filter(|t| t.state == WorkerState::Queued && t.worker.is_none())
+            .count();
+        if queued_depth >= MAX_QUEUE_DEPTH {
+            return self.err(req, -429, "queue depth limit reached");
+        }
+
+        // 急停期间新任务只入队不启动（用例 B12）；并发满 / 同 workdir 被
+        // 活 worker 占用，同样入队（R13 调度器 + workdir 互斥）
+        if self.emergency == EmergencyPhase::Frozen
+            || self.metas.len() >= self.cfg.max_parallel_workers
+            || self.workdir_occupied(&workdir)
+        {
+            let reason = if self.emergency == EmergencyPhase::Frozen {
+                "emergency_frozen"
+            } else if self.metas.len() >= self.cfg.max_parallel_workers {
+                "slots_full"
+            } else {
+                "workdir_busy"
+            };
             return self.ok(
                 req,
-                serde_json::json!({ "task": task, "queued": true, "reason": "emergency_frozen" }),
+                serde_json::json!({ "task": task, "queued": true, "reason": reason }),
             );
         }
 
         match self.spawn_worker_for(&task_id) {
-            Ok(worker_id) => {
-                // baseline checkpoint
-                let _ = crate::checkpoints::capture(
-                    std::path::Path::new(&workdir),
-                    &task_id,
-                    0,
-                    CpReason::Baseline,
-                    self.ctx.clock.as_ref(),
-                );
-                self.ok(
-                    req,
-                    serde_json::to_value(TaskCreateResult {
-                        task,
-                        worker: worker_id,
-                    })
-                    .unwrap_or_default(),
-                )
-            }
+            Ok(worker_id) => self.ok(
+                req,
+                serde_json::to_value(TaskCreateResult {
+                    task,
+                    worker: Some(worker_id),
+                })
+                .unwrap_or_default(),
+            ),
             Err(e) => self.err(req, -500, &format!("spawn failed: {e}")),
         }
     }
@@ -623,7 +621,7 @@ impl Core {
         let Some(t) = self.ctx.authority.get(task).cloned() else {
             return self.err(req, -404, "task not found");
         };
-        // blocked → 用户确认重试：重新入队（验收计数清零）+ 立即启动
+        // blocked → 用户确认重试：重新入队（验收计数清零）；槽位空则立即启动
         if t.state == WorkerState::Blocked {
             if self.emergency == EmergencyPhase::Frozen {
                 return self.err(req, -409, "emergency frozen; resume_all first");
@@ -633,16 +631,8 @@ impl Core {
                 task: task.clone(),
                 from_kind,
             });
-            return match self.spawn_worker_for(task) {
-                Ok(w) => {
-                    self.ctx.publish(Event::TaskStarted {
-                        task: task.clone(),
-                        worker: w,
-                    });
-                    self.ok(req, serde_json::json!({ "requeued": true }))
-                }
-                Err(e) => self.err(req, -500, &format!("requeue spawn failed: {e}")),
-            };
+            self.try_start_queued();
+            return self.ok(req, serde_json::json!({ "requeued": true }));
         }
         if t.state != WorkerState::Suspended {
             return self.err(req, -409, "task not suspended");
@@ -705,11 +695,112 @@ impl Core {
     }
 
     // -----------------------------------------------------------------------
+    // 队列调度器（R13）
+    // -----------------------------------------------------------------------
+
+    /// 槽位判定：活 worker（含 SIGSTOP 挂起中的）各占 1。
+    fn slots_free(&self) -> bool {
+        self.metas.len() < self.cfg.max_parallel_workers
+    }
+
+    /// workdir 是否被某个活 worker 占用（互斥：并发写工作区 = 产物互踩）
+    fn workdir_occupied(&self, workdir: &str) -> bool {
+        self.metas.values().any(|m| {
+            self.ctx
+                .authority
+                .workers
+                .get(&m.id)
+                .and_then(|w| self.ctx.authority.tasks.get(&w.task))
+                .is_some_and(|t| t.task.workdir == workdir)
+        })
+    }
+
+    /// 补位启动：槽位有空就按序启动排队任务。
+    /// 优先级：先续跑（Working 但 worker 已死 —— 急停期被搁置的验收重试），
+    /// 再 FIFO 启动 Queued（queue_seq 最老优先）。事件驱动，无轮询。
+    /// 同一 workdir 同时只允许一个活 worker（R12 调研：并发写工作区 =
+    /// checkpoint 锁冲突 + 产物互踩）。
+    fn try_start_queued(&mut self) {
+        if self.emergency == EmergencyPhase::Frozen {
+            return;
+        }
+        loop {
+            if !self.slots_free() {
+                return;
+            }
+            // 被 live worker 占用的 workdir 集合
+            let occupied: std::collections::HashSet<String> = self
+                .metas
+                .values()
+                .filter_map(|m| {
+                    self.ctx
+                        .authority
+                        .workers
+                        .get(&m.id)
+                        .and_then(|w| self.ctx.authority.tasks.get(&w.task))
+                        .map(|t| t.task.workdir.clone())
+                })
+                .collect();
+            let mut candidates: Vec<(bool, u64, TaskId, String)> = self
+                .ctx
+                .authority
+                .tasks
+                .values()
+                .filter_map(|t| match t.state {
+                    WorkerState::Queued if t.worker.is_none() => Some((
+                        false,
+                        t.queue_seq,
+                        t.task.id.clone(),
+                        t.task.workdir.clone(),
+                    )),
+                    // Working 但 worker 已退出：验收重试被急停拦下的续跑
+                    WorkerState::Working
+                        if t.worker
+                            .as_ref()
+                            .is_none_or(|w| !self.metas.contains_key(w)) =>
+                    {
+                        Some((true, t.queue_seq, t.task.id.clone(), t.task.workdir.clone()))
+                    }
+                    _ => None,
+                })
+                .filter(|(_, _, _, wd)| !occupied.contains(wd))
+                .collect();
+            candidates.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+            let Some((is_retry, _, task, _)) = candidates.first().cloned() else {
+                return;
+            };
+            match self.spawn_worker_for(&task) {
+                Ok(w) => {
+                    self.ctx.publish(Event::TaskStarted {
+                        task: task.clone(),
+                        worker: w,
+                    });
+                }
+                Err(e) => {
+                    // spawn 失败：可见地失败，任务出队（避免坏程序热循环）
+                    self.ctx.publish(Event::TaskFailed {
+                        task,
+                        worker: WorkerId::new("none"),
+                        error: format!("queue start failed (retry={is_retry}): {e}"),
+                    });
+                    return;
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // 后台事件
     // -----------------------------------------------------------------------
 
     /// Worker 退出处理：按 stderr 分类（断连→suspended 自动恢复；真错→failed）
     fn on_worker_exit(&mut self, exit: worker::WorkerExit) {
+        self.on_worker_exit_inner(exit);
+        // 槽位已释放：补位启动排队任务（R13 事件驱动调度）
+        self.try_start_queued();
+    }
+
+    fn on_worker_exit_inner(&mut self, exit: worker::WorkerExit) {
         // 先清元数据
         self.metas.remove(&exit.worker);
         crate::worker::remove_pidfile(&self.cfg.data_dir.join("workers"), &exit.worker);
@@ -892,6 +983,11 @@ impl Core {
         // 网络恢复：续跑（v0：重启 worker 进程 = 简化版 --resume；真正的 --resume 续接在多轮驱动任务接手）
         if self.emergency == EmergencyPhase::Frozen {
             return; // 急停期间不自动恢复
+        }
+        // 槽位满：不烧尝试次数，稍后再探（等别人释放槽位）
+        if !self.slots_free() {
+            self.schedule_resume(&task, attempt);
+            return;
         }
         match self.spawn_worker_for(&task) {
             Ok(w) => {

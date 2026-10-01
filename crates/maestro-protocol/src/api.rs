@@ -140,7 +140,9 @@ pub struct TaskCreateParams {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TaskCreateResult {
     pub task: Task,
-    pub worker: WorkerId,
+    /// None = 已入队（并发满/急停中），未分配 worker
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker: Option<WorkerId>,
 }
 
 /// `events.subscribe` 参数

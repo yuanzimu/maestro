@@ -26,6 +26,8 @@ pub struct TaskRecord {
     pub resume_attempts: u32,
     /// 验收门连续失败次数（3 振出局计数）
     pub acceptance_failures: u32,
+    /// 入队序号（FIFO 调度确定性排序；虚拟时钟下 created_at 可能相同）
+    pub queue_seq: u64,
 }
 
 /// 挂起信息
@@ -59,6 +61,8 @@ pub struct WorkerRecord {
 pub struct Authority {
     pub tasks: HashMap<TaskId, TaskRecord>,
     pub workers: HashMap<WorkerId, WorkerRecord>,
+    /// 任务入队计数（queue_seq 分配器；重放自动重建）
+    task_counter: u64,
 }
 
 impl Authority {
@@ -80,6 +84,7 @@ impl Authority {
         use Event::*;
         match event {
             TaskCreated { task, prompt } => {
+                self.task_counter += 1;
                 self.tasks.insert(
                     task.id.clone(),
                     TaskRecord {
@@ -94,6 +99,7 @@ impl Authority {
                         checkpoint_ref: None,
                         resume_attempts: 0,
                         acceptance_failures: 0,
+                        queue_seq: self.task_counter,
                     },
                 );
             }

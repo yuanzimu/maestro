@@ -176,6 +176,9 @@ fn b8_rollback_then_resume() {
 #[serial]
 fn b12_new_task_queues_during_freeze() {
     let (_repo, work) = git_repo();
+    // 新任务用独立 workdir：t1 恢复后继续占用原 workdir（R13 workdir 互斥），
+    // 这里测的是「解冻后排队任务被调度器启动」
+    let (_repo2, work2) = git_repo();
     let d = TestDaemon::start("/bin/sh", &["-c", "sleep 300"]);
     let t1 = d.create_task("first", &work);
     assert!(d.wait_state(&t1, WorkerState::Working, 5000));
@@ -187,7 +190,7 @@ fn b12_new_task_queues_during_freeze() {
     // 急停期间建新任务
     let created = d.api(
         Method::TaskCreate,
-        serde_json::json!({ "title": "during-freeze", "prompt": "p", "workdir": work.display().to_string() }),
+        serde_json::json!({ "title": "during-freeze", "prompt": "p", "workdir": work2.display().to_string() }),
     );
     assert_eq!(created["queued"], true, "急停期间新任务应入队: {created}");
     assert_eq!(created["reason"], "emergency_frozen");

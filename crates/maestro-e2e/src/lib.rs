@@ -1,7 +1,7 @@
 //! e2e 测试基建：进程内拉起 Core（带 MockClock + 真实子进程），API 直调。
 //! 比走 socket 快且确定；socket 层有独立冒烟。
 
-use maestro_daemon::core::{Core, CoreConfig, CoreMsg};
+use maestro_daemon::core::{Core, CoreConfig, CoreMsg, DEFAULT_MAX_PARALLEL_WORKERS};
 use maestro_protocol::api::{Method, Request, Response};
 use maestro_protocol::types::*;
 use maestro_testkit::MockClock;
@@ -29,6 +29,30 @@ impl TestDaemon {
         worker_args: &[&str],
         data_dir: Option<PathBuf>,
     ) -> Self {
+        Self::build(
+            worker_program,
+            worker_args,
+            data_dir,
+            DEFAULT_MAX_PARALLEL_WORKERS,
+        )
+    }
+
+    /// 并发上限可指定（队列调度测试用）
+    pub fn start_limited(
+        worker_program: &str,
+        worker_args: &[&str],
+        data_dir: Option<PathBuf>,
+        max_parallel: usize,
+    ) -> Self {
+        Self::build(worker_program, worker_args, data_dir, max_parallel)
+    }
+
+    fn build(
+        worker_program: &str,
+        worker_args: &[&str],
+        data_dir: Option<PathBuf>,
+        max_parallel: usize,
+    ) -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let dir = data_dir.unwrap_or_else(|| tmp.path().to_path_buf());
         let cfg = CoreConfig {
@@ -37,6 +61,7 @@ impl TestDaemon {
             worker_program: worker_program.to_string(),
             worker_args: worker_args.iter().map(|s| s.to_string()).collect(),
             socket_path: dir.join("maestro.api.sock").display().to_string(),
+            max_parallel_workers: max_parallel,
         };
         let clock = Arc::new(MockClock::new());
         let (core, _) = Core::recover(cfg, clock.clone());

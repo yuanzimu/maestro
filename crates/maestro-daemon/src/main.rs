@@ -27,6 +27,10 @@ fn main() -> anyhow::Result<()> {
             .map(|s| s.split_whitespace().map(String::from).collect())
             .unwrap_or_else(|_| vec!["-c".into(), "echo maestro-worker-v0".into()]),
         socket_path: data_dir.join("maestro.api.sock").display().to_string(),
+        max_parallel_workers: std::env::var("MAESTRO_MAX_WORKERS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(maestro_daemon::core::DEFAULT_MAX_PARALLEL_WORKERS),
     };
 
     let clock = Arc::new(maestro_protocol::SystemClock);
