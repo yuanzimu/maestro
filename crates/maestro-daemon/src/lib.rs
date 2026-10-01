@@ -14,6 +14,7 @@ pub mod emergency;
 pub mod eventhub;
 pub mod llm;
 pub mod persist;
+pub mod security;
 pub mod server;
 pub mod state;
 pub mod steering;

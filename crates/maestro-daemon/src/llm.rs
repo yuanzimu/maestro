@@ -266,14 +266,34 @@ mod tests {
 
     #[test]
     fn http_error_surfaced() {
-        // 端点返回 401
+        // 端点返回 401（先读完请求再响应，防 ureq 写请求体时 EPIPE）
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = format!("http://{}", listener.local_addr().unwrap());
         std::thread::spawn(move || {
-            if let Ok((mut stream, _)) = listener.accept() {
+            if let Ok((stream, _)) = listener.accept() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                let mut content_length = 0usize;
+                while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                    let l = line.trim().to_lowercase();
+                    if let Some(v) = l.strip_prefix("content-length:") {
+                        content_length = v.trim().parse().unwrap_or(0);
+                    }
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                    line.clear();
+                }
+                if content_length > 0 {
+                    let mut body = vec![0u8; content_length];
+                    let _ = reader.read_exact(&mut body);
+                }
+                let mut stream = stream;
                 let _ = stream.write_all(
                     b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno",
                 );
+                let _ = stream.flush();
+                std::thread::sleep(std::time::Duration::from_millis(50));
             }
         });
         let client = OpenAiClient::new(&addr, "bad-key");

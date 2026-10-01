@@ -523,10 +523,17 @@ impl Core {
             Ok(p) => p,
             Err(_) => return self.err(req, -400, "bad params"),
         };
+        // 安全基线（0.11）：输入长度 + workdir 敏感路径
+        if let Err(e) = crate::security::validate_task_input(&params.title, &params.prompt) {
+            return self.err(req, -400, &e);
+        }
         let workdir = params
             .workdir
             .clone()
             .unwrap_or_else(|| self.cfg.workdir.display().to_string());
+        if let Err(e) = crate::security::validate_workdir(&workdir) {
+            return self.err(req, -403, &e);
+        }
         let task_id = TaskId::new(format!("t-{}", self.next_seq_hint()));
         let task = Task {
             id: task_id.clone(),
@@ -595,6 +602,9 @@ impl Core {
         let Some(t) = self.ctx.authority.get(&params.task).cloned() else {
             return self.err(req, -404, "task not found");
         };
+        if let Err(e) = crate::security::validate_steer_message(&params.message) {
+            return self.err(req, -400, &e);
+        }
         if t.state.is_terminal() {
             return self.err(req, -409, "task already finished");
         }
@@ -710,6 +720,10 @@ impl Core {
     }
 
     fn api_rollback(&mut self, req: &Request, params: CheckpointRollbackParams) -> Response {
+        // 安全基线（0.11）：只允许回滚到 maestro checkpoint 命名空间
+        if let Err(e) = crate::security::validate_rollback_ref(params.to.as_str()) {
+            return self.err(req, -403, &e);
+        }
         let Some(t) = self.ctx.authority.get(&params.task).cloned() else {
             return self.err(req, -404, "task not found");
         };

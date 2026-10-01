@@ -183,12 +183,28 @@ mod tests {
         assert!(w.is_alive());
         w.signal_group(nix::sys::signal::Signal::SIGSTOP)
             .expect("SIGSTOP");
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        assert!(w.is_stopped(), "进程组应进入 T 状态");
+        // 轮询等 T 态：高负载下 SIGSTOP 可能落在瞬态 D（不可中断 IO）上，
+        // 需等 IO 完成才转 T（与 b1_b5 同款抖动）
+        let mut stopped = false;
+        for _ in 0..100 {
+            if w.is_stopped() {
+                stopped = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(stopped, "进程组应在 2s 内进入 T 状态");
         w.signal_group(nix::sys::signal::Signal::SIGCONT)
             .expect("SIGCONT");
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        assert!(!w.is_stopped(), "SIGCONT 后应恢复");
+        let mut resumed = false;
+        for _ in 0..100 {
+            if !w.is_stopped() {
+                resumed = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(resumed, "SIGCONT 后应恢复");
         assert!(w.is_alive());
     }
 

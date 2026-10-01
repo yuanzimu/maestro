@@ -86,13 +86,14 @@ impl R3Driver {
                 Err(e) if attempt < 4 && e.raw_os_error() == Some(26) => {
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
-                Err(e) => {
-                    return Err(R3Error::CliFailed(format!("spawn: {e}"), String::new()))
-                }
+                Err(e) => return Err(R3Error::CliFailed(format!("spawn: {e}"), String::new())),
             }
         }
         let Some(out) = out else {
-            return Err(R3Error::CliFailed("spawn: retries exhausted".into(), String::new()));
+            return Err(R3Error::CliFailed(
+                "spawn: retries exhausted".into(),
+                String::new(),
+            ));
         };
         if !out.status.success() {
             return Err(R3Error::CliFailed(

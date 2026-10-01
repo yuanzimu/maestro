@@ -82,7 +82,7 @@ impl TestDaemon {
         }
     }
 
-    /// 直调 API（经 Core 的消息循环 —— 真实路径）
+    /// 直调 API（经 Core 的消息循环 —— 真实路径）；错误时 panic
     pub fn api(&self, method: Method, params: serde_json::Value) -> serde_json::Value {
         let (rtx, rrx) = std::sync::mpsc::channel();
         let req = Request {
@@ -96,6 +96,26 @@ impl TestDaemon {
             Ok(Response::Err { error, .. }) => {
                 panic!("api error {}: {}", error.code, error.message)
             }
+            Err(e) => panic!("api timeout: {e}"),
+        }
+    }
+
+    /// 直调 API，错误不 panic（安全测试断言错误码用）
+    pub fn try_api(
+        &self,
+        method: Method,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, (i32, String)> {
+        let (rtx, rrx) = std::sync::mpsc::channel();
+        let req = Request {
+            id: "test".into(),
+            method,
+            params,
+        };
+        self.tx.send(CoreMsg::Api(req, rtx)).unwrap();
+        match rrx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(Response::Ok { result, .. }) => Ok(result),
+            Ok(Response::Err { error, .. }) => Err((error.code, error.message)),
             Err(e) => panic!("api timeout: {e}"),
         }
     }
