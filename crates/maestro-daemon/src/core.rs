@@ -491,8 +491,24 @@ impl Core {
     }
 
     fn api_resume_all(&mut self, mode: SteeringMode) -> Response {
-        let resumed = emergency::resume_all(&mut self.ctx, &self.metas, &mut self.steering, mode);
+        let (resumed, dead_suspended) =
+            emergency::resume_all(&mut self.ctx, &self.metas, &mut self.steering, mode);
         self.emergency = EmergencyPhase::None;
+        // 竞态修复：急停挂起但 worker 已死的任务 —— 重拉进程而非假恢复
+        for task in dead_suspended {
+            if !self.slots_free() {
+                break;
+            }
+            if let Ok(w) = self.spawn_worker_for(&task) {
+                self.ctx.publish(Event::Resumed {
+                    task: task.clone(),
+                    worker: w,
+                    from_reason: SuspendReason::EmergencyStop,
+                    via: ResumeVia::ResumeAll,
+                    new_session_ref: None,
+                });
+            }
+        }
         // B12：调度器解冻 —— 补位启动冻结期入队/被搁置的任务（受槽位约束）
         self.try_start_queued();
         Response::Ok {
@@ -641,28 +657,55 @@ impl Core {
             return self.err(req, -409, "no suspend info");
         };
         // BudgetExceeded 恢复需确认（预算语义 v0：直接允许，预算引擎 P1 接管）
+        // flush steering（手动恢复走 flush 语义）
+        for msg in self.steering.drain(task) {
+            self.ctx.publish(Event::SteeringDelivered {
+                task: task.clone(),
+                round: t.round,
+                message: msg.message,
+            });
+        }
+        // 活 worker：解冻续跑
         if let Some(w) = &t.worker {
             if let Some(m) = self.metas.get(w) {
                 let _ = worker::unfreeze_group(m.pgid);
             }
-            // flush steering（手动恢复走 flush 语义）
-            for msg in self.steering.drain(task) {
-                self.ctx.publish(Event::SteeringDelivered {
-                    task: task.clone(),
-                    round: t.round,
-                    message: msg.message,
-                });
-            }
+        }
+        // worker 已死（竞态窗口：退出消息晚于暂停/急停到达，on_worker_exit
+        // 按 Suspended 早退不再补位）→ 直接重拉进程，防「无进程的 Working」
+        let worker_alive = t
+            .worker
+            .as_ref()
+            .is_some_and(|w| self.metas.contains_key(w));
+        if worker_alive {
             self.ctx.publish(Event::Resumed {
                 task: task.clone(),
-                worker: w.clone(),
+                worker: t.worker.clone().unwrap(),
                 from_reason: reason,
                 via: ResumeVia::User,
                 new_session_ref: None,
             });
-            return self.ok(req, serde_json::json!({ "resumed": true }));
+        } else {
+            if self.emergency == EmergencyPhase::Frozen {
+                return self.err(req, -409, "emergency frozen; resume_all first");
+            }
+            if !self.slots_free() || self.workdir_occupied(&t.task.workdir) {
+                return self.err(req, -409, "no free slot for respawn");
+            }
+            match self.spawn_worker_for(task) {
+                Ok(w) => {
+                    self.ctx.publish(Event::Resumed {
+                        task: task.clone(),
+                        worker: w,
+                        from_reason: reason,
+                        via: ResumeVia::User,
+                        new_session_ref: None,
+                    });
+                }
+                Err(e) => return self.err(req, -500, &format!("respawn failed: {e}")),
+            }
         }
-        self.err(req, -409, "no worker")
+        self.ok(req, serde_json::json!({ "resumed": true }))
     }
 
     fn api_rollback(&mut self, req: &Request, params: CheckpointRollbackParams) -> Response {
@@ -818,6 +861,11 @@ impl Core {
         if t.state != WorkerState::Working {
             // 取消/失败等终态：清快照防滞留（R11 审计）
             self.pre_spawn.remove(&exit.task);
+            return;
+        }
+        // 过期退出（R14）：该 worker 已被替换（重试/重拉），晚到的退出
+        // 消息不得误杀已易主的任务 —— 只认当前 worker 的退出
+        if t.worker.as_ref().is_some_and(|cur| cur != &exit.worker) {
             return;
         }
 

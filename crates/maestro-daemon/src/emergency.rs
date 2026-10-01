@@ -117,18 +117,20 @@ pub fn emergency_stop(
     }
 }
 
-/// resume_all：SIGCONT + steering flush/hold（用例 B7）+ Resumed 事件
+/// resume_all：SIGCONT + steering flush/hold（用例 B7）+ Resumed 事件。
+/// 返回 (活 worker 已恢复的任务, worker 已死的挂起任务)。
+/// 死 worker 竞态窗口：退出消息晚于急停到达 → on_worker_exit 按
+/// Suspended 早退 → metas 已清但任务仍挂起。这些任务由 Core 重拉进程。
 pub fn resume_all(
     ctx: &mut Ctx,
     metas: &HashMap<WorkerId, WorkerMeta>,
     steering: &mut crate::steering::SteeringQueue,
     mode: SteeringMode,
-) -> Vec<TaskId> {
+) -> (Vec<TaskId>, Vec<TaskId>) {
     let mut resumed = vec![];
     // 收集急停挂起的 worker（先收集避免借用冲突）
     let targets: Vec<(WorkerId, TaskId)> = metas
         .iter()
-        .filter(|(_, _)| true)
         .filter_map(|(id, m)| {
             let t = ctx.authority.tasks.get(&m.task)?;
             let is_emergency = t.state == WorkerState::Suspended
@@ -138,6 +140,22 @@ pub fn resume_all(
                     .unwrap_or(false);
             is_emergency.then(|| (id.clone(), m.task.clone()))
         })
+        .collect();
+
+    // worker 已死的急停挂起任务（不在 metas 里）
+    let dead_suspended: Vec<TaskId> = ctx
+        .authority
+        .tasks
+        .values()
+        .filter(|t| {
+            t.state == WorkerState::Suspended
+                && t.suspend
+                    .as_ref()
+                    .map(|s| s.reason == SuspendReason::EmergencyStop)
+                    .unwrap_or(false)
+                && t.worker.as_ref().is_none_or(|w| !metas.contains_key(w))
+        })
+        .map(|t| t.task.id.clone())
         .collect();
 
     for (id, task) in targets {
@@ -171,7 +189,7 @@ pub fn resume_all(
         });
         resumed.push(task);
     }
-    resumed
+    (resumed, dead_suspended)
 }
 
 /// 单任务 cancel（DECIDE 选项之一）：SIGCONT + 三级升级杀 + cancelled
