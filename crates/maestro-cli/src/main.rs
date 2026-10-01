@@ -82,6 +82,8 @@ enum TaskAction {
     Cancel { id: String },
     /// 轻推（下一轮生效）
     Steer { id: String, message: String },
+    /// 账本：轮数/耗时/成本汇总
+    Ledger { id: String },
     /// checkpoint 列表
     Checkpoints { id: String },
     /// 回滚到 checkpoint
@@ -190,6 +192,16 @@ fn run(client: &MaestroClient, cmd: Cmd) -> Result<(), String> {
                     )
                     .map_err(fmt_err)?;
                 println!("{}", serde_json::to_string_pretty(&v).unwrap());
+            }
+            TaskAction::Ledger { id } => {
+                let v = client
+                    .call(
+                        "task-ledger",
+                        Method::TaskLedger,
+                        serde_json::json!({ "task": id }),
+                    )
+                    .map_err(fmt_err)?;
+                println!("{}", fmt_ledger(&v));
             }
             TaskAction::Checkpoints { id } => {
                 let v = client
@@ -337,6 +349,38 @@ fn fmt_inbox(v: &Value) -> String {
             other => (other, format!("maestro task get {task}")),
         };
         out.push_str(&format!("{task} 「{title}」\n  {what}\n  → {hint}\n"));
+    }
+    out
+}
+
+/// ledger 响应 → 人话（P0 验收项：「这个任务花了多少」一句话回答）
+fn fmt_ledger(v: &Value) -> String {
+    let rounds = v["rounds"].as_u64().unwrap_or(0);
+    let wall_ms = v["wall_ms"].as_u64().unwrap_or(0);
+    let secs = wall_ms / 1000;
+    let dur = if secs >= 60 {
+        format!("{}m{}s", secs / 60, secs % 60)
+    } else {
+        format!("{secs}s")
+    };
+    let in_tok = v["input_tokens"].as_u64().unwrap_or(0);
+    let out_tok = v["output_tokens"].as_u64().unwrap_or(0);
+    let actual = v["actual_cost_cents"].as_u64().unwrap_or(0);
+    let saved = v["saved_cents"].as_u64().unwrap_or(0);
+    let mut out = format!(
+        "任务 {}：{} 轮 · 墙钟 {dur}",
+        v["task"].as_str().unwrap_or("?"),
+        rounds
+    );
+    if in_tok + out_tok > 0 {
+        out.push_str(&format!(
+            " · {in_tok} in / {out_tok} out tokens · 实付 {actual}¢"
+        ));
+        if saved > 0 {
+            out.push_str(&format!("（省 {saved}¢）"));
+        }
+    } else {
+        out.push_str(" · token 用量待多轮驱动接入（0.15）");
     }
     out
 }

@@ -345,6 +345,17 @@ impl Core {
                 };
                 self.api_steer(&req, &params)
             }
+            Method::TaskLedger => {
+                let task_id = req
+                    .params
+                    .get("task")
+                    .and_then(|v| v.as_str())
+                    .map(TaskId::new);
+                match task_id {
+                    Some(id) => self.api_ledger(&req, &id),
+                    None => self.err(&req, -400, "missing task"),
+                }
+            }
             Method::TaskPause => {
                 let task_id = req
                     .params
@@ -596,6 +607,72 @@ impl Core {
             ),
             Err(e) => self.err(req, -500, &format!("spawn failed: {e}")),
         }
+    }
+
+    /// 账本（0.9）：轮数/耗时/成本汇总 —— 「这个任务花了多少」一句话回答。
+    /// 数据源 = 事件流重放（与恢复同一口径）；LLM usage 在 0.15 多轮驱动
+    /// 接入后经 LedgerEntry 事件入账。
+    fn api_ledger(&mut self, req: &Request, task: &TaskId) -> Response {
+        if self.ctx.authority.get(task).is_none() {
+            return self.err(req, -404, "task not found");
+        }
+        let events = self
+            .store
+            .as_ref()
+            .map(|s| s.lock().unwrap().replay_all())
+            .unwrap_or_default();
+        let mut rounds = 0u64;
+        let mut first_ts: Option<u64> = None;
+        let mut last_ts: Option<u64> = None;
+        let mut input_tokens = 0u64;
+        let mut output_tokens = 0u64;
+        let mut actual_cents = 0u64;
+        let mut counterfactual_cents = 0u64;
+        let mut entries = 0u64;
+        for env in &events {
+            let mine = match &env.event {
+                Event::TaskCreated { task: t, .. } => &t.id == task,
+                Event::WorkerSpawned { task: t, .. } | Event::LedgerEntry { task: t, .. } => {
+                    t == task
+                }
+                _ => false,
+            };
+            if !mine {
+                continue;
+            }
+            first_ts.get_or_insert(env.ts);
+            last_ts = Some(env.ts);
+            match &env.event {
+                Event::WorkerSpawned { .. } => rounds += 1,
+                Event::LedgerEntry { usage, .. } => {
+                    entries += 1;
+                    input_tokens += usage.input_tokens;
+                    output_tokens += usage.output_tokens;
+                    actual_cents += usage.actual_cost_cents.unwrap_or(0);
+                    counterfactual_cents += usage.counterfactual_cost_cents.unwrap_or(0);
+                }
+                _ => {}
+            }
+        }
+        let wall_ms = match (first_ts, last_ts) {
+            (Some(a), Some(b)) => b.saturating_sub(a),
+            _ => 0,
+        };
+        let saved_cents = counterfactual_cents.saturating_sub(actual_cents);
+        self.ok(
+            req,
+            serde_json::json!({
+                "task": task,
+                "rounds": rounds,
+                "wall_ms": wall_ms,
+                "ledger_entries": entries,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "actual_cost_cents": actual_cents,
+                "counterfactual_cost_cents": counterfactual_cents,
+                "saved_cents": saved_cents,
+            }),
+        )
     }
 
     fn api_steer(&mut self, req: &Request, params: &TaskSteerParams) -> Response {

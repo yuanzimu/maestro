@@ -56,6 +56,8 @@ pub enum Method {
     TaskCancel,
     /// 轻推：向运行中任务注入补充指示，下一轮生效
     TaskSteer,
+    /// 账本：任务的轮数/耗时/成本汇总（token 经济口径）
+    TaskLedger,
 
     // ---- worker ----
     WorkerList,

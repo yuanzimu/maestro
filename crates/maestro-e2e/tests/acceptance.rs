@@ -170,6 +170,34 @@ fn unverifiable_workdir_degrades_to_exit_code_gate() {
     assert_eq!(passed, 1, "应标记为仅退出码门: {events:?}");
 }
 
+/// 账本 API（0.9）：轮数/墙钟/token/成本汇总
+#[test]
+#[serial]
+fn ledger_reports_rounds_and_wallclock() {
+    let (_repo, work) = git_repo();
+    let script = r#"mkdir -p .maestro; n=$(cat .maestro/runs 2>/dev/null || echo 0); n=$((n+1)); echo $n > .maestro/runs; [ "$n" -ge 2 ] && echo ok > result.txt; exit 0"#;
+    let d = TestDaemon::start("/bin/sh", &["-c", script]);
+    let t = d.create_task("ledger-me", &work);
+    assert!(
+        d.wait_state(&t, WorkerState::Done, 8000),
+        "实际: {:?}",
+        d.task_state(&t)
+    );
+    let v = d.api(
+        Method::TaskLedger,
+        serde_json::json!({ "task": t.as_str() }),
+    );
+    // 2 轮（第 1 轮假完成重试）
+    assert_eq!(v["rounds"].as_u64().unwrap(), 2, "{v}");
+    assert!(v["wall_ms"].as_u64().unwrap() >= 0);
+    // token 字段就位（值待 0.15 多轮驱动接入）
+    assert!(v["input_tokens"].is_u64());
+    assert_eq!(v["ledger_entries"].as_u64().unwrap(), 0);
+    // 不存在的任务
+    let r = d.try_api(Method::TaskLedger, serde_json::json!({ "task": "t-nope" }));
+    assert_eq!(r.unwrap_err().0, -404);
+}
+
 /// 读事件流（WAL 支持并发读，无需停 daemon）
 fn replay(d: &TestDaemon) -> Vec<maestro_protocol::events::Envelope> {
     maestro_daemon::persist::EventStore::open(&d.data_dir)
