@@ -311,6 +311,7 @@ impl Core {
                             "title": t.task.title,
                             "state": t.state,
                             "round": t.round,
+                            "acceptance_failures": t.acceptance_failures,
                         })
                     })
                     .collect();

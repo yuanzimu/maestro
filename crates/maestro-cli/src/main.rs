@@ -1,8 +1,9 @@
-//! maestro CLI：status/task/worker/inbox/stop/resume/doctor（0.13）
+//! maestro CLI：status/task/worker/inbox/stop/resume/doctor（0.13 + R19 体验）
 
 use clap::{Parser, Subcommand};
 use maestro_client::MaestroClient;
 use maestro_protocol::api::Method;
+use serde_json::Value;
 
 #[derive(Parser)]
 #[command(name = "maestro", version, about = "Maestro — AI 任务指挥台 CLI")]
@@ -26,7 +27,7 @@ enum Cmd {
     },
     /// Worker 列表
     Workers,
-    /// 收件箱（blocked 任务）
+    /// 收件箱（blocked 任务 + 行动建议）
     Inbox,
     /// 全局急停（FREEZE→SNAPSHOT，现场保留）
     Stop,
@@ -66,12 +67,16 @@ enum TaskAction {
         workdir: Option<String>,
     },
     /// 任务列表
-    List,
+    List {
+        /// 输出原始 JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// 任务详情
     Get { id: String },
     /// 暂停
     Pause { id: String },
-    /// 恢复
+    /// 恢复（blocked = 用户确认重试并重新入队）
     Resume { id: String },
     /// 取消
     Cancel { id: String },
@@ -120,13 +125,17 @@ fn run(client: &MaestroClient, cmd: Cmd) -> Result<(), String> {
                         serde_json::json!({ "title": title, "prompt": prompt, "workdir": workdir }),
                     )
                     .map_err(fmt_err)?;
-                println!("{}", serde_json::to_string_pretty(&v).unwrap());
+                println!("{}", fmt_create(&v));
             }
-            TaskAction::List => {
+            TaskAction::List { json } => {
                 let v = client
                     .call("task-list", Method::TaskList, serde_json::json!({}))
                     .map_err(fmt_err)?;
-                println!("{}", serde_json::to_string_pretty(&v).unwrap());
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&v).unwrap());
+                } else {
+                    print!("{}", fmt_task_list(&v));
+                }
             }
             TaskAction::Get { id } => {
                 let v = client
@@ -156,7 +165,11 @@ fn run(client: &MaestroClient, cmd: Cmd) -> Result<(), String> {
                         serde_json::json!({ "task": id }),
                     )
                     .map_err(fmt_err)?;
-                println!("{}", serde_json::to_string_pretty(&v).unwrap());
+                if v.get("requeued").and_then(|x| x.as_bool()).unwrap_or(false) {
+                    println!("已重新入队：{id}（验收计数已清零）");
+                } else {
+                    println!("{}", serde_json::to_string_pretty(&v).unwrap());
+                }
             }
             TaskAction::Cancel { id } => {
                 let v = client
@@ -209,7 +222,7 @@ fn run(client: &MaestroClient, cmd: Cmd) -> Result<(), String> {
             let v = client
                 .call("inbox", Method::InboxList, serde_json::json!({}))
                 .map_err(fmt_err)?;
-            println!("{}", serde_json::to_string_pretty(&v).unwrap());
+            print!("{}", fmt_inbox(&v));
         }
         Cmd::Stop => {
             let v = client
@@ -248,6 +261,84 @@ fn run(client: &MaestroClient, cmd: Cmd) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 展示层（纯函数，可单测）
+// ---------------------------------------------------------------------------
+
+/// task.create 响应 → 友好输出
+fn fmt_create(v: &Value) -> String {
+    let id = v["task"]["id"].as_str().unwrap_or("?");
+    let title = v["task"]["title"].as_str().unwrap_or("");
+    if v["queued"].as_bool().unwrap_or(false) {
+        let reason = match v["reason"].as_str() {
+            Some("emergency_frozen") => "急停冻结中",
+            Some("slots_full") => "并发槽位已满",
+            Some("workdir_busy") => "工作目录被其他任务占用",
+            _ => "排队中",
+        };
+        format!("任务已入队：{id} 「{title}」（{reason}，稍后自动启动）")
+    } else if let Some(w) = v["worker"].as_str() {
+        format!("任务已启动：{id} 「{title}」 → worker {w}")
+    } else {
+        serde_json::to_string_pretty(v).unwrap_or_default()
+    }
+}
+
+/// task.list 响应 → 表格
+fn fmt_task_list(v: &Value) -> String {
+    let Some(tasks) = v["tasks"].as_array() else {
+        return "(空)".into();
+    };
+    if tasks.is_empty() {
+        return "没有任务。用 maestro task create 建一个。".into();
+    }
+    let mut out = String::from("ID       STATE      ROUND  FAIL  TITLE\n");
+    out.push_str(&"-".repeat(58));
+    out.push('\n');
+    for t in tasks {
+        let id = t["id"].as_str().unwrap_or("?");
+        let state = t["state"].as_str().unwrap_or("?");
+        let round = t["round"].as_u64().unwrap_or(0);
+        let fail = t["acceptance_failures"].as_u64().unwrap_or(0);
+        let title = t["title"].as_str().unwrap_or("");
+        out.push_str(&format!(
+            "{id:<8} {state:<10} {round:<6} {fail:<5} {title}\n"
+        ));
+    }
+    out
+}
+
+/// inbox 响应 → 行动建议
+fn fmt_inbox(v: &Value) -> String {
+    let Some(items) = v["items"].as_array() else {
+        return "(空)".into();
+    };
+    if items.is_empty() {
+        return "收件箱是空的 —— 没有需要你处理的任务。".into();
+    }
+    let mut out = format!("收件箱（{} 项需要处理）\n", items.len());
+    out.push_str(&"-".repeat(58));
+    out.push('\n');
+    for it in items {
+        let task = it["task"].as_str().unwrap_or("?");
+        let kind = it["kind"].as_str().unwrap_or("?");
+        let title = it["title"].as_str().unwrap_or("");
+        let (what, hint) = match kind {
+            "acceptance_failed" => (
+                "连续 3 次假完成（声称完成但无产物）",
+                format!("确认重试: maestro task resume {task}   或回滚: maestro task checkpoints {task}"),
+            ),
+            "infra" => (
+                "基础设施故障（网络/供应商），自动恢复已耗尽",
+                format!("网络恢复后重试: maestro task resume {task}"),
+            ),
+            other => (other, format!("maestro task get {task}")),
+        };
+        out.push_str(&format!("{task} 「{title}」\n  {what}\n  → {hint}\n"));
+    }
+    out
 }
 
 /// doctor v0：daemon/socket/版本/git（0.13 核心命令）
@@ -307,4 +398,47 @@ fn doctor(client: &MaestroClient) {
 
 fn fmt_err(e: maestro_client::ClientError) -> String {
     e.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_friendly_output() {
+        let started = serde_json::json!({
+            "task": { "id": "t-1", "title": "修 bug" },
+            "worker": "w-1"
+        });
+        assert!(fmt_create(&started).contains("已启动"));
+        let queued = serde_json::json!({
+            "task": { "id": "t-2", "title": "排队" },
+            "queued": true, "reason": "slots_full"
+        });
+        let s = fmt_create(&queued);
+        assert!(s.contains("已入队") && s.contains("并发槽位已满"), "{s}");
+    }
+
+    #[test]
+    fn task_list_table_shape() {
+        let v = serde_json::json!({ "tasks": [
+            { "id": "t-1", "state": "done", "round": 2, "acceptance_failures": 0, "title": "a" },
+            { "id": "t-2", "state": "blocked", "round": 0, "acceptance_failures": 3, "title": "b" },
+        ]});
+        let s = fmt_task_list(&v);
+        assert!(s.contains("ID") && s.contains("STATE"), "{s}");
+        assert!(s.contains("t-1") && s.contains("blocked"));
+        assert!(fmt_task_list(&serde_json::json!({ "tasks": [] })).contains("没有任务"));
+    }
+
+    #[test]
+    fn inbox_gives_actionable_hints() {
+        let v = serde_json::json!({ "items": [
+            { "task": "t-9", "kind": "acceptance_failed", "title": "假完成" },
+        ]});
+        let s = fmt_inbox(&v);
+        assert!(s.contains("假完成"), "{s}");
+        assert!(s.contains("maestro task resume t-9"), "{s}");
+        assert!(fmt_inbox(&serde_json::json!({ "items": [] })).contains("空的"));
+    }
 }
