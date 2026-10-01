@@ -58,6 +58,11 @@ pub enum Event {
         task: TaskId,
         worker: WorkerId,
     },
+    /// blocked 任务经用户确认后重新入队（验收失败/基建故障的重试路径）
+    TaskRequeued {
+        task: TaskId,
+        from_kind: Option<BlockedKind>,
+    },
     WorkerSpawned {
         worker: WorkerId,
         task: TaskId,

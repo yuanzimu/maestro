@@ -24,6 +24,8 @@ pub struct TaskRecord {
     pub checkpoint_ref: Option<CheckpointRef>,
     /// 自动恢复已尝试次数（退避状态）
     pub resume_attempts: u32,
+    /// 验收门连续失败次数（3 振出局计数）
+    pub acceptance_failures: u32,
 }
 
 /// 挂起信息
@@ -91,6 +93,7 @@ impl Authority {
                         session_ref: None,
                         checkpoint_ref: None,
                         resume_attempts: 0,
+                        acceptance_failures: 0,
                     },
                 );
             }
@@ -149,6 +152,16 @@ impl Authority {
                     t.state = WorkerState::Cancelled;
                 }
             }
+            TaskRequeued { task, .. } => {
+                if let Some(t) = self.tasks.get_mut(task) {
+                    t.state = WorkerState::Queued;
+                    t.blocked_kind = None;
+                    t.suspend = None;
+                    t.worker = None;
+                    // 重新入队 = 用户明确要求重试 → 验收计数清零
+                    t.acceptance_failures = 0;
+                }
+            }
             Suspended {
                 task,
                 worker,
@@ -204,10 +217,17 @@ impl Authority {
             }
             AcceptanceGateFailed { task, failures, .. } => {
                 if let Some(t) = self.tasks.get_mut(task) {
+                    t.acceptance_failures = *failures;
                     if *failures >= 3 {
                         t.state = WorkerState::Blocked;
                         t.blocked_kind = Some(BlockedKind::AcceptanceFailed);
                     }
+                }
+            }
+            AcceptanceGatePassed { task, .. } => {
+                if let Some(t) = self.tasks.get_mut(task) {
+                    // 本轮验收通过 → 连败计数清零
+                    t.acceptance_failures = 0;
                 }
             }
             CheckpointCreated { task, cp, meta } => {
@@ -379,5 +399,93 @@ mod tests {
         let t = a.get(&TaskId::new("t1")).unwrap();
         assert_eq!(t.state, WorkerState::Blocked);
         assert_eq!(t.blocked_kind, Some(BlockedKind::AcceptanceFailed));
+    }
+
+    /// blocked → TaskRequeued → 回到 Queued 且验收计数清零
+    #[test]
+    fn requeue_resets_acceptance_failures() {
+        let mut a = Authority::new();
+        a.apply(
+            &Event::TaskCreated {
+                task: task("t1"),
+                prompt: "p".into(),
+            },
+            0,
+        );
+        for i in 1..=3u32 {
+            a.apply(
+                &Event::AcceptanceGateFailed {
+                    task: TaskId::new("t1"),
+                    round: i,
+                    failures: i,
+                    output: "x".into(),
+                },
+                0,
+            );
+        }
+        assert_eq!(
+            a.get(&TaskId::new("t1")).unwrap().state,
+            WorkerState::Blocked
+        );
+
+        a.apply(
+            &Event::TaskRequeued {
+                task: TaskId::new("t1"),
+                from_kind: Some(BlockedKind::AcceptanceFailed),
+            },
+            0,
+        );
+        let t = a.get(&TaskId::new("t1")).unwrap();
+        assert_eq!(t.state, WorkerState::Queued);
+        assert_eq!(t.blocked_kind, None);
+        assert_eq!(t.acceptance_failures, 0, "重试后连败计数应清零");
+    }
+
+    /// 验收通过后连败计数清零（两次失败 → 通过 → 再失败：计数从 1 重新算）
+    #[test]
+    fn pass_resets_strike_count() {
+        let mut a = Authority::new();
+        a.apply(
+            &Event::TaskCreated {
+                task: task("t1"),
+                prompt: "p".into(),
+            },
+            0,
+        );
+        for i in 1..=2u32 {
+            a.apply(
+                &Event::AcceptanceGateFailed {
+                    task: TaskId::new("t1"),
+                    round: i,
+                    failures: i,
+                    output: "x".into(),
+                },
+                0,
+            );
+        }
+        a.apply(
+            &Event::AcceptanceGatePassed {
+                task: TaskId::new("t1"),
+                round: 3,
+                output: "ok".into(),
+            },
+            0,
+        );
+        a.apply(
+            &Event::AcceptanceGateFailed {
+                task: TaskId::new("t1"),
+                round: 4,
+                failures: 1,
+                output: "x".into(),
+            },
+            0,
+        );
+        let t = a.get(&TaskId::new("t1")).unwrap();
+        assert_eq!(t.acceptance_failures, 1);
+        assert_ne!(
+            t.state,
+            WorkerState::Blocked,
+            "通过后重新计数，1 次失败不出局"
+        );
     }
 }

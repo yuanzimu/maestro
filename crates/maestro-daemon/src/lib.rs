@@ -7,6 +7,7 @@
 //! - **有界订阅队列**：慢客户端不拖死事件循环（超限断开，客户端凭 seq 重放补齐）
 //! - **PID 文件带 start_time**：防 PID 复用误杀
 
+pub mod acceptance;
 pub mod checkpoints;
 pub mod core;
 pub mod emergency;

@@ -111,6 +111,8 @@ pub struct Core {
     network_ok: bool,
     started_at: u64,
     next_worker: u64,
+    /// 验收门 v0：worker 启动前的 worktree 读回（按任务记）
+    pre_spawn: HashMap<TaskId, crate::acceptance::Readback>,
 }
 
 impl Core {
@@ -141,6 +143,7 @@ impl Core {
             network_ok: true,
             started_at,
             next_worker: 1,
+            pre_spawn: HashMap::new(),
         }
     }
 
@@ -184,6 +187,7 @@ impl Core {
             network_ok: true,
             started_at,
             next_worker: 1,
+            pre_spawn: HashMap::new(),
         };
         // 恢复时把「正在执行」的任务标记为 suspended(DaemonCrash)（仅手动恢复）
         core.mark_recovered_as_daemon_crash();
@@ -311,6 +315,8 @@ impl Core {
                             "round": t.round, "worker": t.worker,
                             "session_ref": t.session_ref, "checkpoint_ref": t.checkpoint_ref,
                             "suspend_reason": t.suspend.as_ref().map(|s| s.reason),
+                            "blocked_kind": t.blocked_kind,
+                            "acceptance_failures": t.acceptance_failures,
                         }),
                     ),
                     None => self.err(&req, -404, "task not found"),
@@ -472,16 +478,25 @@ impl Core {
     fn api_resume_all(&mut self, mode: SteeringMode) -> Response {
         let resumed = emergency::resume_all(&mut self.ctx, &self.metas, &mut self.steering, mode);
         self.emergency = EmergencyPhase::None;
-        // B12：调度器解冻 —— 冻结期入队的任务此刻启动
-        let queued: Vec<TaskId> = self
+        // B12：调度器解冻 —— 冻结期入队/验收失败重试被搁置的任务此刻启动。
+        // 判据：Queued 未启动，或 Working 但 worker 已退出（gate 重试被冻结拦下）。
+        let pending: Vec<TaskId> = self
             .ctx
             .authority
             .tasks
             .values()
-            .filter(|t| t.state == WorkerState::Queued && t.worker.is_none())
+            .filter(|t| match t.state {
+                WorkerState::Queued => t.worker.is_none(),
+                WorkerState::Working => t
+                    .worker
+                    .as_ref()
+                    .map(|w| !self.metas.contains_key(w))
+                    .unwrap_or(true),
+                _ => false,
+            })
             .map(|t| t.task.id.clone())
             .collect();
-        for task in queued {
+        for task in pending {
             match self.spawn_worker_for(&task) {
                 Ok(w) => {
                     self.ctx.publish(Event::TaskStarted {
@@ -603,6 +618,27 @@ impl Core {
         let Some(t) = self.ctx.authority.get(task).cloned() else {
             return self.err(req, -404, "task not found");
         };
+        // blocked → 用户确认重试：重新入队（验收计数清零）+ 立即启动
+        if t.state == WorkerState::Blocked {
+            if self.emergency == EmergencyPhase::Frozen {
+                return self.err(req, -409, "emergency frozen; resume_all first");
+            }
+            let from_kind = t.blocked_kind;
+            self.ctx.publish(Event::TaskRequeued {
+                task: task.clone(),
+                from_kind,
+            });
+            return match self.spawn_worker_for(task) {
+                Ok(w) => {
+                    self.ctx.publish(Event::TaskStarted {
+                        task: task.clone(),
+                        worker: w,
+                    });
+                    self.ok(req, serde_json::json!({ "requeued": true }))
+                }
+                Err(e) => self.err(req, -500, &format!("requeue spawn failed: {e}")),
+            };
+        }
         if t.state != WorkerState::Suspended {
             return self.err(req, -409, "task not suspended");
         }
@@ -699,11 +735,7 @@ impl Core {
             });
             self.schedule_resume(&exit.task, 0);
         } else if exit.exit_code == Some(0) {
-            self.ctx.publish(Event::TaskCompleted {
-                task: exit.task.clone(),
-                worker: exit.worker.clone(),
-                summary: "worker exited 0".into(),
-            });
+            self.acceptance_gate(&exit.task, &t);
         } else {
             self.ctx.publish(Event::TaskFailed {
                 task: exit.task.clone(),
@@ -715,6 +747,110 @@ impl Core {
                 ),
             });
         }
+    }
+
+    /// 验收门 v0（DEV_PLAN 0.10）：exit 0 之后做读回校验 ——
+    /// worktree 与启动前快照无差异 = 假完成 → AcceptanceGateFailed。
+    /// 连败 3 次 → blocked(AcceptanceFailed)（Goal 3 轮语义）；否则立即重试。
+    fn acceptance_gate(&mut self, task: &TaskId, t: &crate::state::TaskRecord) {
+        let before = self
+            .pre_spawn
+            .remove(task)
+            .unwrap_or(crate::acceptance::Readback::Unverifiable);
+        let after = self.workdir_readback(&t.task.workdir);
+        let readback = match (&before, &after) {
+            // 不可观测（workdir 缺失/与数据目录重叠）→ 门退化为仅退出码
+            (crate::acceptance::Readback::Unverifiable, _)
+            | (_, crate::acceptance::Readback::Unverifiable) => None,
+            (
+                crate::acceptance::Readback::Verifiable(b),
+                crate::acceptance::Readback::Verifiable(a),
+            ) => Some((b.clone(), a.clone())),
+        };
+        let Some((before, after)) = readback else {
+            self.ctx.publish(Event::AcceptanceGatePassed {
+                task: task.clone(),
+                round: t.round,
+                output: "readback unavailable; passed on exit code only".into(),
+            });
+            self.ctx.publish(Event::TaskCompleted {
+                task: task.clone(),
+                worker: t.worker.clone().unwrap_or_else(|| WorkerId::new("none")),
+                summary: "worker exited 0 (gate: exit-code only)".into(),
+            });
+            return;
+        };
+        if crate::acceptance::changed(&before, &after) {
+            let output = crate::acceptance::diff_summary(&before, &after);
+            self.ctx.publish(Event::AcceptanceGatePassed {
+                task: task.clone(),
+                round: t.round,
+                output: output.clone(),
+            });
+            // 验收通过点 = 永久 checkpoint（回滚锚点，CpReason::AcceptancePassed pinned）
+            let _ = crate::checkpoints::capture(
+                std::path::Path::new(&t.task.workdir),
+                task,
+                t.round + 1,
+                CpReason::AcceptancePassed,
+                self.ctx.clock.as_ref(),
+            );
+            self.ctx.publish(Event::TaskCompleted {
+                task: task.clone(),
+                worker: t.worker.clone().unwrap_or_else(|| WorkerId::new("none")),
+                summary: format!("acceptance passed: {output}"),
+            });
+            return;
+        }
+
+        // 假完成：计数 +1
+        let failures = t.acceptance_failures + 1;
+        self.ctx.publish(Event::AcceptanceGateFailed {
+            task: task.clone(),
+            round: t.round,
+            failures,
+            output: "no worktree changes detected (fake completion)".into(),
+        });
+        // publish 即应用：读回最新状态决定是否出局
+        let blocked = self
+            .ctx
+            .authority
+            .get(task)
+            .map(|t| t.state == WorkerState::Blocked)
+            .unwrap_or(true);
+        if blocked {
+            // Goal 3 轮（U10 设计 §6）：同一阻塞条件连续 3 轮无进展 → 上报 GoalProgress
+            self.ctx.publish(Event::GoalProgress {
+                task: task.clone(),
+                round: t.round,
+                blocked_condition: Some("fake_completion_x3".into()),
+            });
+            return; // 3 振出局，等用户 TaskRequeued
+        }
+        // 急停期间不启动新 worker（B12 语义）；resume_all 会补拉起
+        if self.emergency == EmergencyPhase::Frozen {
+            return;
+        }
+        match self.spawn_worker_for(task) {
+            Ok(w) => {
+                self.ctx.publish(Event::TaskStarted {
+                    task: task.clone(),
+                    worker: w,
+                });
+            }
+            Err(e) => {
+                self.ctx.publish(Event::TaskFailed {
+                    task: task.clone(),
+                    worker: WorkerId::new("none"),
+                    error: format!("acceptance retry spawn failed: {e}"),
+                });
+            }
+        }
+    }
+
+    /// workdir 读回采样（统一排除 daemon 数据目录）
+    fn workdir_readback(&self, workdir: &str) -> crate::acceptance::Readback {
+        crate::acceptance::snapshot(std::path::Path::new(workdir), &[self.cfg.data_dir.clone()])
     }
 
     /// 自动恢复计时到点：探测网络 → 恢复 or 记尝试次数并重排
@@ -799,6 +935,8 @@ impl Core {
             .get(task)
             .cloned()
             .ok_or("task missing")?;
+        // 验收门 v0：spawn 前采样（快 worker 可能在毫秒内落盘，晚采就漏判）
+        let snap = self.workdir_readback(&t.task.workdir);
         let worker_id = WorkerId::new(format!("w-{}", self.next_worker));
         self.next_worker += 1;
         let spec = SpawnSpec {
@@ -833,6 +971,7 @@ impl Core {
         worker::write_pidfile(&self.cfg.data_dir.join("workers"), &pf)
             .map_err(|e| e.to_string())?;
         self.metas.insert(worker_id.clone(), meta.clone());
+        self.pre_spawn.insert(task.clone(), snap);
         self.ctx.publish(Event::WorkerSpawned {
             worker: worker_id.clone(),
             task: task.clone(),
