@@ -83,6 +83,17 @@ fn fake_completion_three_strikes() {
         .filter(|e| matches!(&e.event, Event::GoalProgress { task, blocked_condition: Some(_), .. } if task == &t))
         .count();
     assert_eq!(goal, 1, "3 振出局应发 GoalProgress(blocked)");
+    // 反思回喂（aider 模式）：前两次失败的差异进 steering 且在重试轮投递
+    let feedback_q = events
+        .iter()
+        .filter(|e| matches!(&e.event, Event::SteeringQueued { task, message } if task == &t && message.contains("验收门")))
+        .count();
+    assert_eq!(feedback_q, 2, "失败 1、2 次应各注入一条反馈");
+    let feedback_d = events
+        .iter()
+        .filter(|e| matches!(&e.event, Event::SteeringDelivered { task, message, .. } if task == &t && message.contains("验收门")))
+        .count();
+    assert_eq!(feedback_d, 2, "重试轮开工前应投递反馈");
 }
 
 /// 前 2 轮假完成、第 3 轮产出 → 重试后通过（计数器放 .maestro/ —— 门忽略该目录）

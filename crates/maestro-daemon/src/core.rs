@@ -976,9 +976,30 @@ impl Core {
             });
             return; // 3 振出局，等用户 TaskRequeued
         }
+        // 反思回喂（aider 模式，R16）：失败差异进 steering，下一轮 worker
+        // 开工即见 —— 不静默重试同样的假完成
+        let m = self.steering.push(
+            task,
+            format!(
+                "验收门第 {failures}/3 次失败：worker 退出码 0 但 worktree 无实际产物（读回校验）。\
+                 请实际产出文件后再次报告完成，不要只输出完成声明。"
+            ),
+        );
+        self.ctx.publish(Event::SteeringQueued {
+            task: task.clone(),
+            message: m.message,
+        });
         // 急停期间不启动新 worker（B12 语义）；resume_all 会补拉起
         if self.emergency == EmergencyPhase::Frozen {
             return;
+        }
+        // 重试轮开工前 flush 轻推（含上面注入的失败反馈），与手动 resume 同语义
+        for msg in self.steering.drain(task) {
+            self.ctx.publish(Event::SteeringDelivered {
+                task: task.clone(),
+                round: t.round,
+                message: msg.message,
+            });
         }
         match self.spawn_worker_for(task) {
             Ok(w) => {

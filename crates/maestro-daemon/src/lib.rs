@@ -12,6 +12,7 @@ pub mod checkpoints;
 pub mod core;
 pub mod emergency;
 pub mod eventhub;
+pub mod llm;
 pub mod persist;
 pub mod server;
 pub mod state;

@@ -15,6 +15,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 nix.workspace = true
 rusqlite.workspace = true
+ureq.workspace = true
 
 [[bin]]
 name = "maestro-daemon"
