@@ -112,6 +112,20 @@ impl TestDaemon {
     }
 }
 
+impl Drop for TestDaemon {
+    fn drop(&mut self) {
+        // 测试卫生（R11 审计）：不留孤儿 worker、不漏 timer 线程。
+        // 1. 停 Core 循环
+        let _ = self.tx.send(CoreMsg::Shutdown);
+        // 2. 杀光 data_dir 名下全部 worker 进程组（pidfile 是权威清单）
+        for pf in maestro_daemon::worker::scan_pidfiles(&self.data_dir.join("workers")) {
+            maestro_testkit::pgid_sandbox::kill_group(pf.pgid);
+        }
+        // 3. 大幅推进虚拟时钟：唤醒卡在 sleep_until 的恢复 timer 线程
+        self.clock.advance_ms(1 << 40);
+    }
+}
+
 /// 初始化测试 git 仓库
 pub fn git_repo() -> (tempfile::TempDir, std::path::PathBuf) {
     let tmp = tempfile::tempdir().unwrap();

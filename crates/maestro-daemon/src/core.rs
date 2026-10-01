@@ -191,6 +191,11 @@ impl Core {
         };
         // 恢复时把「正在执行」的任务标记为 suspended(DaemonCrash)（仅手动恢复）
         core.mark_recovered_as_daemon_crash();
+        // 崩溃前已在自动恢复退避中的任务（NetworkLost 等）：重启后继续调度，
+        // 否则将永久滞留 Suspended（R11 审计发现的缺口）
+        for (task, attempt, _reason) in core.ctx.authority.auto_resume_candidates() {
+            core.schedule_resume(&task, attempt);
+        }
         (core, report)
     }
 
@@ -710,13 +715,18 @@ impl Core {
         crate::worker::remove_pidfile(&self.cfg.data_dir.join("workers"), &exit.worker);
 
         let Some(t) = self.ctx.authority.get(&exit.task).cloned() else {
+            self.pre_spawn.remove(&exit.task);
             return;
         };
         // 挂起恢复路径中 CLI 退出是预期内（freeze 后 wait 线程仍可能报退出）
         if t.state == WorkerState::Suspended {
+            // 快照随 worker 而死：下次 spawn 会重新采样
+            self.pre_spawn.remove(&exit.task);
             return;
         }
         if t.state != WorkerState::Working {
+            // 取消/失败等终态：清快照防滞留（R11 审计）
+            self.pre_spawn.remove(&exit.task);
             return;
         }
 
