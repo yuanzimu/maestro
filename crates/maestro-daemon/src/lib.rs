@@ -8,6 +8,7 @@
 //! - **PID 文件带 start_time**：防 PID 复用误杀
 
 pub mod acceptance;
+pub mod adapter;
 pub mod checkpoints;
 pub mod core;
 pub mod emergency;

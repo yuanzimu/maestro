@@ -16,7 +16,6 @@
 use maestro_client::MaestroClient;
 use maestro_protocol::api::Method;
 use serde::Serialize;
-use std::io::BufRead;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -77,23 +76,18 @@ fn main() {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
     let mut next_prompt = prompt;
+    // 方言（0.6 适配器）：默认 claude，MAESTRO_CLI_DIALECT 可换（B7 Codex/Gemini）
+    let dialect = maestro_daemon::adapter::dialect_by_name(
+        &std::env::var("MAESTRO_CLI_DIALECT").unwrap_or_default(),
+    );
 
     let mut round: u32 = 0;
     loop {
         round += 1;
-        // 1. 跑一轮底层 CLI
+        // 1. 跑一轮底层 CLI（方言构造参数）
         let mut cmd = Command::new(&cli[0]);
         cmd.args(&cli[1..])
-            .arg("-p")
-            .arg(&next_prompt)
-            .arg("--output-format")
-            .arg("stream-json")
-            .arg("--verbose")
-            .arg("--max-turns")
-            .arg("1");
-        if let Some(sid) = &session {
-            cmd.arg("--resume").arg(sid);
-        }
+            .args(dialect.round_args(&next_prompt, session.as_deref()));
         let out = match cmd.output() {
             Ok(o) => o,
             Err(e) => {
@@ -102,17 +96,18 @@ fn main() {
             }
         };
         if !out.status.success() {
-            // 透传退出码：daemon 按 stderr 分类（断连 → suspended 等）
+            // 透传退出码：daemon 按 adapter::classify_exit 分类（断连 → suspended 等）
             eprint!("{}", String::from_utf8_lossy(&out.stderr));
             std::process::exit(out.status.code().unwrap_or(1));
         }
-        let (sid, answer, usage_in, usage_out, cache_read, model) = parse_stream(&out.stdout);
-        let Some(sid) = sid else {
+        let oc = maestro_daemon::adapter::parse_stream_json(&out.stdout);
+        let Some(sid) = oc.session_id.clone() else {
             eprintln!("maestro-rounder: stream-json 缺 session_id");
             std::process::exit(3);
         };
         session = Some(sid.clone());
         let _ = std::fs::write(&session_file, &sid);
+        let answer = oc.answer.clone();
 
         // 2. 轮边界拉轻推（U4：注入下一轮）
         let steering = poll_steering(&client, &task, &worker);
@@ -143,9 +138,9 @@ fn main() {
             Method::TaskRoundReport,
             serde_json::json!({
                 "task": task, "worker": worker, "round": round,
-                "input_tokens": usage_in, "output_tokens": usage_out,
-                "cache_read_tokens": cache_read,
-                "model": model,
+                "input_tokens": oc.usage_in, "output_tokens": oc.usage_out,
+                "cache_read_tokens": oc.cache_read,
+                "model": oc.model,
             }),
         );
 
@@ -186,46 +181,4 @@ fn poll_steering(client: &MaestroClient, task: &str, worker: &str) -> Vec<String
             .unwrap_or_default(),
         Err(_) => vec![],
     }
-}
-
-/// stream-json 解析（system.session_id + result.result + usage + model）
-fn parse_stream(
-    stdout: &[u8],
-) -> (
-    Option<String>,
-    String,
-    u64,
-    u64,
-    Option<u64>,
-    Option<String>,
-) {
-    let mut sid = None;
-    let mut answer = String::new();
-    let mut model = None;
-    let (mut usage_in, mut usage_out, mut cache_read) = (0, 0, None);
-    for line in stdout.lines().map_while(Result::ok) {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
-            continue;
-        };
-        match v["type"].as_str() {
-            Some("system") => {
-                if let Some(s) = v["session_id"].as_str() {
-                    sid = Some(s.to_string());
-                }
-            }
-            Some("result") => {
-                if let Some(s) = v["result"].as_str() {
-                    answer = s.to_string();
-                }
-                usage_in = v["usage"]["input_tokens"].as_u64().unwrap_or(0);
-                usage_out = v["usage"]["output_tokens"].as_u64().unwrap_or(0);
-                cache_read = v["usage"]["cache_read_input_tokens"].as_u64();
-                if let Some(m) = v["model"].as_str() {
-                    model = Some(m.to_string());
-                }
-            }
-            _ => {}
-        }
-    }
-    (sid, answer, usage_in, usage_out, cache_read, model)
 }

@@ -1064,7 +1064,9 @@ impl Core {
         }
 
         // 断连模式 → Suspended(NetworkLost)，自动恢复（设计 §2.4）
-        if is_disconnect_error(&exit.stderr_tail) {
+        if crate::adapter::classify_exit(exit.exit_code, &exit.stderr_tail)
+            == crate::adapter::ExitClass::Disconnect
+        {
             self.ctx.publish(Event::Suspended {
                 task: exit.task.clone(),
                 worker: exit.worker.clone(),
@@ -1418,20 +1420,4 @@ impl Core {
             },
         }
     }
-}
-
-/// stderr 断连模式识别（设计 §2.4）
-fn is_disconnect_error(stderr: &str) -> bool {
-    const PATTERNS: &[&str] = &[
-        "connection reset",
-        "connection refused",
-        "timeout",
-        "timed out",
-        "econnrefused",
-        "fetch failed",
-        "network error",
-        "epipe",
-    ];
-    let lower = stderr.to_lowercase();
-    PATTERNS.iter().any(|p| lower.contains(p))
 }
