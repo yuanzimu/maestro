@@ -195,11 +195,19 @@ pub fn schema_drift(out: &RoundOutcome) -> Vec<String> {
 // 3. 方言（一轮调用的参数构造）
 // ---------------------------------------------------------------------------
 
-/// CLI 方言：如何为「一轮」构造参数（多轮驱动 Worker 消费）
+/// CLI 方言：如何为「一轮」构造参数（多轮驱动 Worker 消费）。
+/// R2 调研四抽象点：①参数构造（round_args）②输出格式（parse_round，
+/// 默认 claude stream-json）③续接语义（flag vs 子命令，round_args 表达）
+/// ④错误分类（classify_exit 共用，退出码差异在方言成熟时下沉）
 pub trait Dialect: Send + Sync {
     fn name(&self) -> &'static str;
     /// 一轮的参数：prompt 必达；resume 存在则续接会话
     fn round_args(&self, prompt: &str, resume: Option<&str>) -> Vec<String>;
+    /// 解析一轮输出（默认 = claude stream-json 格式；事件格式不兼容的
+    /// 方言如 Gemini/Codex 覆写此方法）
+    fn parse_round(&self, stdout: &[u8]) -> RoundOutcome {
+        parse_stream_json(stdout)
+    }
 }
 
 /// claude CLI 方言（默认；testkit mock CLI 对齐此子集）
@@ -228,10 +236,32 @@ impl Dialect for ClaudeDialect {
     }
 }
 
+/// Amp（Sourcegraph）方言（R41，B7 首个第二方言；R2 调研证实）：
+/// headless 用 `-x` 位置参数；**事件格式 Claude Code 兼容**（--stream-json）
+/// —— parse_round 直接复用默认实现。续接是子命令形态：
+/// `amp threads continue <tid> -x <prompt> --stream-json`。
+/// ⚠️ session 字段名待实测校准（内部 thread id 形如 T-<uuid>）
+pub struct AmpDialect;
+
+impl Dialect for AmpDialect {
+    fn name(&self) -> &'static str {
+        "amp"
+    }
+    fn round_args(&self, prompt: &str, resume: Option<&str>) -> Vec<String> {
+        let mut args: Vec<String> = vec![];
+        if let Some(tid) = resume {
+            args.extend(["threads".into(), "continue".into(), tid.into()]);
+        }
+        args.extend(["-x".into(), prompt.into(), "--stream-json".into()]);
+        args
+    }
+}
+
 /// 按名取方言（MAESTRO_CLI_DIALECT；未知名回落 claude）
 pub fn dialect_by_name(name: &str) -> Box<dyn Dialect> {
     match name {
         "claude" | "" => Box::new(ClaudeDialect),
+        "amp" => Box::new(AmpDialect),
         other => {
             tracing::warn!("未知方言 {other}，回落 claude");
             Box::new(ClaudeDialect)
@@ -426,11 +456,48 @@ mod tests {
         assert_eq!(args[i + 1], "sid-9");
     }
 
-    /// 方言注册表：未知回落 claude
+    /// Amp 方言（R41，B7）：首轮 -x 位置参数；续接子命令形态；
+    /// 事件格式 Claude 兼容 → parse_round 与 claude 同解析
+    #[test]
+    fn amp_dialect_args() {
+        let d = AmpDialect;
+        let args = d.round_args("做点事", None);
+        assert_eq!(
+            args,
+            vec![
+                "-x".to_string(),
+                "做点事".to_string(),
+                "--stream-json".to_string()
+            ],
+            "首轮：amp -x <prompt> --stream-json"
+        );
+        let args = d.round_args("继续", Some("T-abc-123"));
+        assert_eq!(
+            args,
+            vec![
+                "threads".to_string(),
+                "continue".to_string(),
+                "T-abc-123".to_string(),
+                "-x".to_string(),
+                "继续".to_string(),
+                "--stream-json".to_string(),
+            ],
+            "续接：amp threads continue <tid> -x <prompt> --stream-json"
+        );
+        // 事件格式 Claude 兼容（R2 调研）→ 默认 parse_round 输出一致
+        let stdout = stream(&[
+            r#"{"type":"system","session_id":"sid-1"}"#,
+            r#"{"type":"result","result":"ok","usage":{"input_tokens":1,"output_tokens":1}}"#,
+        ]);
+        assert_eq!(d.parse_round(&stdout), ClaudeDialect.parse_round(&stdout));
+    }
+
+    /// 方言注册表：amp 注册、未知回落 claude
     #[test]
     fn dialect_fallback() {
         assert_eq!(dialect_by_name("claude").name(), "claude");
         assert_eq!(dialect_by_name("").name(), "claude");
+        assert_eq!(dialect_by_name("amp").name(), "amp");
         assert_eq!(dialect_by_name("codex-future").name(), "claude");
     }
 }

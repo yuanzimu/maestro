@@ -143,7 +143,7 @@ fn main() {
             eprint!("{}", String::from_utf8_lossy(&out.stderr));
             std::process::exit(out.status.code().unwrap_or(1));
         }
-        let oc = maestro_daemon::adapter::parse_stream_json(&out.stdout);
+        let oc = dialect.parse_round(&out.stdout);
         // 结构化错误（R28，调研落地）：result.errors/api_error_status 优于解析
         // stderr 文本。可重试（429/5xx 过载限流）→ 合成 "API Error: N" 到
         // stderr 退出，daemon 分类为断连 → Suspended 自动恢复（否则烧光轮数
