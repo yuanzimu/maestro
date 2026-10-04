@@ -504,6 +504,95 @@ impl Dialect for GeminiDialect {
     }
 }
 
+/// OpenCode（sst/opencode）方言（R52，R2/R50 调研落地）：
+/// `opencode run --format json <prompt>`（NDJSON）；续接 `-s <sessionID>`
+/// （`-c` = 最近会话）。事件（opencode.ai/docs/cli）：
+/// - **每行都带 sessionID**（驼峰；无 init 事件）→ session
+/// - text.part.text → 回答（聚合）；tool_use.part.tool → 工具
+/// - step_finish.part.{tokens,cost} → 计量 + **自报费用（USD）** ——
+///   四方言中唯一带 cost 字段的（对账素材天然存在）
+/// - error.error.data.message → 错误
+/// ⚠️ 无官方 schema 版本承诺：解析对未知 type 跳行容错（与 claude 同策略）；
+/// tokens 的 cache 细分字段未稳定 → cache 桶留空（轮转检测按 in 桶低估，
+/// 待实测校准后补）
+pub struct OpenCodeDialect;
+
+impl Dialect for OpenCodeDialect {
+    fn name(&self) -> &'static str {
+        "opencode"
+    }
+    fn round_args(&self, prompt: &str, resume: Option<&str>) -> Vec<String> {
+        let mut args = vec!["run".into()];
+        if let Some(sid) = resume {
+            args.extend(["-s".into(), sid.into()]);
+        }
+        args.extend(["--format".into(), "json".into(), prompt.into()]);
+        args
+    }
+    fn parse_round(&self, stdout: &[u8]) -> RoundOutcome {
+        let mut out = RoundOutcome::default();
+        for line in stdout.lines().map_while(Result::ok) {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            let Some(t) = v["type"].as_str() else { continue };
+            if !out.event_types.iter().any(|e| e == t) {
+                out.event_types.push(t.to_string());
+            }
+            // sessionID 每行都带（无 init 事件）；以首见为准
+            if out.session_id.is_none() {
+                if let Some(s) = v["sessionID"].as_str() {
+                    out.session_id = Some(s.to_string());
+                }
+            }
+            match t {
+                "text" => {
+                    if let Some(txt) = v["part"]["text"].as_str() {
+                        out.answer.push_str(txt);
+                    }
+                }
+                "tool_use" => {
+                    if let Some(name) = v["part"]["tool"].as_str() {
+                        if !out.tools_used.iter().any(|x| x == name) {
+                            out.tools_used.push(name.to_string());
+                        }
+                    }
+                }
+                "step_finish" => {
+                    let p = &v["part"];
+                    out.usage_in = p["tokens"]["input"].as_u64().unwrap_or(0);
+                    out.usage_out = p["tokens"]["output"].as_u64().unwrap_or(0);
+                    // 唯一带自报费用的 CLI（USD → 对账素材）
+                    out.total_cost_usd = p["cost"].as_f64();
+                }
+                "error" => {
+                    out.is_error = true;
+                    if let Some(m) = v["error"]["data"]["message"].as_str() {
+                        out.errors.push(m.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+    fn schema_drift(&self, out: &RoundOutcome) -> Vec<String> {
+        let mut drifts = vec![];
+        if out.session_id.is_none() {
+            drifts.push("事件流无 sessionID（续接凭据丢失 —— OpenCode 每行都应带）".into());
+        }
+        if !out.event_types.iter().any(|t| t == "step_finish") {
+            drifts.push("缺 step_finish 事件（usage 计量丢失）".into());
+        } else if out.usage_in == 0 && out.usage_out == 0 {
+            drifts.push("step_finish 缺 tokens（计量闭环破坏）".into());
+        }
+        if out.answer.is_empty() {
+            drifts.push("无 text 事件（回答捕获失效 —— DONE 信号检测源）".into());
+        }
+        drifts
+    }
+}
+
 /// 按名取方言（MAESTRO_CLI_DIALECT；未知名回落 claude）
 pub fn dialect_by_name(name: &str) -> Box<dyn Dialect> {
     match name {
@@ -511,6 +600,7 @@ pub fn dialect_by_name(name: &str) -> Box<dyn Dialect> {
         "amp" => Box::new(AmpDialect),
         "codex" => Box::new(CodexDialect),
         "gemini" => Box::new(GeminiDialect),
+        "opencode" => Box::new(OpenCodeDialect),
         other => {
             tracing::warn!("未知方言 {other}，回落 claude");
             Box::new(ClaudeDialect)
@@ -902,5 +992,68 @@ mod tests {
             drifts.iter().any(|x| x.contains("init")),
             "claude 事件流对 gemini 方言应报缺 init: {drifts:?}"
         );
+    }
+
+    /// OpenCode 方言（R52）：sessionID 每行都带、text 聚合、step_finish
+    /// 计量 + **自报 cost（USD）**（四方言唯一）
+    #[test]
+    fn opencode_dialect_parses_ndjson() {
+        let d = OpenCodeDialect;
+        let stdout = stream(&[
+            r#"{"type":"step_start","sessionID":"ses-1","timestamp":1}"#,
+            r#"{"type":"text","sessionID":"ses-1","part":{"text":"正在执行"}}"#,
+            r#"{"type":"tool_use","sessionID":"ses-1","part":{"tool":"read","callID":"c1"}}"#,
+            r#"{"type":"text","sessionID":"ses-1","part":{"text":"，完成"}}"#,
+            r#"{"type":"step_finish","sessionID":"ses-1","part":{"reason":"stop","cost":0.0123,"tokens":{"input":200,"output":40}}}"#,
+        ]);
+        let oc = d.parse_round(&stdout);
+        assert_eq!(oc.session_id.as_deref(), Some("ses-1"), "每行 sessionID，首见为准");
+        assert_eq!(oc.answer, "正在执行，完成", "text 事件聚合");
+        assert_eq!(oc.tools_used, vec!["read"]);
+        assert_eq!(oc.usage_in, 200);
+        assert_eq!(oc.usage_out, 40);
+        assert_eq!(oc.total_cost_usd, Some(0.0123), "唯一自报费用的方言");
+        assert!(d.schema_drift(&oc).is_empty());
+    }
+
+    /// OpenCode error 事件 + 参数构造（run -s 续接）
+    #[test]
+    fn opencode_dialect_error_and_args() {
+        let d = OpenCodeDialect;
+        let stdout = stream(&[
+            r#"{"type":"step_start","sessionID":"ses-1"}"#,
+            r#"{"type":"error","sessionID":"ses-1","error":{"data":{"message":"provider down"}}}"#,
+        ]);
+        let oc = d.parse_round(&stdout);
+        assert!(oc.is_error);
+        assert_eq!(oc.errors, vec!["provider down".to_string()]);
+
+        assert_eq!(
+            d.round_args("做点事", None),
+            vec!["run".to_string(), "--format".to_string(), "json".to_string(), "做点事".to_string()]
+        );
+        assert_eq!(
+            d.round_args("继续", Some("ses-9")),
+            vec![
+                "run".to_string(),
+                "-s".to_string(),
+                "ses-9".to_string(),
+                "--format".to_string(),
+                "json".to_string(),
+                "继续".to_string(),
+            ]
+        );
+    }
+
+    /// OpenCode 漂移：无 sessionID / 缺 step_finish 的人话诊断
+    #[test]
+    fn opencode_dialect_drift() {
+        let d = OpenCodeDialect;
+        let stdout = stream(&[
+            r#"{"type":"text","sessionID":"ses-1","part":{"text":"ok"}}"#,
+        ]);
+        let oc = d.parse_round(&stdout);
+        let drifts = d.schema_drift(&oc);
+        assert!(drifts.iter().any(|x| x.contains("step_finish")), "{drifts:?}");
     }
 }

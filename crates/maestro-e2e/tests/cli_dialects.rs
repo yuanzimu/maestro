@@ -180,3 +180,53 @@ fn gemini_dialect_schema_mismatch_fails_loudly() {
         "TaskFailed 应带漂移诊断: {errors:?}"
     );
 }
+
+/// OpenCode 方言全链（R52）：`run -s <sid>` 续接 + step_finish 计量 +
+/// 自报 cost（四方言唯一）—— 自报费用经 daemon 对账路径（模型不在牌价
+/// 表 → cents 留空，对账跳过，不阻塞计量）
+#[test]
+#[serial]
+fn opencode_dialect_full_loop() {
+    let (_repo, work) = git_repo();
+    let mock_tmp = tempfile::tempdir().unwrap();
+    let cli = mock_tmp.path().join("mock-claude");
+    write_mock_cli(&cli, &mock_tmp.path().join("state"));
+
+    let d = TestDaemon::start_with_worker_env(
+        &rounder_bin(),
+        &["--", cli.to_str().unwrap()],
+        vec![("MAESTRO_CLI_DIALECT".into(), "opencode".into())],
+    );
+    let t = d.create_task("oc-mr", &work);
+    assert!(d.wait_state(&t, WorkerState::Working, 5000));
+    d.api(
+        Method::TaskSteer,
+        serde_json::json!({ "task": t.as_str(), "message": "结束" }),
+    );
+    assert!(
+        d.wait_state(&t, WorkerState::Done, 20000),
+        "实际: {:?}",
+        d.task_state(&t)
+    );
+
+    let recs = round_records(&work, &t);
+    assert!(recs.len() >= 2, "多轮: {recs:?}");
+    // 全程同一 sessionID（run -s 续接）
+    let sids: Vec<&str> = recs.iter().map(|r| r["session_id"].as_str().unwrap()).collect();
+    assert!(
+        sids.windows(2).all(|w| w[0] == w[1]),
+        "opencode run -s 应续接同一 session: {sids:?}"
+    );
+    // 计量：text/tool/step_finish 解析（无 cache 桶 → cache_read 0）
+    let v = d.api(Method::TaskLedger, serde_json::json!({ "task": t.as_str() }));
+    let n = recs.len() as u64;
+    assert_eq!(v["input_tokens"].as_u64().unwrap(), 200 * n, "账本: {v}");
+    assert_eq!(v["output_tokens"].as_u64().unwrap(), 40 * n, "账本: {v}");
+    assert_eq!(v["cache_read_tokens"].as_u64().unwrap_or(0), 0, "opencode 无 cache 细分: {v}");
+    // 工具叙事：opencode 的 read 工具计入
+    let g = d.api(Method::TaskGet, serde_json::json!({ "task": t.as_str() }));
+    assert!(
+        g["narrative"].as_str().unwrap_or_default().contains("read×"),
+        "narrative 应含 opencode 工具: {g}"
+    );
+}

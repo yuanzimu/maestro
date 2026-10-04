@@ -238,19 +238,22 @@ while [ $# -gt 0 ]; do
   case "$1" in
     -p) PROMPT="$2"; SAW_P=1; shift 2;;
     --resume) SID="$2"; RESUME_GIVEN=1; shift 2;;
+    -s) SID="$2"; RESUME_GIVEN=1; shift 2;;
     --output-format) shift 2;;
     --verbose) shift;;
     --max-turns) MAXTURNS="$2"; SAW_MAXTURNS=1; shift 2;;
     exec) CODEX_SEEN=1; shift;;
+    run) OPCODE_SEEN=1; shift;;
     resume) PREV="resume"; shift;;
     -*) shift;;
     *) if [ "$PREV" = "resume" ]; then SID="$1"; RESUME_GIVEN=1; PREV=""; else PROMPT="$1"; fi; shift;;
   esac
 done
-# 方言探测（R51 e2e）：codex 有 exec 子命令；gemini = -p 且无 --max-turns
-# （claude 方言恒带 --max-turns 1）；输出格式随之切换
+# 方言探测（R51/R52 e2e）：codex 有 exec 子命令；opencode 有 run 子命令；
+# gemini = -p 且无 --max-turns（claude 方言恒带 --max-turns 1）
 FMT="claude"
 if [ -n "$CODEX_SEEN" ]; then FMT="codex";
+elif [ -n "$OPCODE_SEEN" ]; then FMT="opencode";
 elif [ -n "$SAW_P" ] && [ -z "$SAW_MAXTURNS" ]; then FMT="gemini"; fi
 if [ -z "$SID" ]; then SID="sid-$$-$RANDOM"; fi
 CTX="$STATE_DIR/$SID.jsonl"
@@ -356,6 +359,11 @@ elif [ "$FMT" = "gemini" ]; then
     "{{\"type\":\"message\",\"role\":\"assistant\",\"content\":\"$ANSWER\"}}" \
     "{{\"type\":\"tool_use\",\"tool_name\":\"Read\",\"tool_id\":\"t1\"}}" \
     "{{\"type\":\"result\",\"status\":\"success\",\"stats\":{{\"input_tokens\":$IN,\"output_tokens\":$OUT,\"cached\":$CR}}}}"
+elif [ "$FMT" = "opencode" ]; then
+  printf '%s\n' \
+    "{{\"type\":\"text\",\"sessionID\":\"$SID\",\"part\":{{\"text\":\"$ANSWER\"}}}}" \
+    "{{\"type\":\"tool_use\",\"sessionID\":\"$SID\",\"part\":{{\"tool\":\"read\"}}}}" \
+    "{{\"type\":\"step_finish\",\"sessionID\":\"$SID\",\"part\":{{\"reason\":\"stop\",\"cost\":0.01,\"tokens\":{{\"input\":$IN,\"output\":$OUT}}}}}}"
 else
   printf '%s\n' \
     "{{\"type\":\"system\",\"session_id\":\"$SID\"}}" \
