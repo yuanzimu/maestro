@@ -96,7 +96,7 @@ fn walk(root: &Path, rel: PathBuf, out: &mut Snapshot, budget: &mut usize, exclu
         return;
     }
     let dir = root.join(&rel);
-    if excluded.iter().any(|e| dir == *e) {
+    if excluded.contains(&dir) {
         return;
     }
     let Ok(entries) = std::fs::read_dir(&dir) else {

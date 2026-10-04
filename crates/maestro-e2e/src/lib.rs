@@ -14,6 +14,25 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
+/// rounder 常规二进制路径（自举保证存在）。
+/// CI 失败教训（R51 的 CI 版）：`cargo test` 只构建 deps/ 下带 hash 的测试形态
+/// 二进制，不生成 `target/debug/maestro-rounder` —— CI 裸跑 cargo test 时
+/// spawn 直接 ENOENT。这里不存在则构建一次（本地日常 build 后秒过）。
+pub fn rounder_bin() -> String {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../target/debug/maestro-rounder"
+    );
+    if !Path::new(path).exists() {
+        let st = std::process::Command::new(env!("CARGO"))
+            .args(["build", "-p", "maestro-daemon", "--bin", "maestro-rounder"])
+            .status()
+            .expect("启动 cargo 构建 rounder");
+        assert!(st.success(), "cargo build maestro-rounder 失败");
+    }
+    path.to_string()
+}
+
 /// 测试用 daemon 实例（Core 在专属线程跑主循环 + 真实双 socket 服务）。
 /// socket 层必须真实存在：rounder 等 worker 子进程经 MAESTRO_SOCKET_PATH
 /// 连 daemon（TaskSteerPoll 等），进程内直调通道覆盖不到这条路径。

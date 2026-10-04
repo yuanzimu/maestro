@@ -22,13 +22,6 @@ use serial_test::serial;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
-fn rounder_bin() -> String {
-    concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../target/debug/maestro-rounder"
-    )
-    .to_string()
-}
 
 fn task_state_dir(work: &std::path::Path, task: &TaskId) -> std::path::PathBuf {
     work.join(".maestro").join(task.as_str())

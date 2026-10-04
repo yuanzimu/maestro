@@ -102,14 +102,19 @@ mod tests {
         d
     }
 
-    /// 把目录 mtime 拨回指定小时前（测试用；Linux touch）
+    /// 把目录 mtime 拨回指定小时前（测试用）。
+    /// CI 教训：`touch -d` 是 GNU 专属（macOS BSD touch 不支持）——
+    /// 改用 nix::utimensat 直接设 mtime，跨 Unix 平台无子进程依赖
     fn age_hours(p: &Path, hours: u32) {
-        let s = std::process::Command::new("touch")
-            .args(["-d", &format!("{hours} hours ago")])
-            .arg(p)
-            .status()
-            .unwrap();
-        assert!(s.success(), "touch 应可用（Linux 测试环境）");
+        use nix::sys::stat::{utimensat, UtimensatFlags};
+        use nix::sys::time::TimeSpec;
+        let past = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .saturating_sub(std::time::Duration::from_secs(hours as u64 * 3600));
+        let ts = TimeSpec::from_duration(past);
+        utimensat(None, p, &ts, &ts, UtimensatFlags::FollowSymlink)
+            .expect("utimensat 设置 mtime");
     }
 
     #[test]

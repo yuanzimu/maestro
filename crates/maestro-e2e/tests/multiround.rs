@@ -11,13 +11,6 @@ use maestro_testkit::r3::write_mock_cli;
 use serial_test::serial;
 
 /// rounder 二进制路径（workspace 共享 target）
-fn rounder_bin() -> String {
-    concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../target/debug/maestro-rounder"
-    )
-    .to_string()
-}
 
 /// 任务级 rounder 状态目录（R36：.maestro/<task_id>/，跨任务会话隔离）
 fn task_state_dir(work: &std::path::Path, task: &TaskId) -> std::path::PathBuf {
@@ -681,7 +674,7 @@ fn bad_cli_schema_fails_with_diagnosis() {
             }
             _ => None,
         })
-        .last()
+        .next_back()
         .expect("应有 TaskFailed 事件");
     assert!(failed.contains("schema"), "诊断应含 schema 字样: {failed}");
     assert!(

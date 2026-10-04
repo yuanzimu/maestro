@@ -18,7 +18,6 @@ use maestro_protocol::types::*;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::Sender;
-use std::time::Duration;
 
 /// Worker 启动配置
 pub struct SpawnSpec {
@@ -217,12 +216,12 @@ mod imp {
 
     pub fn freeze_group(pgid: u32) -> std::io::Result<()> {
         nix_kill(Pid::from_raw(-(pgid as i32)), Signal::SIGSTOP)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+            .map_err(|e| std::io::Error::other(e.to_string()))
     }
 
     pub fn unfreeze_group(pgid: u32) -> std::io::Result<()> {
         nix_kill(Pid::from_raw(-(pgid as i32)), Signal::SIGCONT)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+            .map_err(|e| std::io::Error::other(e.to_string()))
     }
 
     pub fn hard_kill_group(pgid: u32) -> bool {
@@ -470,6 +469,7 @@ pub fn scan_pidfiles(dir: &Path) -> Vec<PidFile> {
 mod tests {
     use super::*;
     use std::sync::mpsc;
+    use std::time::Duration;
 
     fn spec(program: &str, args: &[&str], tmp: &Path) -> SpawnSpec {
         SpawnSpec {

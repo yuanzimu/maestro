@@ -62,12 +62,9 @@ fn rollback_ref_namespace_locked() {
         Method::CheckpointRollback,
         serde_json::json!({ "task": t.as_str(), "to": "refs/maestro/cp/t-1/0-baseline" }),
     );
-    match r {
-        Err(code_msg) => {
-            let (code, _) = code_msg;
-            assert_ne!(code, -403, "命名空间内不应被安全层拒绝: {code}");
-        }
-        Ok(_) => {}
+    if let Err(code_msg) = r {
+        let (code, _) = code_msg;
+        assert_ne!(code, -403, "命名空间内不应被安全层拒绝: {code}");
     }
 }
 

@@ -11,13 +11,6 @@ use maestro_protocol::types::*;
 use maestro_testkit::r3::write_mock_cli;
 use serial_test::serial;
 
-fn rounder_bin() -> String {
-    concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../target/debug/maestro-rounder"
-    )
-    .to_string()
-}
 
 fn task_state_dir(work: &std::path::Path, task: &TaskId) -> std::path::PathBuf {
     work.join(".maestro").join(task.as_str())

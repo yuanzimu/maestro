@@ -30,9 +30,13 @@ pub enum Addr {
     Tcp(std::net::SocketAddr),
 }
 
-/// Windows 端口文件缺失时的占位地址（连接必失败，等价于 Unix 的 socket 不存在）
+/// Windows 端口文件缺失时的占位地址（连接必失败，等价于 Unix 的 socket 不存在）。
+/// 注意 const 构造：`SocketAddr::from` 非 const fn（E0658），用 V4 variant 直构。
 #[cfg(windows)]
-const UNRESOLVED: std::net::SocketAddr = std::net::SocketAddr::from(([127, 0, 0, 1], 1));
+const UNRESOLVED: std::net::SocketAddr = std::net::SocketAddr::V4(std::net::SocketAddrV4::new(
+    std::net::Ipv4Addr::LOCALHOST,
+    1,
+));
 
 impl Addr {
     /// ENV_SOCKET_PATH 的值（Unix=路径；Windows="ip:port"）

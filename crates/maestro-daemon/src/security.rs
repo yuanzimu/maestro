@@ -32,6 +32,14 @@ pub fn validate_workdir(path: &str) -> Result<(), String> {
     if !p.is_absolute() {
         return Err("workdir 必须是绝对路径".into());
     }
+    // 敏感目录按原串先拦（CI 教训：macOS 的 /etc 是符号链接，
+    // canonicalize 后变 /private/etc 会绕过等值比较；且目录不存在时
+    // 应报「敏感目录」而非「不存在」）
+    for d in DENIED_WORKDIRS {
+        if path == *d {
+            return Err(format!("敏感目录禁止作为 workdir: {d}"));
+        }
+    }
     let canon = p
         .canonicalize()
         .map_err(|_| format!("workdir 不存在: {path}"))?;
@@ -39,6 +47,7 @@ pub fn validate_workdir(path: &str) -> Result<(), String> {
         return Err(format!("workdir 不是目录: {path}"));
     }
     let s = canon.display().to_string();
+    // canonicalize 后再拦一道（防 /private/etc 之类真实路径直接传入）
     for d in DENIED_WORKDIRS {
         if s == *d {
             return Err(format!("敏感目录禁止作为 workdir: {d}"));
@@ -81,10 +90,10 @@ pub fn validate_task_input(title: &str, prompt: &str) -> Result<(), String> {
         return Err("title 不能为空".into());
     }
     if title.chars().count() > MAX_TITLE_LEN {
-        return Err(format!("title 超长（>{MAX_TITLE_LEN} 字符）").into());
+        return Err(format!("title 超长（>{MAX_TITLE_LEN} 字符）"));
     }
     if prompt.chars().count() > MAX_PROMPT_LEN {
-        return Err(format!("prompt 超长（>{MAX_PROMPT_LEN} 字符）").into());
+        return Err(format!("prompt 超长（>{MAX_PROMPT_LEN} 字符）"));
     }
     Ok(())
 }
@@ -95,7 +104,7 @@ pub fn validate_steer_message(msg: &str) -> Result<(), String> {
         return Err("消息不能为空".into());
     }
     if msg.chars().count() > MAX_STEER_LEN {
-        return Err(format!("消息超长（>{MAX_STEER_LEN} 字符）").into());
+        return Err(format!("消息超长（>{MAX_STEER_LEN} 字符）"));
     }
     Ok(())
 }

@@ -1394,7 +1394,7 @@ impl Core {
 
     /// workdir 读回采样（统一排除 daemon 数据目录）
     fn workdir_readback(&self, workdir: &str) -> crate::acceptance::Readback {
-        crate::acceptance::snapshot(std::path::Path::new(workdir), &[self.cfg.data_dir.clone()])
+        crate::acceptance::snapshot(std::path::Path::new(workdir), std::slice::from_ref(&self.cfg.data_dir))
     }
 
     /// 自动恢复计时到点：探测网络 → 恢复 or 记尝试次数并重排
