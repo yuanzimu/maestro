@@ -66,10 +66,12 @@ fn b1_b5_emergency_freeze_snapshot_resume() {
     );
     assert!(d.wait_state(&t, WorkerState::Working, 2000));
     std::thread::sleep(std::time::Duration::from_millis(100));
-    assert_ne!(
-        maestro_testkit::script_worker::proc_state(pid),
-        Some("T".to_string()),
-        "resume 后不应再是 T 态"
+    assert!(
+        !matches!(
+            maestro_testkit::script_worker::proc_state(pid),
+            Some(s) if s.starts_with('T') || s.starts_with('U')
+        ),
+        "resume 后不应再是 T/U 态"
     );
 
     // 清理

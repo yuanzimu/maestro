@@ -130,6 +130,17 @@ impl Stream {
             Stream::Tcp(s) => s.try_clone().map(Stream::Tcp),
         }
     }
+
+    /// 显式设置阻塞模式（accept 后恢复阻塞：macOS 继承 listener 的
+    /// O_NONBLOCK，Linux 不继承 —— 详见 daemon server.rs accept_loop）
+    pub fn set_nonblocking(&self, v: bool) -> io::Result<()> {
+        match self {
+            #[cfg(unix)]
+            Stream::Unix(s) => s.set_nonblocking(v),
+            #[cfg(windows)]
+            Stream::Tcp(s) => s.set_nonblocking(v),
+        }
+    }
 }
 
 impl Read for Stream {

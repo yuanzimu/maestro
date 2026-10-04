@@ -90,8 +90,14 @@ impl ScriptWorker {
     /// 用 vfork 优化，父进程卡在不可中断的 vfork-wait 直到子进程 exec ——
     /// 若 STOP 恰落在 vfork 窗口，父进程停在 D 直到子进程恢复，SIGSTOP
     /// 已投递且回用户态即生效。两种状态都代表组不再执行用户代码 = 冻结。
+    /// macOS BSD ps 的 stat 带后缀标记（如 "T+"）→ 首字母匹配；
+    /// BSD 的不可中断态是 U（Linux 是 D）。
     pub fn is_stopped(&self) -> bool {
-        matches!(proc_state(self.pid).as_deref(), Some("T") | Some("D"))
+        matches!(
+            proc_state(self.pid).as_deref(),
+            Some(s)
+                if s.starts_with('T') || s.starts_with('D') || s.starts_with('U')
+        )
     }
 
     /// 给整个进程组发信号
@@ -237,7 +243,11 @@ mod tests {
     fn proc_state_parses() {
         let me = std::process::id();
         let st = proc_state(me).expect("读自己");
-        assert!(matches!(st.as_str(), "R" | "S"), "状态应为 R/S，实际 {st}");
+        // 首字母匹配：macOS BSD ps 的 stat 带后缀（"S+"/"R+" 等）
+        assert!(
+            st.starts_with('R') || st.starts_with('S'),
+            "状态应为 R/S，实际 {st}"
+        );
     }
 
     /// 读自己的 pgid（Linux 经 /proc/self/stat；跨平台直接 getpgrp —— macOS 无 /proc）

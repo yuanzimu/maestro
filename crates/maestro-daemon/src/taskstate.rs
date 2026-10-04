@@ -104,7 +104,8 @@ mod tests {
 
     /// 把目录 mtime 拨回指定小时前（测试用）。
     /// CI 教训：`touch -d` 是 GNU 专属（macOS BSD touch 不支持）——
-    /// 改用 nix::utimensat 直接设 mtime，跨 Unix 平台无子进程依赖
+    /// 改用 nix::utimensat 直接设 mtime（Unix 系平台；nix 是 cfg(unix) 依赖）
+    #[cfg(unix)]
     fn age_hours(p: &Path, hours: u32) {
         use nix::sys::stat::{utimensat, UtimensatFlags};
         use nix::sys::time::TimeSpec;
@@ -123,6 +124,8 @@ mod tests {
         assert_eq!(dir_name("t 1/x"), "t_1_x");
     }
 
+    /// mtime 拨回依赖 age_hours（nix/utimensat，Unix 专属）
+    #[cfg(unix)]
     #[test]
     fn keeps_recent_removes_old_terminal_dirs() {
         let tmp = tempfile::tempdir().unwrap();

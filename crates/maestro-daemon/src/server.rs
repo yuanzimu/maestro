@@ -40,7 +40,9 @@ impl ServerGuard {
 }
 
 /// accept 循环：非阻塞 + 停机标志轮询（20ms 粒度）。
-/// 已接受的连接流是阻塞模式（Linux accept 不继承 O_NONBLOCK）。
+/// ⚠️ accept 后显式恢复阻塞：Linux 的 accept 不继承 listener 的 O_NONBLOCK，
+/// 但 macOS/BSD 会继承 —— 不显式设回的话 macOS 上连接流读到 WouldBlock
+/// 即断开（客户端 Broken pipe，CI 实测教训）。
 fn accept_loop(
     listener: Listener,
     stop: Arc<AtomicBool>,
@@ -48,7 +50,10 @@ fn accept_loop(
 ) {
     while !stop.load(Ordering::SeqCst) {
         match listener.accept() {
-            Ok(stream) => on_conn(stream),
+            Ok(stream) => {
+                let _ = stream.set_nonblocking(false);
+                on_conn(stream);
+            }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 std::thread::sleep(Duration::from_millis(20));
             }
