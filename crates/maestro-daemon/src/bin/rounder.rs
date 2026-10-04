@@ -155,6 +155,9 @@ fn main() {
                 "cache_read_tokens": oc.cache_read,
                 "cache_creation_tokens": oc.cache_creation,
                 "model": oc.model,
+                "tools_used": oc.tools_used,
+                // 摘要（U3 叙事）：全文可能很长，rounder 侧先截 200 字符
+                "summary": answer.chars().take(200).collect::<String>(),
             }),
         );
 

@@ -684,6 +684,21 @@ impl Core {
             .model
             .clone()
             .unwrap_or_else(|| self.cfg.default_model.clone());
+        // 轮进度事件（U3 叙事）：CLI/Desktop 实时渲染「它正在干什么」
+        self.ctx.publish(Event::RoundProgress {
+            task: params.task.clone(),
+            round: params.round,
+            tools_used: params.tools_used.clone(),
+            summary: params
+                .summary
+                .clone()
+                .unwrap_or_default()
+                .chars()
+                .take(120)
+                .collect(),
+            tokens_in: params.input_tokens,
+            tokens_out: params.output_tokens,
+        });
         let usage = crate::llm::priced_usage_entry(
             &model,
             params.input_tokens,

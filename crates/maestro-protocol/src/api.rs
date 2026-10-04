@@ -149,6 +149,12 @@ pub struct TaskRoundReportParams {
     /// 本轮模型（stream-json result.model；缺省用 daemon 默认 —— 计价用）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// 本轮工具调用名（去重；U3 叙事 → RoundProgress 事件）
+    #[serde(default)]
+    pub tools_used: Vec<String>,
+    /// 本轮回答摘要（rounder 侧截断；daemon 再钳 120 字符）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
 }
 
 /// `task.create` 参数

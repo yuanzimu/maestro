@@ -117,6 +117,23 @@ fn steering_injected_mid_task_changes_next_round() {
         v["counterfactual_cost_cents"].as_u64().unwrap_or(0) > 0,
         "已知模型应完成计价（cents > 0）: {v}"
     );
+    // 轮进度事件（U3 叙事）：每轮一条，带工具调用名与摘要
+    let store = maestro_daemon::persist::EventStore::open(&d.data_dir).unwrap();
+    let progresses = store
+        .replay_all()
+        .iter()
+        .filter(|e| {
+            matches!(
+                &e.event,
+                maestro_protocol::events::Event::RoundProgress { task, tools_used, .. }
+                    if task == &t && tools_used.iter().any(|t| t == "Read")
+            )
+        })
+        .count();
+    assert_eq!(
+        progresses, n_rounds as usize,
+        "每轮应有一条 RoundProgress 事件（含工具调用）: 实际 {progresses} / 轮 {n_rounds}"
+    );
 }
 
 /// kill -9 daemon 后恢复：rounder 读 .maestro/session 续接同一会话完成

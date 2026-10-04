@@ -179,6 +179,19 @@ pub enum Event {
         usage: UsageEntry,
     },
 
+    /// 轮进度（0.15 多轮驱动 / U3 叙事）：每轮一条 —— 工具调用 + 回答摘要，
+    /// 事件流订阅方（CLI/Desktop UI）实时渲染「它正在干什么」
+    RoundProgress {
+        task: TaskId,
+        round: u32,
+        /// 本轮工具调用名（去重）
+        tools_used: Vec<String>,
+        /// 回答摘要（前 120 字符 —— 全文太长，不进事件流）
+        summary: String,
+        tokens_in: u64,
+        tokens_out: u64,
+    },
+
     // ---- provider / batch（U11/T6）----
     ProviderSwitched {
         task: Option<TaskId>,

@@ -296,7 +296,7 @@ OUT=40
 
 printf '%s\n' \
   "{{\"type\":\"system\",\"session_id\":\"$SID\"}}" \
-  "{{\"type\":\"assistant\",\"message\":{{\"content\":\"$ANSWER\"}}}}" \
+  "{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"tool_use\",\"name\":\"Read\"}},{{\"type\":\"text\",\"text\":\"$ANSWER\"}}]}}}}" \
   "{{\"type\":\"result\",\"result\":\"$ANSWER\",\"usage\":{{\"input_tokens\":$IN,\"output_tokens\":$OUT,\"cache_read_input_tokens\":$CR,\"cache_creation_input_tokens\":$CC}}}}"
 "#,
         state = state_dir.display(),
