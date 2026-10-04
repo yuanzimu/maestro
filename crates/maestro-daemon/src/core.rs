@@ -217,6 +217,22 @@ impl Core {
         for (task, attempt, _reason) in core.ctx.authority.auto_resume_candidates() {
             core.schedule_resume(&task, attempt);
         }
+        // 终态任务状态目录滚动 GC（R50）：只删 Done/Failed/Cancelled 且超
+        // 保留额度的旧目录；非终态（resume 凭据）与未知目录不碰
+        let gc = crate::taskstate::gc_from_records(
+            core.ctx
+                .authority
+                .tasks
+                .values()
+                .map(|t| (&t.task.id, t.state, t.task.workdir.as_str())),
+        );
+        if !gc.removed.is_empty() {
+            eprintln!(
+                "maestro: 状态目录 GC: removed={}（每工作目录保留最近 {} 个终态目录）",
+                gc.removed.len(),
+                crate::taskstate::KEEP_PER_WORKDIR
+            );
+        }
         (core, report)
     }
 

@@ -306,7 +306,19 @@ P2：U4 完整版（需内置 Executor D2）· U6 v2 检讨（需失败事件库
 
 **R36 跨任务会话隔离（混沌⑩证伪驱动的真 bug 修复）**：rounder 状态目录从 `.maestro/` 迁移到 `.maestro/<task_id>/` —— 之前同 workdir 串行两任务，B 任务 resume A 的 session（跨任务上下文泄漏：A 通读后 B 无需通读即可召回 FACT）。证伪素材：mock 的 FACT 召回需会话内 read 标记。同任务 respawn/崩溃恢复读同一路径，续接语义不变。
 
-**测试**：146 项全绿（R1~R37，daemon 单测 67 + e2e 57 + protocol 12 + testkit 8 + CLI 3，clippy 零告警，3 连跑稳定）。里程碑见 git log。**已知缺陷（v0 接受）**见 [acceptance.rs](../crates/maestro-daemon/src/acceptance.rs) 模块头：无产物型任务误判（0.15 结构化验收断言接管）、workdir 外产物不可见。
+**R38~R49 增量（20 轮后续迭代，详见 git log）**：
+- **R39 轻推/压缩竞争修复**（混沌⑫证伪）：轻推占位时 compact_pending 作废（不得把轻推轮记账成压缩轮）；context_used 三桶合计（in + cache_read + cache_creation，漏 cache_creation 会低估占用）
+- **R40 R2 适配器矩阵调研**：Amp/CodeBuddy 事件格式 Claude 兼容可直接套 claude 方言；Codex（`codex exec` JSON）/Gemini（stream-json，退出码 42=输入错/53=轮次上限）/OpenCode 需独立解析器；Crush 无 JSON 不可行
+- **R41 AmpDialect**：Dialect trait 加 `parse_round` 钩子（默认 claude stream-json），Amp 走 `-x` 位置参数 + `threads continue <tid>` 续接
+- **R42/R43 轮数预算耗尽语义**：MAX_ROUNDS 到顶 ≠ 完成 —— exit 5 + `ROUNDS_EXHAUSTED` 标记 → blocked(RoundsExhausted) 进收件箱（steering 不 drop），resume → requeue → respawn 同 session 续接（每次 respawn 新预算）
+- **R44 负载混沌**：8 任务×4 槽混合场景全绿；教训：循环内 drop TempDir → workdir 幽灵目录（inode 活着可写但外部读不到），须保活
+- **R45/R46/R47 B1 叙事三层落地**：`events --human`（12 类事件可读渲染）→ narrative.rs 降级模板（TaskVitals 事件流单遍聚合 + progress_line「第 N 轮：{top3 工具}×{次数}，累计 {成本}，耗时 {t}｜最近：{摘要}」，task get API 内嵌）→ CLI `task get` 人话渲染（--json 保留原输出）
+- **R48 round 推进修复**（审计证伪）：TaskRecord.round 此前不随 RoundProgress 更新（无轻推/检查点的任务 ROUND 列恒 0）；修复用 max() 单调推进（respawn 重计不回退）
+- **R49 过期/孤儿 rounder 自杀**（混沌⑭）：poll -403（易主）→ exit 6 只烧 1 轮；daemon 失联容忍 1 轮（重启窗口）、连续 2 轮 exit 7 —— pre-pidfile 孤儿重启后 reap 扫不到，只能自杀止损
+- **R50 .maestro 状态目录滚动 GC**：只删权威库已终态（Done/Failed/Cancelled）任务的目录，每 workdir 按 mtime 保留最近 10 个；非终态（resume 凭据）与未知目录不碰；daemon 启动执行一次。dir_name 与 rounder 共用（taskstate.rs，防定位分歧）
+- **R51 Codex/Gemini 方言落地**（R2 适配器矩阵实现，调研见 B7 行）：CodexDialect（thread.started/item.*/turn.completed 事件 + `exec [--json] resume <tid>` 续接 + **拆桶口径**：input_tokens 是总量已含 cached/cache_write，解析侧拆回互斥三桶防轮转检测双计）；GeminiDialect（init/message/tool_use/result.stats + `--resume` + cached 合并值入 cache_read + **退出码 53=轮次上限**经 accepts_exit 钩子视为正常轮出口继续循环）；schema_drift 方言化（各自要素清单，claude 格式喂错方言 → 人话漂移诊断 + exit 3）；mock CLI 按参数形态自动切换输出格式（exec→codex / -p 且无 --max-turns→gemini），usage 三方言同源可对账
+
+**测试**：176 项全绿（R1~R51，daemon 单测 84 + e2e 64 + protocol 12 + testkit 8 + CLI 6 + client 1，clippy 零告警，3 连跑稳定）。里程碑见 git log。**已知缺陷（v0 接受）**见 [acceptance.rs](../crates/maestro-daemon/src/acceptance.rs) 模块头：无产物型任务误判（0.15 结构化验收断言接管）、workdir 外产物不可见。
 
 **R23 调试战果（dash vfork 之谜）**：sigstop/b1 测试 ~33% flake 的根因不是「高负载 D 态」而是 **dash 对单条外部命令用 vfork**——父进程阻塞在不可中断的 vfork-wait 直到子进程 exec；STOP 恰落在 vfork 窗口时父进程停在 D（子进程 T），SIGSTOP 已投递且回用户态即生效，但 /proc 主 pid 永不显示 T。测试断言改为 T|D 双态（= 组不再执行用户代码）。产品语义（I1 冻结 = kill 返回）不受影响。
 
@@ -334,13 +346,13 @@ P2：U4 完整版（需内置 Executor D2）· U6 v2 检讨（需失败事件库
 
 | # | 任务 | 特性 | 依赖 |
 |---|---|---|---|
-| B1 | 里程碑叙事：事件流经 L1 压缩为人类可读进度 + ETA（历史时长统计）+ 实时成本 | U3 | 0.14 LLM client + 埋点。**R45 调研完成**：Gemini「Topic & Update」模式最直接先例（每轮压成主题+更新）；各家均无 ETA 产品先例（建议历史轮均耗时滑动估算+置信度标注）；输出双层——一句话进度 + 可展开阶段列表；完成摘要卡「一句话+diff 就绪+花费」（Cursor/Devin 已验证）；LLM 不可用降级模板「第 N 轮：{最频繁工具}×{次数}，累计 ${cost}」；CLI 前菜已落地（`maestro events --human`，R45） |
+| B1 | 里程碑叙事：事件流经 L1 压缩为人类可读进度 + ETA（历史时长统计）+ 实时成本 | U3 | 0.14 LLM client + 埋点。**R45 调研完成**：Gemini「Topic & Update」模式最直接先例（每轮压成主题+更新）；各家均无 ETA 产品先例（建议历史轮均耗时滑动估算+置信度标注）；输出双层——一句话进度 + 可展开阶段列表；完成摘要卡「一句话+diff 就绪+花费」（Cursor/Devin 已验证）；LLM 不可用降级模板「第 N 轮：{最频繁工具}×{次数}，累计 ${cost}」。**CLI 前菜已落地（R45~R47）**：`events --human` 12 类事件渲染 + `task get` narrative 一句话进度（降级模板）+ 人话渲染 |
 | B2 | **轻推 steering v1**：运行中任务接收补充指示，下一轮生效（UI 入口 + 事件回显） | U4 v1 | 0.15/0.16 |
 | B3 | Blocked 收件箱 + 桌面通知 | G1/G5 | P0 inbox |
 | B4 | **通知治理 v1（U9）**：分级——仅 blocked/done/failed/预算触顶 弹系统通知，其余进活动流；digest 批处理（低优先级 30 分钟聚合一条）；任务级静音（「做完叫我」）；深链直达（点通知直接落到该 blocked 的决策界面） | U9 | P0 priority 埋点 + B3 |
 | B5 | 指挥台 UI：Worker 状态栏 + 任务列表 + 进度叙事呈现 + DAG 可视化 v1 | G4/U3 呈现 | B1 |
 | B6 | Code Mode 沙箱（rquickjs）+ 编排启发式 | T2/D4 | — |
-| B7 | Codex/Gemini 适配器 + worktree 隔离 | B6/B11 | 0.6 适配器框架 |
+| B7 | Codex/Gemini 适配器 + worktree 隔离 | B6/B11 | 0.6 适配器框架。**方言层已落地（R51）**：CodexDialect/GeminiDialect 全链 e2e（多轮续接/计量对账/53 轮次上限/漂移防护）；真实 CLI 端到端待 API key；worktree 隔离未做 |
 | B8 | 双模式切换：专注模式（单 Agent 深入）/ 并行模式（多 Worker 分头），Planner 自动判断或用户指定 | G2 | B7 worktree |
 | B9 | **急停/恢复 UI（U10）**：全局急停按钮（触达 0.18 三阶段）+ 挂起态任务列表（现场完整明示）+ 逐任务 resume/cancel/rollback 操作流 + steering flush|hold 选择 | U10 | 0.18/0.19 |
 | B10 | **Checkpoint 时光机 UI（U10）**：任务级时间线（checkpoint × U3 叙事标签联合）+ 节点 diff（vs 上一 cp / vs 当前）+ 恢复到此点（带 pre-rollback 确认）+ 星标保留 | U10 | 0.19 + B1 叙事 |

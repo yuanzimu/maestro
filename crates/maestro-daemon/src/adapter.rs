@@ -198,7 +198,7 @@ pub fn schema_drift(out: &RoundOutcome) -> Vec<String> {
 /// CLI 方言：如何为「一轮」构造参数（多轮驱动 Worker 消费）。
 /// R2 调研四抽象点：①参数构造（round_args）②输出格式（parse_round，
 /// 默认 claude stream-json）③续接语义（flag vs 子命令，round_args 表达）
-/// ④错误分类（classify_exit 共用，退出码差异在方言成熟时下沉）
+/// ④错误分类（classify_exit 共用，退出码差异经 accepts_exit 表达）
 pub trait Dialect: Send + Sync {
     fn name(&self) -> &'static str;
     /// 一轮的参数：prompt 必达；resume 存在则续接会话
@@ -207,6 +207,16 @@ pub trait Dialect: Send + Sync {
     /// 方言如 Gemini/Codex 覆写此方法）
     fn parse_round(&self, stdout: &[u8]) -> RoundOutcome {
         parse_stream_json(stdout)
+    }
+    /// 本方言视为「轮正常结束」的 CLI 退出码（默认仅 0）。
+    /// 例：Gemini 53 = 轮次上限（对应 claude 的 error_max_turns ——
+    /// 轮循环继续，不算任务失败）
+    fn accepts_exit(&self, _code: Option<i32>) -> bool {
+        false
+    }
+    /// schema 漂移检测（方言各自的要素清单；默认 = claude 三要素）
+    fn schema_drift(&self, out: &RoundOutcome) -> Vec<String> {
+        schema_drift(out)
     }
 }
 
@@ -257,11 +267,250 @@ impl Dialect for AmpDialect {
     }
 }
 
+/// Codex CLI（OpenAI）方言（R51，R2/R50 调研落地）：
+/// `codex exec --json <prompt>`（JSONL）；续接 `codex exec resume <tid>`。
+/// 事件（developers.openai.com/codex/noninteractive）：
+/// - thread.started.thread_id → session（续接凭据）
+/// - item.completed(item.type=agent_message).text → 回答（聚合；turn.completed 无文本）
+/// - item.*(command_execution/file_change/mcp_tool_call/web_search/todo_list) → 工具
+/// - turn.completed.usage → 计量；turn.failed / 顶层 error → 错误
+/// ⚠️ usage 口径差异：**input_tokens 已含 cached**（cached 是子集非加数）——
+/// 解析侧拆桶（in = input - cached），保证轮转检测的三桶合计不双计。
+/// ⚠️ 参数顺序与 cache_write 字段待实测校准（版本演进字段）
+pub struct CodexDialect;
+
+/// Codex item.* 里代表工具调用的事件名 → 工具名（U3 叙事口径）
+const CODEX_TOOL_ITEMS: &[&str] = &[
+    "command_execution",
+    "file_change",
+    "mcp_tool_call",
+    "web_search",
+    "todo_list",
+];
+
+impl Dialect for CodexDialect {
+    fn name(&self) -> &'static str {
+        "codex"
+    }
+    fn round_args(&self, prompt: &str, resume: Option<&str>) -> Vec<String> {
+        match resume {
+            Some(tid) => vec![
+                "exec".into(),
+                "resume".into(),
+                tid.into(),
+                "--json".into(),
+                prompt.into(),
+            ],
+            None => vec!["exec".into(), "--json".into(), prompt.into()],
+        }
+    }
+    fn parse_round(&self, stdout: &[u8]) -> RoundOutcome {
+        let mut out = RoundOutcome::default();
+        for line in stdout.lines().map_while(Result::ok) {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            let Some(t) = v["type"].as_str() else { continue };
+            if !out.event_types.iter().any(|e| e == t) {
+                out.event_types.push(t.to_string());
+            }
+            match t {
+                "thread.started" => {
+                    if let Some(tid) = v["thread_id"].as_str() {
+                        out.session_id = Some(tid.to_string());
+                    }
+                }
+                "item.started" | "item.updated" | "item.completed" => {
+                    let item = &v["item"];
+                    if let Some(kind) = item["type"].as_str() {
+                        if CODEX_TOOL_ITEMS.contains(&kind)
+                            && !out.tools_used.iter().any(|x| x == kind)
+                        {
+                            out.tools_used.push(kind.to_string());
+                        }
+                        // 回答 = agent_message 文本聚合（completed 才有完整 text）
+                        if t == "item.completed" && kind == "agent_message" {
+                            if let Some(text) = item["text"].as_str() {
+                                out.answer.push_str(text);
+                            }
+                        }
+                    }
+                }
+                "turn.completed" => {
+                    let u = &v["usage"];
+                    let input = u["input_tokens"].as_u64().unwrap_or(0);
+                    // 拆桶（口径差）：codex 的 input_tokens 是总量（已含 cached
+                    // 命中与 cache 写入 —— cached 是子集）—— 拆回互斥三桶，
+                    // 保证轮转检测的三桶合计 = 真实 context 占用（不双计）
+                    let cached = u["cached_input_tokens"].as_u64();
+                    let write = u["cache_write_input_tokens"].as_u64();
+                    out.cache_read = cached;
+                    out.cache_creation = write;
+                    out.usage_in = input
+                        .saturating_sub(cached.unwrap_or(0))
+                        .saturating_sub(write.unwrap_or(0));
+                    out.usage_out = u["output_tokens"].as_u64().unwrap_or(0);
+                }
+                "turn.failed" => {
+                    out.is_error = true;
+                    if let Some(m) = v["error"]["message"].as_str() {
+                        out.errors.push(m.to_string());
+                    }
+                }
+                "error" => {
+                    out.is_error = true;
+                    if let Some(m) = v["message"].as_str() {
+                        out.errors.push(m.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+    fn schema_drift(&self, out: &RoundOutcome) -> Vec<String> {
+        let mut drifts = vec![];
+        if !out.event_types.iter().any(|t| t == "thread.started") {
+            drifts.push("缺 thread.started 事件（thread_id 续接凭据丢失）".into());
+        } else if out.session_id.is_none() {
+            drifts.push("thread.started 缺 thread_id 字段（CLI schema 变化？）".into());
+        }
+        if !out.event_types.iter().any(|t| t == "turn.completed") {
+            drifts.push("缺 turn.completed 事件（usage 计量丢失）".into());
+        } else if out.usage_in == 0 && out.usage_out == 0 && out.cache_read.unwrap_or(0) == 0 {
+            drifts.push("turn.completed 缺 usage（计量闭环破坏）".into());
+        }
+        if out.answer.is_empty() {
+            drifts.push("无 agent_message 文本（回答捕获失效 —— DONE 信号检测源）".into());
+        }
+        drifts
+    }
+}
+
+/// Gemini CLI 方言（R51，R2/R50 调研落地）：
+/// `gemini -p <prompt> --output-format stream-json`；续接 `--resume <uuid>`
+/// （会话按项目目录哈希隔离，续接须同 cwd —— daemon 的 workdir 语义天然满足）。
+/// 事件（gemini-cli headless 文档）：
+/// - init.session_id → session；init.model → 模型
+/// - message(role=assistant).content → 回答（delta 增量拼接；非 delta 全文覆盖）
+/// - tool_use.tool_name → 工具
+/// - result.stats → 计量（cached 仅有合并值 → cache_read；无读/写细分）
+/// - result.status=error / error 事件 → 错误
+/// 退出码：0 成功；1 一般错；42 输入错误（Fatal）；**53 轮次上限**
+/// （= claude error_max_turns 语义：轮循环继续，不算失败）
+/// ⚠️ message delta/全文混合序列与 53 时 stdout 完整性待实测校准
+pub struct GeminiDialect;
+
+impl Dialect for GeminiDialect {
+    fn name(&self) -> &'static str {
+        "gemini"
+    }
+    fn round_args(&self, prompt: &str, resume: Option<&str>) -> Vec<String> {
+        let mut args = vec![
+            "-p".into(),
+            prompt.into(),
+            "--output-format".into(),
+            "stream-json".into(),
+        ];
+        if let Some(sid) = resume {
+            args.push("--resume".into());
+            args.push(sid.into());
+        }
+        args
+    }
+    fn accepts_exit(&self, code: Option<i32>) -> bool {
+        // 53 = 轮次上限：本轮事件流照常解析，轮循环继续（对应 claude 的
+        // error_max_turns 正常出口）；42 输入错误不在此列 → 透传失败
+        code == Some(53)
+    }
+    fn parse_round(&self, stdout: &[u8]) -> RoundOutcome {
+        let mut out = RoundOutcome::default();
+        for line in stdout.lines().map_while(Result::ok) {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            let Some(t) = v["type"].as_str() else { continue };
+            if !out.event_types.iter().any(|e| e == t) {
+                out.event_types.push(t.to_string());
+            }
+            match t {
+                "init" => {
+                    if let Some(s) = v["session_id"].as_str() {
+                        out.session_id = Some(s.to_string());
+                    }
+                    if let Some(m) = v["model"].as_str() {
+                        out.model = Some(m.to_string());
+                    }
+                }
+                "message" => {
+                    if v["role"] == "assistant" {
+                        if let Some(c) = v["content"].as_str() {
+                            if v["delta"].as_bool().unwrap_or(false) {
+                                out.answer.push_str(c);
+                            } else {
+                                // 全文消息：覆盖（防全文+增量混合时重复）
+                                out.answer = c.to_string();
+                            }
+                        }
+                    }
+                }
+                "tool_use" => {
+                    if let Some(name) = v["tool_name"].as_str() {
+                        if !out.tools_used.iter().any(|x| x == name) {
+                            out.tools_used.push(name.to_string());
+                        }
+                    }
+                }
+                "error" => {
+                    out.is_error = true;
+                    if let Some(m) = v["message"].as_str() {
+                        out.errors.push(m.to_string());
+                    }
+                }
+                "result" => {
+                    if v["status"] == "error" {
+                        out.is_error = true;
+                        if let Some(m) = v["error"]["message"].as_str() {
+                            out.errors.push(m.to_string());
+                        }
+                    }
+                    let s = &v["stats"];
+                    out.usage_in = s["input_tokens"].as_u64().unwrap_or(0);
+                    out.usage_out = s["output_tokens"].as_u64().unwrap_or(0);
+                    // cached 仅合并值（无读/写细分）→ 全记 cache_read
+                    out.cache_read = s["cached"].as_u64();
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+    fn schema_drift(&self, out: &RoundOutcome) -> Vec<String> {
+        let mut drifts = vec![];
+        if !out.event_types.iter().any(|t| t == "init") {
+            drifts.push("缺 init 事件（session_id 续接凭据丢失）".into());
+        } else if out.session_id.is_none() {
+            drifts.push("init 事件缺 session_id 字段（CLI schema 变化？）".into());
+        }
+        if !out.event_types.iter().any(|t| t == "result") {
+            drifts.push("缺 result 事件（usage 计量丢失）".into());
+        } else if out.usage_in == 0 && out.usage_out == 0 {
+            drifts.push("result 事件缺 stats（计量闭环破坏）".into());
+        }
+        if out.answer.is_empty() {
+            drifts.push("无 assistant message（回答捕获失效 —— DONE 信号检测源）".into());
+        }
+        drifts
+    }
+}
+
 /// 按名取方言（MAESTRO_CLI_DIALECT；未知名回落 claude）
 pub fn dialect_by_name(name: &str) -> Box<dyn Dialect> {
     match name {
         "claude" | "" => Box::new(ClaudeDialect),
         "amp" => Box::new(AmpDialect),
+        "codex" => Box::new(CodexDialect),
+        "gemini" => Box::new(GeminiDialect),
         other => {
             tracing::warn!("未知方言 {other}，回落 claude");
             Box::new(ClaudeDialect)
@@ -498,6 +747,160 @@ mod tests {
         assert_eq!(dialect_by_name("claude").name(), "claude");
         assert_eq!(dialect_by_name("").name(), "claude");
         assert_eq!(dialect_by_name("amp").name(), "amp");
+        assert_eq!(dialect_by_name("codex").name(), "codex");
+        assert_eq!(dialect_by_name("gemini").name(), "gemini");
         assert_eq!(dialect_by_name("codex-future").name(), "claude");
+    }
+
+    /// Codex 方言（R51）：thread/item/turn 事件解析 + **拆桶口径**
+    /// （input_tokens 已含 cached → in = input - cached，三桶合计不双计）
+    #[test]
+    fn codex_dialect_parses_and_splits_cache() {
+        let d = CodexDialect;
+        let stdout = stream(&[
+            r#"{"type":"thread.started","thread_id":"th-42"}"#,
+            r#"{"type":"item.started","item":{"id":"i1","type":"command_execution","command":"ls"}}"#,
+            r#"{"type":"item.completed","item":{"id":"i1","type":"command_execution","command":"ls","exit_code":0}}"#,
+            r#"{"type":"item.completed","item":{"id":"i2","type":"agent_message","text":"第一段"}}"#,
+            r#"{"type":"item.completed","item":{"id":"i3","type":"agent_message","text":"第二段"}}"#,
+            r#"{"type":"turn.completed","usage":{"input_tokens":1000,"cached_input_tokens":600,"cache_write_input_tokens":50,"output_tokens":80}}"#,
+        ]);
+        let oc = d.parse_round(&stdout);
+        assert_eq!(oc.session_id.as_deref(), Some("th-42"));
+        assert_eq!(oc.answer, "第一段第二段", "agent_message 文本聚合");
+        assert_eq!(oc.tools_used, vec!["command_execution"]);
+        // 拆桶：in = 1000-600-50（input 是总量，cached/cache_write 是子集）；
+        // 三桶互斥、合计 = 1000（真实 context 占用）
+        assert_eq!(oc.usage_in, 350);
+        assert_eq!(oc.cache_read, Some(600));
+        assert_eq!(oc.cache_creation, Some(50));
+        assert_eq!(oc.usage_in + oc.cache_read.unwrap() + oc.cache_creation.unwrap(), 1000);
+        assert_eq!(oc.usage_out, 80);
+        assert!(d.schema_drift(&oc).is_empty(), "要素齐全: {:?}", d.schema_drift(&oc));
+        // 退出码：codex 无特殊正常码（默认仅 0）
+        assert!(!d.accepts_exit(Some(53)));
+    }
+
+    /// Codex 缺 cached 字段（版本演进容错）：整体进 in 桶
+    #[test]
+    fn codex_dialect_missing_cached_field() {
+        let d = CodexDialect;
+        let stdout = stream(&[
+            r#"{"type":"thread.started","thread_id":"th-1"}"#,
+            r#"{"type":"item.completed","item":{"id":"i1","type":"agent_message","text":"ok"}}"#,
+            r#"{"type":"turn.completed","usage":{"input_tokens":700,"output_tokens":30}}"#,
+        ]);
+        let oc = d.parse_round(&stdout);
+        assert_eq!(oc.usage_in, 700);
+        assert_eq!(oc.cache_read, None);
+    }
+
+    /// Codex turn.failed / 顶层 error → 结构化错误
+    #[test]
+    fn codex_dialect_errors() {
+        let d = CodexDialect;
+        let stdout = stream(&[
+            r#"{"type":"thread.started","thread_id":"th-1"}"#,
+            r#"{"type":"turn.failed","error":{"message":"upstream 500"}}"#,
+        ]);
+        let oc = d.parse_round(&stdout);
+        assert!(oc.is_error);
+        assert_eq!(oc.errors, vec!["upstream 500".to_string()]);
+    }
+
+    /// Codex 参数构造：exec 形态 + resume 子命令形态
+    #[test]
+    fn codex_dialect_args() {
+        let d = CodexDialect;
+        assert_eq!(
+            d.round_args("做点事", None),
+            vec!["exec".to_string(), "--json".to_string(), "做点事".to_string()]
+        );
+        assert_eq!(
+            d.round_args("继续", Some("th-9")),
+            vec![
+                "exec".to_string(),
+                "resume".to_string(),
+                "th-9".to_string(),
+                "--json".to_string(),
+                "继续".to_string(),
+            ]
+        );
+    }
+
+    /// Gemini 方言（R51）：init/message/tool_use/result 解析 + delta 拼接
+    #[test]
+    fn gemini_dialect_parses_stream() {
+        let d = GeminiDialect;
+        let stdout = stream(&[
+            r#"{"type":"init","session_id":"g-1","model":"gemini-2.5-pro"}"#,
+            r#"{"type":"message","role":"user","content":"任务"}"#,
+            r#"{"type":"message","role":"assistant","content":"正在","delta":true}"#,
+            r#"{"type":"message","role":"assistant","content":"处理","delta":true}"#,
+            r#"{"type":"tool_use","tool_name":"read_file","tool_id":"t1"}"#,
+            r#"{"type":"result","status":"success","stats":{"input_tokens":200,"output_tokens":40,"cached":120}}"#,
+        ]);
+        let oc = d.parse_round(&stdout);
+        assert_eq!(oc.session_id.as_deref(), Some("g-1"));
+        assert_eq!(oc.model.as_deref(), Some("gemini-2.5-pro"));
+        assert_eq!(oc.answer, "正在处理", "delta 增量拼接");
+        assert_eq!(oc.tools_used, vec!["read_file"]);
+        assert_eq!(oc.usage_in, 200);
+        assert_eq!(oc.usage_out, 40);
+        assert_eq!(oc.cache_read, Some(120), "cached 合并值 → cache_read");
+        assert!(!oc.is_error);
+        assert!(d.schema_drift(&oc).is_empty());
+    }
+
+    /// Gemini 全文消息覆盖语义（防全文+增量混合重复）；result.status=error
+    #[test]
+    fn gemini_dialect_full_message_and_error() {
+        let d = GeminiDialect;
+        let stdout = stream(&[
+            r#"{"type":"init","session_id":"g-1"}"#,
+            r#"{"type":"message","role":"assistant","content":"完整回答"}"#,
+            r#"{"type":"result","status":"error","error":{"type":"api","message":"quota exceeded"},"stats":{"input_tokens":10,"output_tokens":1}}"#,
+        ]);
+        let oc = d.parse_round(&stdout);
+        assert_eq!(oc.answer, "完整回答");
+        assert!(oc.is_error);
+        assert_eq!(oc.errors, vec!["quota exceeded".to_string()]);
+    }
+
+    /// Gemini 退出码：53（轮次上限）= 正常轮出口；42/1 不接受
+    #[test]
+    fn gemini_dialect_exit_codes() {
+        let d = GeminiDialect;
+        assert!(d.accepts_exit(Some(53)), "53 = 轮次上限，轮循环继续");
+        assert!(!d.accepts_exit(Some(0)), "0 走 success 路径，无需特判");
+        assert!(!d.accepts_exit(Some(42)), "42 = 输入错误 → 失败");
+        assert!(!d.accepts_exit(Some(1)));
+        assert_eq!(
+            d.round_args("继续", Some("g-7")),
+            vec![
+                "-p".to_string(),
+                "继续".to_string(),
+                "--output-format".to_string(),
+                "stream-json".to_string(),
+                "--resume".to_string(),
+                "g-7".to_string(),
+            ]
+        );
+    }
+
+    /// 方言各自的三要素漂移（claude 格式喂 gemini 方言 → 报缺 init）
+    #[test]
+    fn gemini_dialect_drift_on_claude_events() {
+        let d = GeminiDialect;
+        let stdout = stream(&[
+            r#"{"type":"system","session_id":"s1"}"#,
+            r#"{"type":"result","result":"ok","usage":{"input_tokens":1,"output_tokens":1}}"#,
+        ]);
+        let oc = d.parse_round(&stdout);
+        let drifts = d.schema_drift(&oc);
+        assert!(
+            drifts.iter().any(|x| x.contains("init")),
+            "claude 事件流对 gemini 方言应报缺 init: {drifts:?}"
+        );
     }
 }

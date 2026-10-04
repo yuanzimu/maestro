@@ -231,15 +231,27 @@ pub fn write_mock_cli(path: &Path, state_dir: &Path) {
 # mock claude CLI（R3 harness）
 STATE_DIR="{state}"
 PROMPT=""; SID=""; RESUME_GIVEN=""; MAXTURNS=1
+SAW_P=""; SAW_MAXTURNS=""; CODEX_SEEN=""; PREV=""
+# 方言参数兼容（R51）：claude/gemini = -p 形态；codex = `exec [--json]
+# [resume <tid>] <prompt>` 位置参数形态
 while [ $# -gt 0 ]; do
   case "$1" in
-    -p) PROMPT="$2"; shift 2;;
+    -p) PROMPT="$2"; SAW_P=1; shift 2;;
     --resume) SID="$2"; RESUME_GIVEN=1; shift 2;;
-    --output-format|--verbose) shift;;
-    --max-turns) MAXTURNS="$2"; shift 2;;
-    *) shift;;
+    --output-format) shift 2;;
+    --verbose) shift;;
+    --max-turns) MAXTURNS="$2"; SAW_MAXTURNS=1; shift 2;;
+    exec) CODEX_SEEN=1; shift;;
+    resume) PREV="resume"; shift;;
+    -*) shift;;
+    *) if [ "$PREV" = "resume" ]; then SID="$1"; RESUME_GIVEN=1; PREV=""; else PROMPT="$1"; fi; shift;;
   esac
 done
+# 方言探测（R51 e2e）：codex 有 exec 子命令；gemini = -p 且无 --max-turns
+# （claude 方言恒带 --max-turns 1）；输出格式随之切换
+FMT="claude"
+if [ -n "$CODEX_SEEN" ]; then FMT="codex";
+elif [ -n "$SAW_P" ] && [ -z "$SAW_MAXTURNS" ]; then FMT="gemini"; fi
 if [ -z "$SID" ]; then SID="sid-$$-$RANDOM"; fi
 CTX="$STATE_DIR/$SID.jsonl"
 # --resume 语义对齐真实 CLI：不存在的 sid → 明确报错（S7a）
@@ -298,6 +310,10 @@ case "$PROMPT" in
        "{{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"errors\":[\"API Error: 529 overloaded_error\"],\"api_error_status\":529,\"usage\":{{\"input_tokens\":10,\"output_tokens\":0}}}}"
      exit 0;;
   *结束*) ANSWER="MAESTRO_DONE";;
+  *gemini轮次上限*)
+     # R51：模拟 Gemini CLI 退出码 53（轮次上限 = claude error_max_turns
+     # 语义，轮循环继续而非任务失败）。⚠️ case 模式不得含空格（bash 语法）
+     ANSWER="本轮到轮次上限"; GEMINI_EXIT53=1;;
   *SELF_DESTRUCT*)
      echo '{{"crashed":true}}' >> "$CTX"
      kill -9 $$
@@ -326,10 +342,28 @@ OUT=40
 COST_FIELD=""
 if [ -n "${{COST_USD:-}}" ]; then COST_FIELD=",\"total_cost_usd\":$COST_USD"; fi
 
-printf '%s\n' \
-  "{{\"type\":\"system\",\"session_id\":\"$SID\"}}" \
-  "{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"tool_use\",\"name\":\"Read\"}},{{\"type\":\"text\",\"text\":\"$ANSWER\"}}]}}}}" \
-  "{{\"type\":\"result\",\"result\":\"$ANSWER\",\"usage\":{{\"input_tokens\":$IN,\"output_tokens\":$OUT,\"cache_read_input_tokens\":$CR,\"cache_creation_input_tokens\":$CC}}$COST_FIELD}}"
+# 输出格式按方言（R51）：usage 数值三种方言同源（codex 的 input_tokens
+# 是总量 —— 用 IN+CR+CC 合成，解析侧拆桶后与 claude 口径完全对齐）
+if [ "$FMT" = "codex" ]; then
+  printf '%s\n' \
+    "{{\"type\":\"thread.started\",\"thread_id\":\"$SID\"}}" \
+    "{{\"type\":\"item.completed\",\"item\":{{\"id\":\"i1\",\"type\":\"agent_message\",\"text\":\"$ANSWER\"}}}}" \
+    "{{\"type\":\"item.completed\",\"item\":{{\"id\":\"i2\",\"type\":\"command_execution\",\"command\":\"ls\",\"exit_code\":0}}}}" \
+    "{{\"type\":\"turn.completed\",\"usage\":{{\"input_tokens\":$((IN+CR+CC)),\"cached_input_tokens\":$CR,\"cache_write_input_tokens\":$CC,\"output_tokens\":$OUT}}}}"
+elif [ "$FMT" = "gemini" ]; then
+  printf '%s\n' \
+    "{{\"type\":\"init\",\"session_id\":\"$SID\",\"model\":\"gemini-test\"}}" \
+    "{{\"type\":\"message\",\"role\":\"assistant\",\"content\":\"$ANSWER\"}}" \
+    "{{\"type\":\"tool_use\",\"tool_name\":\"Read\",\"tool_id\":\"t1\"}}" \
+    "{{\"type\":\"result\",\"status\":\"success\",\"stats\":{{\"input_tokens\":$IN,\"output_tokens\":$OUT,\"cached\":$CR}}}}"
+else
+  printf '%s\n' \
+    "{{\"type\":\"system\",\"session_id\":\"$SID\"}}" \
+    "{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"tool_use\",\"name\":\"Read\"}},{{\"type\":\"text\",\"text\":\"$ANSWER\"}}]}}}}" \
+    "{{\"type\":\"result\",\"result\":\"$ANSWER\",\"usage\":{{\"input_tokens\":$IN,\"output_tokens\":$OUT,\"cache_read_input_tokens\":$CR,\"cache_creation_input_tokens\":$CC}}$COST_FIELD}}"
+fi
+[ "${{GEMINI_EXIT53:-}}" = "1" ] && exit 53
+exit 0
 "#,
         state = state_dir.display(),
     );

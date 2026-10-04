@@ -83,21 +83,11 @@ fn main() {
     // 状态按任务隔离（R36）：session/轮账放 .maestro/<task_id>/ ——
     // 同 workdir 串行任务不得共享会话（跨任务上下文泄漏，混沌⑩证伪后修复）；
     // 同任务 respawn/崩溃恢复读同一路径，续接语义不变。
-    // task id 做目录名：非法字符替换 _（防御性，正常 id 为 t-N 形）
-    let safe_task: String = task
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
+    // 目录名经 taskstate::dir_name（与 daemon GC 共用，防定位分歧）
     let state_dir = std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
         .join(".maestro")
-        .join(&safe_task);
+        .join(maestro_daemon::taskstate::dir_name(&task));
     let _ = std::fs::create_dir_all(&state_dir);
     let session_file = state_dir.join("session");
     let rounds_file = state_dir.join("rounds.jsonl");
@@ -139,7 +129,10 @@ fn main() {
                 std::process::exit(3);
             }
         };
-        if !out.status.success() {
+        // 方言接受的「正常轮出口」（R51）：如 Gemini 53 = 轮次上限（对应
+        // claude error_max_turns —— 事件流照常解析，轮循环继续）
+        let round_exit_ok = out.status.success() || dialect.accepts_exit(out.status.code());
+        if !round_exit_ok {
             // CLI 跑过本轮 prompt（注入消息已消费）→ 先 ack 再透传退出码
             ack_steering(&client, &task, &worker, &injected_seqs);
             eprint!("{}", String::from_utf8_lossy(&out.stderr));
@@ -160,10 +153,11 @@ fn main() {
             eprintln!("maestro-rounder: {msg}");
             std::process::exit(1);
         }
-        // schema 漂移检测（R35）：续接凭据/计量/回答捕获任一缺失 = 核心能力
-        // 静默失效 —— 显式报错带人话诊断（exit 3 → daemon 判 Fatal），
-        // 不让坏 schema 的轮次空转烧预算
-        let drifts = maestro_daemon::adapter::schema_drift(&oc);
+        // schema 漂移检测（R35，R51 方言化）：续接凭据/计量/回答捕获任一
+        // 缺失 = 核心能力静默失效 —— 显式报错带人话诊断（exit 3 → daemon
+        // 判 Fatal），不让坏 schema 的轮次空转烧预算。要素清单各方言自带
+        // （claude 三要素 / Codex thread+turn / Gemini init+result）
+        let drifts = dialect.schema_drift(&oc);
         if !drifts.is_empty() {
             eprintln!("maestro-rounder: CLI schema 漂移: {}", drifts.join("; "));
             std::process::exit(3);

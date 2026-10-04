@@ -1187,3 +1187,41 @@ fn stale_or_orphan_rounder_self_exits() {
         d.task_state(&t)
     );
 }
+
+/// R50 状态目录 GC 零惊喜回归：daemon 重启后，近期终态任务（≤ 保留额度）
+/// 的 .maestro/<task>/ 轮账/session 必须还在（GC 只清超额旧目录）
+#[test]
+#[serial]
+fn restart_gc_keeps_recent_terminal_state_dirs() {
+    let data_tmp = tempfile::tempdir().unwrap();
+    let data_dir = data_tmp.path().to_path_buf();
+    let (_repo, work) = git_repo();
+    let mock_tmp = tempfile::tempdir().unwrap();
+    let cli = mock_tmp.path().join("mock-claude");
+    write_mock_cli(&cli, &mock_tmp.path().join("state"));
+    let rb = rounder_bin();
+
+    // 实例 1：任务跑到 Done（终态，session + 轮账落盘）
+    let t = {
+        let d = TestDaemon::start_with(&rb, &["--", cli.to_str().unwrap()], Some(data_dir.clone()));
+        let t = d.create_task_with_prompt("gc-keep", "结束", &work);
+        assert!(
+            d.wait_state(&t, WorkerState::Done, 20000),
+            "实际: {:?}",
+            d.task_state(&t)
+        );
+        t
+    }; // drop = kill -9
+
+    // 实例 2：恢复 → GC 跑一遍（终态 ×1 ≤ KEEP，零删除）
+    let d2 = TestDaemon::start_with(&rb, &["--", cli.to_str().unwrap()], Some(data_dir));
+    assert_eq!(d2.task_state(&t), WorkerState::Done, "重放后仍 Done");
+    assert!(
+        task_state_dir(&work, &t).join("rounds.jsonl").exists(),
+        "近期终态目录不得被 GC 删除"
+    );
+    assert!(
+        task_state_dir(&work, &t).join("session").exists(),
+        "session 文件（审计/续接凭据）保留"
+    );
+}

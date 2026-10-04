@@ -22,6 +22,7 @@ pub mod server;
 pub mod state;
 pub mod steering;
 pub mod suspend;
+pub mod taskstate;
 pub mod worker;
 
 pub use core::{Core, CoreMsg};
