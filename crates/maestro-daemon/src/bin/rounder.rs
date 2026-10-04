@@ -117,6 +117,8 @@ fn main() {
     );
 
     let mut round: u32 = 0;
+    // daemon 失联连击（R49）：连接失败连续 2 轮 = 孤儿（重启窗口不算）
+    let mut daemon_lost_streak: u32 = 0;
     // 上下文轮转状态（R37）：compact_pending = 下一轮注入压缩指令；
     // 防抖——压缩轮本身 usage 仍高（输入=全上下文），压缩后跳过一次检测
     // 给压缩生效留一轮（若仍超限，隔轮再压，不是死循环）
@@ -180,7 +182,11 @@ fn main() {
             injected_seqs.clear();
         }
         // 3. 轮边界拉轻推（U4：注入下一轮；at-least-once 重投未确认）
-        let steering = poll_steering(&client, &task, &worker);
+        let poll = poll_steering(&client, &task, &worker);
+        let steering: Vec<(u64, String)> = match &poll {
+            SteerPoll::Msgs(m) => m.clone(),
+            _ => vec![],
+        };
         let injected = !steering.is_empty();
         injected_seqs = steering.iter().map(|(s, _)| *s).collect();
 
@@ -223,6 +229,30 @@ fn main() {
                 "compacted": this_round_is_compact,
             }),
         );
+
+        // 4b. 过期/孤儿自杀（R49）：易主（-403）或连续失联的 rounder 不再
+        // 空转烧预算 —— 本轮账已尽力落盘/上报，退场把任务留给新 worker。
+        // daemon 对非当前 worker 的退出事件本就忽略（R14），无状态副作用；
+        // exit 6/7 只作为进程侧审计标记（stderr 人话）
+        match poll {
+            SteerPoll::Superseded => {
+                eprintln!(
+                    "maestro-rounder: STALE_WORKER 本任务已由新 worker 接管（poll -403），过期进程退场"
+                );
+                std::process::exit(6);
+            }
+            SteerPoll::Unreachable => {
+                daemon_lost_streak += 1;
+                if daemon_lost_streak >= 2 {
+                    eprintln!(
+                        "maestro-rounder: DAEMON_LOST 连续 {daemon_lost_streak} 轮 daemon 失联，\
+                         孤儿进程退场（session 已持久化，daemon 重启后重拉续接）"
+                    );
+                    std::process::exit(7);
+                }
+            }
+            SteerPoll::Msgs(_) => daemon_lost_streak = 0,
+        }
 
         // 5. 结束判定
         if answer.contains(DONE_MARKER) {
@@ -269,27 +299,44 @@ fn main() {
     }
 }
 
+/// 轮边界 poll 结果（R49）：消息之外还区分「易主」与「失联」——
+/// 前者立即退场（新 worker 已接管），后者容忍一轮（重启窗口）后自杀
+enum SteerPoll {
+    Msgs(Vec<(u64, String)>),
+    /// -403 not the current worker：所有权已易主 —— 过期进程不得再驱动任务
+    Superseded,
+    /// daemon 连接失败（socket 消失 = 进程已死）：连续 2 轮即孤儿
+    Unreachable,
+}
+
 /// 拉 steering（尽力而为：daemon 不可达时不阻塞任务，下一轮再试）。
 /// 返回 (seq, message) —— seq 用于消费后 ack（at-least-once）
-fn poll_steering(client: &MaestroClient, task: &str, worker: &str) -> Vec<(u64, String)> {
+fn poll_steering(client: &MaestroClient, task: &str, worker: &str) -> SteerPoll {
     match client.call(
         "steer-poll",
         Method::TaskSteerPoll,
         serde_json::json!({ "task": task, "worker": worker }),
     ) {
-        Ok(v) => v["messages"]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|m| {
-                        let seq = m["seq"].as_u64()?;
-                        let msg = m["message"].as_str()?;
-                        Some((seq, msg.to_string()))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
-        Err(_) => vec![],
+        Ok(v) => SteerPoll::Msgs(
+            v["messages"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|m| {
+                            let seq = m["seq"].as_u64()?;
+                            let msg = m["message"].as_str()?;
+                            Some((seq, msg.to_string()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        ),
+        // 易主判定只认 -403（所有权永久易主）；-404/-409 是状态快照差异，
+        // 保守重试下一轮
+        Err(maestro_client::ClientError::Rpc { code: -403, .. }) => SteerPoll::Superseded,
+        Err(maestro_client::ClientError::Connect(_)) => SteerPoll::Unreachable,
+        // 其他（协议错/临时性 RPC 错）：尽力而为，下一轮再试
+        Err(_) => SteerPoll::Msgs(vec![]),
     }
 }
 

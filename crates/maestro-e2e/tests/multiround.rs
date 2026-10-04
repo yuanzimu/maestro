@@ -1098,3 +1098,92 @@ fn task_get_narrative_line() {
         "最近轮摘要应收尾: {narrative}"
     );
 }
+
+/// 混沌⑭（R49）：过期/孤儿 rounder 自杀 —— poll -403（易主）→ exit 6 只烧
+/// 1 轮；daemon 失联容忍 1 轮（重启窗口）、连续 2 轮 → exit 7。
+/// 此前被取代/失联的 rounder 会空转到 MAX_ROUNDS 烧穿预算（pre-pidfile
+/// 孤儿连重启后的 reap 都扫不到，只能靠自杀止损）
+#[test]
+#[serial]
+fn stale_or_orphan_rounder_self_exits() {
+    let (_repo, work) = git_repo();
+    let mock_tmp = tempfile::tempdir().unwrap();
+    let cli = mock_tmp.path().join("mock-claude");
+    write_mock_cli(&cli, &mock_tmp.path().join("state"));
+    let d = TestDaemon::start(&rounder_bin(), &["--", cli.to_str().unwrap()]);
+
+    // 真任务保持 Working（占住所有权；泛化轮不收敛）
+    let t = d.create_task("ghost-guard", &work);
+    assert!(d.wait_state(&t, WorkerState::Working, 5000));
+
+    let socket = d.data_dir.join("maestro.api.sock");
+    let run_ghost = |task: &str, worker: &str, socket: &std::path::Path, dir: &std::path::Path| {
+        std::process::Command::new(rounder_bin())
+            .args(["--", cli.to_str().unwrap()])
+            .env("MAESTRO_TASK_ID", task)
+            .env("MAESTRO_WORKER_ID", worker)
+            .env("MAESTRO_SOCKET_PATH", socket)
+            .env("MAESTRO_PROMPT", "p")
+            .env("MAESTRO_MAX_ROUNDS", "5")
+            .env("MAESTRO_ROUND_GAP_MS", "50")
+            .current_dir(dir)
+            .output()
+            .expect("spawn ghost rounder")
+    };
+    let ghost_rounds = |dir: &std::path::Path| -> usize {
+        std::fs::read_to_string(dir.join(".maestro").join(t.as_str()).join("rounds.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| serde_json::from_str::<serde_json::Value>(l).is_ok())
+            .count()
+    };
+
+    // 场景 A：易主 —— 假 worker id → poll -403 → 立即退场（exit 6）
+    let ghost_a = tempfile::tempdir().unwrap();
+    let out = run_ghost(t.as_str(), "w-ghost", &socket, ghost_a.path());
+    assert_eq!(
+        out.status.code(),
+        Some(6),
+        "易主应 exit 6: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("STALE_WORKER"),
+        "stderr 应带人话标记"
+    );
+    assert_eq!(ghost_rounds(ghost_a.path()), 1, "易主自杀只烧 1 轮");
+    assert_eq!(
+        d.task_state(&t),
+        WorkerState::Working,
+        "真任务不受 ghost 影响"
+    );
+
+    // 场景 B：daemon 失联 —— socket 不存在；第 1 次 Connect 失败容忍
+    // （可能是 daemon 重启窗口），第 2 次自杀（exit 7）
+    let ghost_b = tempfile::tempdir().unwrap();
+    let dead_sock = ghost_b.path().join("no-such.sock");
+    let out = run_ghost(t.as_str(), "w-ghost2", &dead_sock, ghost_b.path());
+    assert_eq!(
+        out.status.code(),
+        Some(7),
+        "失联 2 轮应 exit 7: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("DAEMON_LOST"));
+    assert_eq!(
+        ghost_rounds(ghost_b.path()),
+        2,
+        "第 1 次失联应容忍，第 2 次才自杀"
+    );
+
+    // 收尾：真任务正常完成（ghost 未污染其会话/轮账）
+    d.api(
+        Method::TaskSteer,
+        serde_json::json!({ "task": t.as_str(), "message": "结束" }),
+    );
+    assert!(
+        d.wait_state(&t, WorkerState::Done, 20000),
+        "实际: {:?}",
+        d.task_state(&t)
+    );
+}
