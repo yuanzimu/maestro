@@ -264,6 +264,7 @@ case "$PROMPT" in
      P=$(echo "$PROMPT" | grep -o '\[[A-Z]\]' | head -1)
      echo "{{\"prefix\":\"$P\"}}" >> "$CTX"
      ANSWER="已记录前缀 $P";;
+  *网络故障*) echo "Error: connection reset by peer" >&2; exit 1;;
   *结束*) ANSWER="MAESTRO_DONE";;
   *SELF_DESTRUCT*)
      echo '{{"crashed":true}}' >> "$CTX"

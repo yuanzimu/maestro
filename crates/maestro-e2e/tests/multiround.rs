@@ -182,3 +182,201 @@ fn crash_recovery_resumes_session() {
         "崩溃恢复后应续接同一 session: {sids:?}"
     );
 }
+
+/// 混沌①：过期驱动进程防护 —— 旧 rounder 复活后不得拉走轻推/灌轮账（-403）
+#[test]
+#[serial]
+fn stale_worker_cannot_poll_or_report() {
+    let (_repo, work) = git_repo();
+    let mock_tmp = tempfile::tempdir().unwrap();
+    let cli = mock_tmp.path().join("mock-claude");
+    write_mock_cli(&cli, &mock_tmp.path().join("state"));
+    let d = TestDaemon::start(&rounder_bin(), &["--", cli.to_str().unwrap()]);
+    let t = d.create_task("stale-guard", &work);
+    assert!(d.wait_state(&t, WorkerState::Working, 5000));
+    let workers = d.api(Method::WorkerList, serde_json::json!({}));
+    let cur = workers["workers"][0]["id"].as_str().unwrap().to_string();
+
+    // 过期 worker 拉轻推 → -403（防抽走当前 worker 的消息）
+    let e = d.try_api(
+        Method::TaskSteerPoll,
+        serde_json::json!({ "task": t.as_str(), "worker": "w-stale" }),
+    );
+    assert_eq!(e.unwrap_err().0, -403, "过期 worker 不得拉轻推");
+
+    // 过期 worker 灌轮账 → -403（防账本被幽灵进程污染）
+    let e = d.try_api(
+        Method::TaskRoundReport,
+        serde_json::json!({
+            "task": t.as_str(), "worker": "w-stale", "round": 99,
+            "input_tokens": 12345, "output_tokens": 6789
+        }),
+    );
+    assert_eq!(e.unwrap_err().0, -403, "过期 worker 不得灌轮账");
+
+    // 当前 worker：poll 空 + report 正常入账
+    let v = d
+        .try_api(
+            Method::TaskSteerPoll,
+            serde_json::json!({ "task": t.as_str(), "worker": cur }),
+        )
+        .unwrap();
+    assert_eq!(v["messages"].as_array().map(|a| a.len()), Some(0));
+    // 清理：注入结束收敛
+    d.api(
+        Method::TaskSteer,
+        serde_json::json!({ "task": t.as_str(), "message": "结束" }),
+    );
+    assert!(d.wait_state(&t, WorkerState::Done, 20000));
+}
+
+/// 混沌②：任务终态时未投递轻推不静默丢失（SteeringDropped 事件可审计）。
+/// 单发 worker 同样适用（投递语义 v0.15 的终态兜底）
+#[test]
+#[serial]
+fn steering_dropped_not_silent_on_done() {
+    let (_repo, work) = git_repo();
+    // 500ms worker：确保轻推在退出前入队
+    let d = TestDaemon::start("/bin/sh", &["-c", "sleep 0.5; echo hi > out.txt"]);
+    let t = d.create_task("drop-on-done", &work);
+    assert!(d.wait_state(&t, WorkerState::Working, 5000));
+    d.api(
+        Method::TaskSteer,
+        serde_json::json!({ "task": t.as_str(), "message": "现在就停下" }),
+    );
+    assert!(d.wait_state(&t, WorkerState::Done, 5000));
+
+    let store = maestro_daemon::persist::EventStore::open(&d.data_dir).unwrap();
+    let dropped = store
+        .replay_all()
+        .iter()
+        .filter(|e| {
+            matches!(
+                &e.event,
+                maestro_protocol::events::Event::SteeringDropped { task, .. }
+                    if task == &t
+            )
+        })
+        .count();
+    assert_eq!(dropped, 1, "终态时未投递轻推应有 SteeringDropped（不静默）");
+}
+
+/// 混沌③：多轮任务中途断连（adapter::classify_exit 全链路）——
+/// 内层 CLI 网络错误 → rounder 透传 → daemon Suspended(NetworkLost) →
+/// 退避到点自动 respawn → session 续接 → 注入结束收敛
+#[test]
+#[serial]
+fn disconnect_mid_task_recovers_session() {
+    let (_repo, work) = git_repo();
+    let mock_tmp = tempfile::tempdir().unwrap();
+    let cli = mock_tmp.path().join("mock-claude");
+    write_mock_cli(&cli, &mock_tmp.path().join("state"));
+    let d = TestDaemon::start(&rounder_bin(), &["--", cli.to_str().unwrap()]);
+    let t = d.create_task("net-mr", &work);
+    assert!(d.wait_state(&t, WorkerState::Working, 5000));
+
+    // 等 round 1 落盘（保证故障指令注入到后续轮而非首轮）
+    let rounds_path = work.join(".maestro/rounds.jsonl");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if let Ok(c) = std::fs::read_to_string(&rounds_path) {
+            if c.lines().count() >= 1 {
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    // 注入网络故障指令 → 下一轮 prompt 命中 mock 的网络故障分支 → exit 1
+    d.api(
+        Method::TaskSteer,
+        serde_json::json!({ "task": t.as_str(), "message": "网络故障模拟：本轮触发连接失败" }),
+    );
+    // 断连映射 suspended（≠ failed）+ 退避调度
+    assert!(
+        d.wait_state(&t, WorkerState::Suspended, 10000),
+        "断连应 Suspended，实际: {:?}",
+        d.task_state(&t)
+    );
+    let v = d.api(Method::TaskGet, serde_json::json!({ "task": t.as_str() }));
+    assert_eq!(v["suspend_reason"], "network_lost");
+
+    // 推进虚拟时钟过第一档退避（30s）→ 自动恢复 respawn rounder
+    d.clock.advance_secs(31);
+    assert!(
+        d.wait_state(&t, WorkerState::Working, 5000),
+        "退避到点应自动恢复"
+    );
+
+    // 续接 session 完成收敛
+    d.api(
+        Method::TaskSteer,
+        serde_json::json!({ "task": t.as_str(), "message": "结束" }),
+    );
+    assert!(
+        d.wait_state(&t, WorkerState::Done, 20000),
+        "断连恢复后应续接完成，实际: {:?}",
+        d.task_state(&t)
+    );
+
+    // 全程同一 session（断连前的轮 + 恢复后的轮）
+    let rounds = std::fs::read_to_string(&rounds_path).unwrap();
+    let sids: Vec<String> = rounds
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .map(|r| r["session_id"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        sids.windows(2).all(|w| w[0] == w[1]),
+        "断连恢复应续接同一 session: {sids:?}"
+    );
+}
+
+/// 混沌④：两个多轮任务并发 —— 轮账/轻推/session 各自独立，互不串扰
+#[test]
+#[serial]
+fn two_concurrent_multiround_tasks() {
+    let (_repo1, work1) = git_repo();
+    let (_repo2, work2) = git_repo();
+    let mock_tmp = tempfile::tempdir().unwrap();
+    let cli = mock_tmp.path().join("mock-claude");
+    write_mock_cli(&cli, &mock_tmp.path().join("state"));
+    let d = TestDaemon::start(&rounder_bin(), &["--", cli.to_str().unwrap()]);
+
+    let t1 = d.create_task("mr-a", &work1);
+    let t2 = d.create_task("mr-b", &work2);
+    assert!(d.wait_state(&t1, WorkerState::Working, 5000));
+    assert!(d.wait_state(&t2, WorkerState::Working, 5000));
+
+    // 各自注入结束
+    d.api(
+        Method::TaskSteer,
+        serde_json::json!({ "task": t1.as_str(), "message": "结束" }),
+    );
+    d.api(
+        Method::TaskSteer,
+        serde_json::json!({ "task": t2.as_str(), "message": "结束" }),
+    );
+    assert!(
+        d.wait_state(&t1, WorkerState::Done, 20000),
+        "{:?}",
+        d.task_state(&t1)
+    );
+    assert!(
+        d.wait_state(&t2, WorkerState::Done, 20000),
+        "{:?}",
+        d.task_state(&t2)
+    );
+
+    // 轮账各自落在各自 workdir
+    assert!(work1.join(".maestro/rounds.jsonl").exists());
+    assert!(work2.join(".maestro/rounds.jsonl").exists());
+    // ledger 独立且都 ≥1 轮
+    for t in [&t1, &t2] {
+        let v = d.api(
+            Method::TaskLedger,
+            serde_json::json!({ "task": t.as_str() }),
+        );
+        assert!(v["rounds"].as_u64().unwrap() >= 1, "ledger: {v}");
+    }
+}

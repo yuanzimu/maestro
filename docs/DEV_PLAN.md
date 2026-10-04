@@ -299,7 +299,7 @@ P2：U4 完整版（需内置 Executor D2）· U6 v2 检讨（需失败事件库
 | 🔶 | 0.6 适配器 | **R25 框架完成**：adapter.rs 三件套 —— stream-json 解析（RoundOutcome：session/answer/usage/model/工具调用/subtype）+ 退出分类（Disconnect≠failed，认证/配额 Fatal 优先，防误恢复烧钱）+ 方言 trait（claude 默认，MAESTRO_CLI_DIALECT 可插拔，B7 Codex/Gemini 预留）；rounder/core 已接线；**真实 claude CLI 端到端待 API key** |
 | ⬜ | 0.8 落地 / 0.9 UI / 真实 CLI 验证 | 模型路由实测（L1 池 + 升级路径）、账本 UI 呈现、claude CLI 真实验证 —— 均待 API key / P1 前置调研（R2 适配器矩阵） |
 
-**测试**：127 项全绿（R1~R25，daemon 单测 61 + e2e 44 + protocol 12 + testkit 8 + CLI 3，clippy 零告警）。里程碑见 git log。**已知缺陷（v0 接受）**见 [acceptance.rs](../crates/maestro-daemon/src/acceptance.rs) 模块头：无产物型任务误判（0.15 结构化验收断言接管）、workdir 外产物不可见。
+**测试**：131 项全绿（R1~R26，daemon 单测 61 + e2e 48 + protocol 12 + testkit 8 + CLI 3，clippy 零告警）。里程碑见 git log。**已知缺陷（v0 接受）**见 [acceptance.rs](../crates/maestro-daemon/src/acceptance.rs) 模块头：无产物型任务误判（0.15 结构化验收断言接管）、workdir 外产物不可见。
 
 **R23 调试战果（dash vfork 之谜）**：sigstop/b1 测试 ~33% flake 的根因不是「高负载 D 态」而是 **dash 对单条外部命令用 vfork**——父进程阻塞在不可中断的 vfork-wait 直到子进程 exec；STOP 恰落在 vfork 窗口时父进程停在 D（子进程 T），SIGSTOP 已投递且回用户态即生效，但 /proc 主 pid 永不显示 T。测试断言改为 T|D 双态（= 组不再执行用户代码）。产品语义（I1 冻结 = kill 返回）不受影响。
 
