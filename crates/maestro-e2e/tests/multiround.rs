@@ -836,3 +836,111 @@ fn context_rotation_compacts_when_over_limit() {
         .count();
     assert_eq!(compacted_events, 1, "应恰有一条 ContextCompacted 事件");
 }
+
+/// 混沌⑫ 轻推与压缩竞争（R39）：超限轮的边界同时有轻推 —— 轻推优先占
+/// 下一轮，压缩意图作废（不得把轻推轮记账成压缩轮）；轻推轮后占用仍
+/// 超限 → 压缩在再下一轮重新触发
+#[test]
+#[serial]
+fn steering_beats_compact_and_compact_retriggers() {
+    let (_repo, work) = git_repo();
+    let mock_tmp = tempfile::tempdir().unwrap();
+    let cli = mock_tmp.path().join("mock-claude");
+    write_mock_cli(&cli, &mock_tmp.path().join("state"));
+    let d = TestDaemon::start_with_worker_env(
+        &rounder_bin(),
+        &["--", cli.to_str().unwrap()],
+        vec![("MAESTRO_CONTEXT_LIMIT".into(), "600".into())],
+    );
+
+    let t = d.create_task_with_prompt("ctx-race", "上下文增长：每轮记录新发现", &work);
+    assert!(d.wait_state(&t, WorkerState::Working, 5000));
+
+    let rounds_path = task_state_dir(&work, &t).join("rounds.jsonl");
+    let read_rounds = || -> Vec<serde_json::Value> {
+        std::fs::read_to_string(&rounds_path)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect()
+    };
+    let wait_round = |n: usize| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while std::time::Instant::now() < deadline {
+            if read_rounds().len() >= n {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!("20s 内未到轮 {n}: {:?}", read_rounds());
+    };
+
+    // 轮 2 落盘后注入轻推 → 轮 3 边界 poll 拿到；轮 3（继续指令轮，
+    // CTX 3 行 = 600 达阈值）结束时检测超限但下一轮已被轻推占用
+    wait_round(2);
+    d.api(
+        Method::TaskSteer,
+        serde_json::json!({ "task": t.as_str(), "message": "补充指示：输出加前缀 [Z]" }),
+    );
+
+    // 轮 3 = 继续指令轮（600 达阈）；轮 4 = 轻推轮（[Z]）
+    wait_round(4);
+    // 轮 5：轻推轮后仍超限（CTX 4 行 = 800）→ 压缩重新触发
+    wait_round(6);
+
+    // 轮 4（轻推轮）不得记账成压缩轮 —— prompt 与 compacted 标记一致
+    let recs = read_rounds();
+    let steer_round = recs
+        .iter()
+        .find(|r| r["prompt"].as_str().unwrap_or("").contains("[Z]"))
+        .expect("应存在 [Z] 轻推轮");
+    assert!(
+        !steer_round["compacted"].as_bool().unwrap_or(false),
+        "轻推轮不得记为压缩轮（R39 bug）: {steer_round}"
+    );
+    // 压缩轮存在且 prompt 真的是 /compact 指令（在轻推轮之后）
+    let steer_no = steer_round["round"].as_u64().unwrap();
+    let compact_rounds: Vec<&serde_json::Value> = recs
+        .iter()
+        .filter(|r| r["compacted"].as_bool().unwrap_or(false))
+        .collect();
+    assert!(!compact_rounds.is_empty(), "轻推轮后应重新触发压缩");
+    for c in &compact_rounds {
+        assert!(
+            c["prompt"].as_str().unwrap_or("").contains("/compact"),
+            "压缩轮 prompt 必须是压缩指令: {c}"
+        );
+        assert!(
+            c["round"].as_u64().unwrap() > steer_no,
+            "压缩应发生在轻推轮之后: {c}"
+        );
+    }
+
+    // 收敛
+    d.api(
+        Method::TaskSteer,
+        serde_json::json!({ "task": t.as_str(), "message": "结束" }),
+    );
+    assert!(
+        d.wait_state(&t, WorkerState::Done, 20000),
+        "实际: {:?}",
+        d.task_state(&t)
+    );
+    // 压缩轮数量与 ContextCompacted 事件一致（每个压缩轮恰一条）
+    let store = maestro_daemon::persist::EventStore::open(&d.data_dir).unwrap();
+    let events = store
+        .replay_all()
+        .iter()
+        .filter(|e| {
+            matches!(
+                &e.event,
+                maestro_protocol::events::Event::ContextCompacted { task, .. } if task == &t
+            )
+        })
+        .count();
+    assert_eq!(
+        events,
+        compact_rounds.len(),
+        "ContextCompacted 事件数应等于压缩轮数"
+    );
+}

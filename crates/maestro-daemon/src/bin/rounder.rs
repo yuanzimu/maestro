@@ -233,17 +233,21 @@ fn main() {
             std::process::exit(0);
         }
 
-        // 6. 上下文占用检测（R37）：输入侧 token（含缓存命中）近似占用。
-        //    压缩轮跳过（防抖——压缩生效需一轮，见上）
-        let context_used = oc.usage_in + oc.cache_read.unwrap_or(0);
+        // 6. 上下文占用检测（R37）：输入侧 token（含缓存命中与写缓存——
+        //    三者合起来才是真实 context 占用）近似。压缩轮跳过（防抖——
+        //    压缩生效需一轮，见上）
+        let context_used =
+            oc.usage_in + oc.cache_read.unwrap_or(0) + oc.cache_creation.unwrap_or(0);
         if !this_round_is_compact && context_used >= context_limit {
             compact_pending = true;
         }
 
         // 7. 下一轮 prompt：轻推 > 压缩 > 继续。
-        //    轻推优先（用户实时指令最急，压缩顺延到下轮检测）；
+        //    轻推优先（用户实时指令最急）：轻推占位时压缩意图**作废**
+        //    （不得把轻推轮记账成压缩轮，R39），轻推轮后检测重估再触发；
         //    无内容时按轮间隔歇一拍（防秒回型 CLI 热循环）
         if injected {
+            compact_pending = false;
             next_prompt = steering
                 .iter()
                 .map(|(_, m)| m.as_str())
