@@ -253,6 +253,13 @@ impl Authority {
                     t.round = *round;
                 }
             }
+            // 轮进度推进 round（R48）：多轮驱动的主路径 —— 无轻推/检查点的任务
+            // 也得有轮次显示。max() 单调：respawn 后 rounder 从 1 重计不回退
+            RoundProgress { task, round, .. } => {
+                if let Some(t) = self.tasks.get_mut(task) {
+                    t.round = t.round.max(*round);
+                }
+            }
             // 与状态无关的事件（叙事/反馈/账本/急停快照…）—— 未来 UI 消费
             _ => {}
         }
@@ -339,6 +346,64 @@ mod tests {
         );
         // 挂起原因换过 → 退避计数清零（A8/Suspended 联动）
         assert_eq!(a.resume_attempts, 0);
+    }
+
+    /// RoundProgress 推进 TaskRecord.round（R48 审计缺陷）：无轻推/检查点的
+    /// 多轮任务，task list ROUND 列与 task get round 不得恒为 0；
+    /// respawn 后 rounder 从 1 重计 → max() 单调不回退
+    #[test]
+    fn round_progress_advances_task_round() {
+        let mut a = Authority::new();
+        a.apply(
+            &Event::TaskCreated {
+                task: task("t1"),
+                prompt: "p".into(),
+            },
+            0,
+        );
+        for r in 1..=3u32 {
+            a.apply(
+                &Event::RoundProgress {
+                    task: TaskId::new("t1"),
+                    round: r,
+                    tools_used: vec![],
+                    summary: "s".into(),
+                    tokens_in: 1,
+                    tokens_out: 1,
+                },
+                r as u64,
+            );
+        }
+        assert_eq!(a.get(&TaskId::new("t1")).unwrap().round, 3, "轮进度应推进 round");
+        // respawn 续接：rounder 重启从 1 重计 → 不回退（显示口径单调）
+        a.apply(
+            &Event::RoundProgress {
+                task: TaskId::new("t1"),
+                round: 1,
+                tools_used: vec![],
+                summary: "s".into(),
+                tokens_in: 1,
+                tokens_out: 1,
+            },
+            4,
+        );
+        assert_eq!(
+            a.get(&TaskId::new("t1")).unwrap().round,
+            3,
+            "respawn 重计不得回退 round"
+        );
+        a.apply(
+            &Event::RoundProgress {
+                task: TaskId::new("t1"),
+                round: 4,
+                tools_used: vec![],
+                summary: "s".into(),
+                tokens_in: 1,
+                tokens_out: 1,
+            },
+            5,
+        );
+        assert_eq!(a.get(&TaskId::new("t1")).unwrap().round, 4, "超越旧值后推进");
     }
 
     /// 自动恢复候选只含 auto 策略的挂起任务（A1 联动）

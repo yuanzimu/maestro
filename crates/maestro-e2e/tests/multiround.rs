@@ -1077,6 +1077,12 @@ fn task_get_narrative_line() {
     assert!(n >= 1, "至少 1 轮: {rounds}");
 
     let v = d.api(Method::TaskGet, serde_json::json!({ "task": t.as_str() }));
+    // R48 修复：TaskRecord.round 随 RoundProgress 推进（此前恒 0）
+    assert_eq!(
+        v["round"].as_u64().unwrap_or(0),
+        n as u64,
+        "task get 的 round 应等于完成轮数: {v}"
+    );
     let narrative = v["narrative"].as_str().unwrap_or_default();
     assert!(
         narrative.starts_with(&format!("第 {n} 轮")),
