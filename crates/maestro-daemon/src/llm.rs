@@ -133,37 +133,49 @@ impl LlmClient for OpenAiClient {
 pub struct ModelPrice {
     pub input_per_m: u64,
     pub output_per_m: u64,
-    /// cache 命中读价（美分/百万）——Anthropic ~10% 输入价、OpenAI ~50%
+    /// cache 命中读价（美分/百万）——Anthropic 0.1x、OpenAI 0.25~0.5x 输入价
     pub cache_read_per_m: u64,
+    /// 写 cache 价（美分/百万）：写入调用按此计费 —— OpenAI = 输入价
+    /// （不额外加价），Anthropic = 1.25x（5min TTL）/2x（1h）输入价
+    pub cache_write_per_m: u64,
 }
 
-/// 已知牌价表（2024-2025 公开牌价快照；T6 上线前接 provider API 校准）
+/// 已知牌价表（2024-2025 公开牌价快照；T6 上线前接 provider API 校准）。
+/// ⚠️ 写 cache 价语义：写入调用本身按该价计费 —— OpenAI = 输入价
+/// （不额外加价），Anthropic = 1.25x（5min TTL）/2x（1h）输入价。
 pub fn price_of(model: &str) -> Option<ModelPrice> {
     let p = match model {
         "gpt-4o" => ModelPrice {
             input_per_m: 250,
             output_per_m: 1000,
             cache_read_per_m: 125,
+            // 写入不额外加价（按输入价）
+            cache_write_per_m: 250,
         },
         "gpt-4o-mini" => ModelPrice {
             input_per_m: 15,
             output_per_m: 60,
             cache_read_per_m: 8,
+            cache_write_per_m: 15,
         },
         "o3-mini" => ModelPrice {
             input_per_m: 110,
             output_per_m: 440,
             cache_read_per_m: 55,
+            cache_write_per_m: 110,
         },
         "claude-sonnet-4" => ModelPrice {
             input_per_m: 300,
             output_per_m: 1500,
             cache_read_per_m: 30,
+            // 1.25x 输入价（5min TTL 档）
+            cache_write_per_m: 375,
         },
         "claude-haiku-3-5" => ModelPrice {
             input_per_m: 80,
             output_per_m: 400,
             cache_read_per_m: 8,
+            cache_write_per_m: 100,
         },
         _ => return None,
     };
@@ -200,6 +212,7 @@ pub fn usage_entry(
         input_tokens,
         output_tokens,
         cache_read_tokens: None,
+        cache_creation_tokens: None,
         path: Some(path.to_string()),
         discount: Some(discount),
         counterfactual_cost_cents: to_cents(list_mc),
@@ -207,26 +220,33 @@ pub fn usage_entry(
     }
 }
 
-/// 多轮驱动轮账的 cache 感知计价（R24 计价闭环）：
-/// - **actual** = 未命中部分按输入价 + cache 命中按 cache 读价（10%~50% 输入价）+ 输出价
-/// - **counterfactual** = 同内容冷跑（session/cache 全失效）全按牌价 —— U8 省
-///  了多少的口径基线
-/// cache_read 缺失或 > input 时按全冷跑计。
+/// 多轮驱动轮账的 cache 感知计价（R24 计价闭环，R28 补写 cache 档）：
+/// - **actual** = 未缓存输入按输入价 + cache 命中按读价（0.1x~0.5x）+
+///   写 cache 按写价（Anthropic 1.25x/2x；OpenAI = 输入价不加价）+ 输出价
+/// - **counterfactual** = 同内容冷跑（session/cache 全失效）全部按输入价 —— U8 省
+///  了多少的口径基线。⚠️ 读主导的轮 actual ≤ counterfactual；纯写入轮可能
+///  反超（cache 前置投入，回报在后续读）—— 属真实计费语义，不是 bug
+/// token 三桶（input/cache_read/cache_write）按 API 语义互斥；异常上报钳到 input。
 /// 返回 None = 模型不在牌价表（条目仍入账但不计价，cents 留空）。
 pub fn priced_usage_entry(
     model: &str,
     input_tokens: u64,
     output_tokens: u64,
     cache_read: Option<u64>,
+    cache_write: Option<u64>,
     path: &str,
 ) -> Option<UsageEntry> {
     let p = price_of(model)?;
-    let cache = cache_read.unwrap_or(0).min(input_tokens);
-    let cold_in = input_tokens - cache;
+    let cache_r = cache_read.unwrap_or(0).min(input_tokens);
+    let cache_w = cache_write
+        .unwrap_or(0)
+        .min(input_tokens.saturating_sub(cache_r));
+    let cold_in = input_tokens - cache_r - cache_w;
     let actual_mc = p
         .input_per_m
         .checked_mul(cold_in)?
-        .checked_add(p.cache_read_per_m.checked_mul(cache)?)?
+        .checked_add(p.cache_read_per_m.checked_mul(cache_r)?)?
+        .checked_add(p.cache_write_per_m.checked_mul(cache_w)?)?
         .checked_add(p.output_per_m.checked_mul(output_tokens)?)?;
     let cf_mc = p
         .input_per_m
@@ -236,6 +256,7 @@ pub fn priced_usage_entry(
         input_tokens,
         output_tokens,
         cache_read_tokens: cache_read,
+        cache_creation_tokens: cache_write,
         path: Some(path.to_string()),
         discount: None,
         counterfactual_cost_cents: Some(cf_mc.div_ceil(1_000_000)),
@@ -377,33 +398,43 @@ mod tests {
 
     #[test]
     fn priced_usage_entry_cache_math() {
-        // claude-sonnet-4：1M in（其中 800k cache 命中）+ 100k out
-        // actual = 300×0.2M + 30×0.8M + 1500×0.1M = 60M+24M+150M 微美分 = 234 cents
+        // claude-sonnet-4：1M in（800k 命中读 + 100k 写 cache）+ 100k out
+        // actual = 300×0.1M + 30×0.8M + 375×0.1M + 1500×0.1M
+        //        = 30M+24M+37.5M+150M = 241.5M 微美分 = 242 cents（向上取整）
         // counterfactual（冷跑）= 300×1M + 1500×0.1M = 450M 微美分 = 450 cents
         let e = priced_usage_entry(
             "claude-sonnet-4",
             1_000_000,
             100_000,
             Some(800_000),
+            Some(100_000),
             "round",
         )
         .unwrap();
-        assert_eq!(e.actual_cost_cents, Some(234));
+        assert_eq!(e.actual_cost_cents, Some(242));
         assert_eq!(e.counterfactual_cost_cents, Some(450));
         assert_eq!(e.cache_read_tokens, Some(800_000));
+        assert_eq!(e.cache_creation_tokens, Some(100_000));
         // 实际必 ≤ 反事实（cache 只会省钱）
         assert!(e.actual_cost_cents.unwrap() <= e.counterfactual_cost_cents.unwrap());
     }
 
     #[test]
     fn priced_usage_entry_edges() {
-        // cache_read > input（异常上报）：钳到 input，等价全命中
-        let e = priced_usage_entry("gpt-4o", 1_000_000, 0, Some(2_000_000), "round").unwrap();
+        // cache_read > input（异常上报）：钳到 input，等价全命中读
+        let e = priced_usage_entry("gpt-4o", 1_000_000, 0, Some(2_000_000), None, "round").unwrap();
         assert_eq!(e.actual_cost_cents, Some(125)); // 全按 cache 读价
                                                     // 无 cache：actual == counterfactual
-        let e = priced_usage_entry("gpt-4o", 1_000_000, 0, None, "round").unwrap();
+        let e = priced_usage_entry("gpt-4o", 1_000_000, 0, None, None, "round").unwrap();
         assert_eq!(e.actual_cost_cents, e.counterfactual_cost_cents);
+        // OpenAI 写 cache 不额外加价（按输入价）：cc 不改变 actual
+        let a = priced_usage_entry("gpt-4o", 1_000_000, 0, None, Some(500_000), "round").unwrap();
+        let b = priced_usage_entry("gpt-4o", 1_000_000, 0, None, None, "round").unwrap();
+        assert_eq!(
+            a.actual_cost_cents, b.actual_cost_cents,
+            "gpt 写 cache 不应额外加价"
+        );
         // 未知模型：None（调用方入账不计价）
-        assert!(priced_usage_entry("mystery", 1, 1, None, "round").is_none());
+        assert!(priced_usage_entry("mystery", 1, 1, None, None, "round").is_none());
     }
 }

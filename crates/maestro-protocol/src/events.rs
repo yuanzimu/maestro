@@ -223,6 +223,9 @@ pub struct UsageEntry {
     pub output_tokens: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_read_tokens: Option<u64>,
+    /// 写 cache 的 token（Anthropic 单独计价 1.25x/2x 输入价；OpenAI 大多免费）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_tokens: Option<u64>,
     /// 执行路径（interactive/offpeak/batch/batch_fallback/offpeak_promote）
     pub path: Option<String>,
     /// 该段折扣（1.0 = 无折扣）

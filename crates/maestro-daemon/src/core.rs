@@ -689,12 +689,14 @@ impl Core {
             params.input_tokens,
             params.output_tokens,
             params.cache_read_tokens,
+            params.cache_creation_tokens,
             "round",
         )
         .unwrap_or(UsageEntry {
             input_tokens: params.input_tokens,
             output_tokens: params.output_tokens,
             cache_read_tokens: params.cache_read_tokens,
+            cache_creation_tokens: params.cache_creation_tokens,
             path: Some("round".into()),
             discount: None,
             counterfactual_cost_cents: None,

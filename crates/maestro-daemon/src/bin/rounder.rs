@@ -101,6 +101,19 @@ fn main() {
             std::process::exit(out.status.code().unwrap_or(1));
         }
         let oc = maestro_daemon::adapter::parse_stream_json(&out.stdout);
+        // 结构化错误（R28，调研落地）：result.errors/api_error_status 优于解析
+        // stderr 文本。可重试（429/5xx 过载限流）→ 合成 "API Error: N" 到
+        // stderr 退出，daemon 分类为断连 → Suspended 自动恢复（否则烧光轮数
+        // 预算）；不可重试 → 透传结构化错误文本走 Failed。
+        // error_max_turns 不算错误（--max-turns 1 的正常出口，轮循环继续）
+        if oc.is_error && (oc.api_error_status.is_some() || !oc.errors.is_empty()) {
+            let msg = oc
+                .api_error_status
+                .map(|s| format!("API Error: {s}"))
+                .unwrap_or_else(|| oc.errors.join("; "));
+            eprintln!("maestro-rounder: {msg}");
+            std::process::exit(1);
+        }
         let Some(sid) = oc.session_id.clone() else {
             eprintln!("maestro-rounder: stream-json 缺 session_id");
             std::process::exit(3);
@@ -140,6 +153,7 @@ fn main() {
                 "task": task, "worker": worker, "round": round,
                 "input_tokens": oc.usage_in, "output_tokens": oc.usage_out,
                 "cache_read_tokens": oc.cache_read,
+                "cache_creation_tokens": oc.cache_creation,
                 "model": oc.model,
             }),
         );

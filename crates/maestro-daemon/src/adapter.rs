@@ -26,6 +26,8 @@ pub struct RoundOutcome {
     pub usage_in: u64,
     pub usage_out: u64,
     pub cache_read: Option<u64>,
+    /// 写 cache 的 token（R28：Anthropic 单独计价项）
+    pub cache_creation: Option<u64>,
     pub model: Option<String>,
     /// 本轮内发生的工具调用名（去重；U3 过程叙事素材）
     pub tools_used: Vec<String>,
@@ -33,6 +35,10 @@ pub struct RoundOutcome {
     pub subtype: Option<String>,
     /// result.is_error
     pub is_error: bool,
+    /// result.errors（结构化错误串，官方推荐的错误源 —— 优于解析 stderr）
+    pub errors: Vec<String>,
+    /// result.api_error_status（429/500/529 等HTTP 状态；可重试判定用）
+    pub api_error_status: Option<u16>,
 }
 
 /// 解析 stream-json stdout（逐行 JSON 事件流）。
@@ -70,11 +76,21 @@ pub fn parse_stream_json(stdout: &[u8]) -> RoundOutcome {
                 out.usage_in = v["usage"]["input_tokens"].as_u64().unwrap_or(0);
                 out.usage_out = v["usage"]["output_tokens"].as_u64().unwrap_or(0);
                 out.cache_read = v["usage"]["cache_read_input_tokens"].as_u64();
+                out.cache_creation = v["usage"]["cache_creation_input_tokens"].as_u64();
                 if let Some(m) = v["model"].as_str() {
                     out.model = Some(m.to_string());
                 }
                 out.subtype = v["subtype"].as_str().map(String::from);
                 out.is_error = v["is_error"].as_bool().unwrap_or(false);
+                if let Some(errs) = v["errors"].as_array() {
+                    out.errors = errs
+                        .iter()
+                        .filter_map(|e| e.as_str().map(String::from))
+                        .collect();
+                }
+                out.api_error_status = v["api_error_status"]
+                    .as_u64()
+                    .and_then(|s| u16::try_from(s).ok());
             }
             _ => {}
         }
@@ -186,6 +202,11 @@ pub fn dialect_by_name(name: &str) -> Box<dyn Dialect> {
     }
 }
 
+/// api_error_status 是否可重试（限流/过载/服务端错误 —— 等待后重跑有意义）
+pub fn is_retryable_status(status: u16) -> bool {
+    status == 429 || (500..=599).contains(&status)
+}
+
 // ---------------------------------------------------------------------------
 // tests
 // ---------------------------------------------------------------------------
@@ -204,13 +225,14 @@ mod tests {
         let out = parse_stream_json(&stream(&[
             r#"{"type":"system","session_id":"sid-1"}"#,
             r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read"},{"type":"tool_use","name":"Bash"},{"type":"tool_use","name":"Read"}]}}"#,
-            r#"{"type":"result","result":"done","subtype":"success","model":"claude-sonnet-4","usage":{"input_tokens":100,"output_tokens":20,"cache_read_input_tokens":60}}"#,
+            r#"{"type":"result","result":"done","subtype":"success","model":"claude-sonnet-4","usage":{"input_tokens":100,"output_tokens":20,"cache_read_input_tokens":60,"cache_creation_input_tokens":10}}"#,
         ]));
         assert_eq!(out.session_id.as_deref(), Some("sid-1"));
         assert_eq!(out.answer, "done");
         assert_eq!(out.usage_in, 100);
         assert_eq!(out.usage_out, 20);
         assert_eq!(out.cache_read, Some(60));
+        assert_eq!(out.cache_creation, Some(10));
         assert_eq!(out.model.as_deref(), Some("claude-sonnet-4"));
         assert_eq!(out.tools_used, vec!["Read", "Bash"], "工具名去重");
         assert_eq!(out.subtype.as_deref(), Some("success"));
@@ -227,6 +249,23 @@ mod tests {
         assert!(out.is_error);
         assert_eq!(out.subtype.as_deref(), Some("error_max_turns"));
         assert_eq!(out.answer, "partial");
+    }
+
+    /// 结构化错误（R28）：errors + api_error_status —— 优于解析 stderr
+    #[test]
+    fn parses_structured_errors() {
+        let out = parse_stream_json(&stream(&[
+            r#"{"type":"system","session_id":"s"}"#,
+            r#"{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["API Error: 529 overloaded_error"],"api_error_status":529,"usage":{"input_tokens":1,"output_tokens":0}}"#,
+        ]));
+        assert!(out.is_error);
+        assert_eq!(out.errors, vec!["API Error: 529 overloaded_error"]);
+        assert_eq!(out.api_error_status, Some(529));
+        assert!(is_retryable_status(529));
+        assert!(is_retryable_status(429));
+        assert!(is_retryable_status(500));
+        assert!(!is_retryable_status(401));
+        assert!(!is_retryable_status(200));
     }
 
     /// 未识别事件类型忽略（前向兼容）；空流全默认

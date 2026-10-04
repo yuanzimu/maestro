@@ -426,3 +426,39 @@ fn multiround_fake_completion_three_strikes() {
         "3 次假完成各应入账一轮: {l}"
     );
 }
+
+/// 混沌⑥：结构化过载错误（R28 调研落地）—— 错误经 stdout 的 result 事件
+/// （is_error + api_error_status 529，非 stderr）→ rounder 转译退出 →
+/// daemon 分类断连 → Suspended 自动恢复语义。与混沌③（stderr 路径）互补，
+/// 防止过载烧光轮数预算
+#[test]
+#[serial]
+fn structured_overload_maps_to_suspended() {
+    let (_repo, work) = git_repo();
+    let mock_tmp = tempfile::tempdir().unwrap();
+    let cli = mock_tmp.path().join("mock-claude");
+    write_mock_cli(&cli, &mock_tmp.path().join("state"));
+    let d = TestDaemon::start(&rounder_bin(), &["--", cli.to_str().unwrap()]);
+    let t = d.create_task("overload-mr", &work);
+    assert!(d.wait_state(&t, WorkerState::Working, 5000));
+
+    // 注入过载模拟 → 下一轮 prompt 命中 mock 的结构化错误分支
+    d.api(
+        Method::TaskSteer,
+        serde_json::json!({ "task": t.as_str(), "message": "过载模拟：触发服务端过载" }),
+    );
+    assert!(
+        d.wait_state(&t, WorkerState::Suspended, 15000),
+        "结构化过载应 Suspended（≠烧光轮数/≠Failed），实际: {:?}",
+        d.task_state(&t)
+    );
+    let v = d.api(Method::TaskGet, serde_json::json!({ "task": t.as_str() }));
+    assert_eq!(v["suspend_reason"], "network_lost", "{v}");
+
+    // 清理（Suspended 任务可 cancel）
+    d.api(
+        Method::TaskCancel,
+        serde_json::json!({ "task": t.as_str() }),
+    );
+    assert!(d.wait_state(&t, WorkerState::Cancelled, 5000));
+}

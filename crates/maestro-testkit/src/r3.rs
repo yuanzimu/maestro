@@ -266,6 +266,13 @@ case "$PROMPT" in
      ANSWER="已记录前缀 $P";;
   *网络故障*) echo "Error: connection reset by peer" >&2; exit 1;;
   *无产物模拟*) ANSWER="MAESTRO_DONE"; SKIP_ARTIFACT=1;;
+  *过载模拟*)
+     # 结构化错误路径（R28）：错误经 stdout 的 result 事件（不是 stderr）——
+     # is_error + api_error_status 529，exit 0（rounder 负责转译退出）
+     printf '%s\n' \
+       "{{\"type\":\"system\",\"session_id\":\"$SID\"}}" \
+       "{{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"errors\":[\"API Error: 529 overloaded_error\"],\"api_error_status\":529,\"usage\":{{\"input_tokens\":10,\"output_tokens\":0}}}}"
+     exit 0;;
   *结束*) ANSWER="MAESTRO_DONE";;
   *SELF_DESTRUCT*)
      echo '{{"crashed":true}}' >> "$CTX"
@@ -282,15 +289,15 @@ if [ -n "$P" ] && [ "$ANSWER" != "已记录前缀 $P" ]; then ANSWER="$P $ANSWER
 # 无产物模拟模式跳过 —— 验收门 3 振出局测试用）
 if [ -z "${{SKIP_ARTIFACT:-}}" ]; then echo "$ANSWER" >> out.txt; fi
 
-# usage：平台型（常量 in + cache 命中）；MOCK_REPLAY=1 时线性重放
+# usage：平台型（常量 in + cache 命中 + 写 cache）；MOCK_REPLAY=1 时线性重放
 LINES=$(wc -l < "$CTX")
-if [ "$MOCK_REPLAY" = "1" ]; then IN=$((200*LINES)); CR=0; else IN=200; CR=120; fi
+if [ "$MOCK_REPLAY" = "1" ]; then IN=$((200*LINES)); CR=0; CC=0; else IN=200; CR=120; CC=30; fi
 OUT=40
 
 printf '%s\n' \
   "{{\"type\":\"system\",\"session_id\":\"$SID\"}}" \
   "{{\"type\":\"assistant\",\"message\":{{\"content\":\"$ANSWER\"}}}}" \
-  "{{\"type\":\"result\",\"result\":\"$ANSWER\",\"usage\":{{\"input_tokens\":$IN,\"output_tokens\":$OUT,\"cache_read_input_tokens\":$CR}}}}"
+  "{{\"type\":\"result\",\"result\":\"$ANSWER\",\"usage\":{{\"input_tokens\":$IN,\"output_tokens\":$OUT,\"cache_read_input_tokens\":$CR,\"cache_creation_input_tokens\":$CC}}}}"
 "#,
         state = state_dir.display(),
     );
