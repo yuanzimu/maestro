@@ -366,6 +366,7 @@ fn fmt_ledger(v: &Value) -> String {
     let in_tok = v["input_tokens"].as_u64().unwrap_or(0);
     let out_tok = v["output_tokens"].as_u64().unwrap_or(0);
     let actual = v["actual_cost_cents"].as_u64().unwrap_or(0);
+    let cf = v["counterfactual_cost_cents"].as_u64().unwrap_or(0);
     let saved = v["saved_cents"].as_u64().unwrap_or(0);
     let mut out = format!(
         "任务 {}：{} 轮 · 墙钟 {dur}",
@@ -376,11 +377,16 @@ fn fmt_ledger(v: &Value) -> String {
         out.push_str(&format!(
             " · {in_tok} in / {out_tok} out tokens · 实付 {actual}¢"
         ));
+        // cache 明细（R24/R28 计量闭环）：命中占比给「前缀是否被破坏」直觉
+        if let Some(cr) = v["cache_read_tokens"].as_u64().filter(|c| *c > 0) {
+            let pct = cr * 100 / in_tok.max(1);
+            out.push_str(&format!(" · cache 命中 {cr}（{pct}%）"));
+        }
         if saved > 0 {
-            out.push_str(&format!("（省 {saved}¢）"));
+            out.push_str(&format!(" · 省 {saved}¢（对比冷跑 {cf}¢）"));
         }
     } else {
-        out.push_str(" · token 用量待多轮驱动接入（0.15）");
+        out.push_str(" · 暂无 token 用量（单发 worker / 多轮未入账）");
     }
     out
 }
@@ -484,5 +490,28 @@ mod tests {
         assert!(s.contains("假完成"), "{s}");
         assert!(s.contains("maestro task resume t-9"), "{s}");
         assert!(fmt_inbox(&serde_json::json!({ "items": [] })).contains("空的"));
+    }
+
+    #[test]
+    fn ledger_human_summary() {
+        // 多轮计价闭环：token + cache 命中 + 省钱口径
+        let v = serde_json::json!({
+            "task": "t-1", "rounds": 5, "wall_ms": 83_000,
+            "input_tokens": 1000, "output_tokens": 200,
+            "cache_read_tokens": 600, "cache_creation_tokens": 150,
+            "actual_cost_cents": 1, "counterfactual_cost_cents": 1, "saved_cents": 0
+        });
+        let s = fmt_ledger(&v);
+        assert!(s.contains("5 轮"), "{s}");
+        assert!(s.contains("1m23s"), "{s}");
+        assert!(s.contains("1000 in / 200 out"), "{s}");
+        assert!(s.contains("cache 命中 600（60%）"), "{s}");
+        // 无 token（单发 worker）：不显示待接入字样
+        let empty = serde_json::json!({
+            "task": "t-2", "rounds": 1, "wall_ms": 500,
+            "input_tokens": 0, "output_tokens": 0
+        });
+        let s2 = fmt_ledger(&empty);
+        assert!(s2.contains("暂无 token 用量"), "{s2}");
     }
 }

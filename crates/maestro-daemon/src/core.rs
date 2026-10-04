@@ -729,6 +729,8 @@ impl Core {
         let mut last_ts: Option<u64> = None;
         let mut input_tokens = 0u64;
         let mut output_tokens = 0u64;
+        let mut cache_read_tokens = 0u64;
+        let mut cache_creation_tokens = 0u64;
         let mut actual_cents = 0u64;
         let mut counterfactual_cents = 0u64;
         let mut entries = 0u64;
@@ -752,6 +754,8 @@ impl Core {
                     entries += 1;
                     input_tokens += usage.input_tokens;
                     output_tokens += usage.output_tokens;
+                    cache_read_tokens += usage.cache_read_tokens.unwrap_or(0);
+                    cache_creation_tokens += usage.cache_creation_tokens.unwrap_or(0);
                     actual_cents += usage.actual_cost_cents.unwrap_or(0);
                     counterfactual_cents += usage.counterfactual_cost_cents.unwrap_or(0);
                 }
@@ -775,6 +779,8 @@ impl Core {
                 "ledger_entries": entries,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
+                "cache_read_tokens": cache_read_tokens,
+                "cache_creation_tokens": cache_creation_tokens,
                 "actual_cost_cents": actual_cents,
                 "counterfactual_cost_cents": counterfactual_cents,
                 "saved_cents": saved_cents,
