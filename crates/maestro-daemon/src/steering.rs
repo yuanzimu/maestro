@@ -2,6 +2,11 @@
 //!
 //! 关键语义：
 //! - 消息入队即持久化（kill -9 不丢 —— P0 验收）
+//! - **at-least-once 投递（R32，调研落地 opencode-queue 语义）**：
+//!   poll 取走消息进入 inflight（未确认）；worker 用过（下一轮跑完）后经
+//!   TaskSteerAck 确认。未确认的消息：再次 poll 重投、respawn 时随
+//!   prompt 前置注入（daemon 确认的投递）、终态时 SteeringDropped。
+//!   轮边界 poll 与下一轮启动之间 worker 被杀 → 消息重投，不丢。
 //! - resume 时 flush（按序投递）或 hold（丢弃但每条发 SteeringDropped 事件，不静默）
 //! - 同一任务排队，投递发生在轮边界（多轮驱动）
 
@@ -16,11 +21,15 @@ pub struct SteeringMsg {
     pub task: TaskId,
     pub message: String,
     pub queued_at: u64,
+    /// 已投递未确认（at-least-once）；持久化跨重启
+    #[serde(default)]
+    pub inflight: bool,
 }
 
 /// 队列（Core 独占；持久化到 data_dir/steering.jsonl）
 pub struct SteeringQueue {
     queues: std::collections::HashMap<TaskId, VecDeque<SteeringMsg>>,
+    inflight: std::collections::HashMap<TaskId, Vec<SteeringMsg>>,
     next_seq: u64,
     file: PathBuf,
 }
@@ -30,6 +39,7 @@ impl SteeringQueue {
         let file = data_dir.join("steering.jsonl");
         let mut q = Self {
             queues: Default::default(),
+            inflight: Default::default(),
             next_seq: 1,
             file,
         };
@@ -41,6 +51,7 @@ impl SteeringQueue {
     pub fn in_memory() -> Self {
         Self {
             queues: Default::default(),
+            inflight: Default::default(),
             next_seq: 1,
             file: PathBuf::from("/dev/null"),
         }
@@ -52,10 +63,17 @@ impl SteeringQueue {
         };
         for line in content.lines() {
             if let Ok(msg) = serde_json::from_str::<SteeringMsg>(line) {
-                self.queues
-                    .entry(msg.task.clone())
-                    .or_default()
-                    .push_back(msg.clone());
+                if msg.inflight {
+                    self.inflight
+                        .entry(msg.task.clone())
+                        .or_default()
+                        .push(msg.clone());
+                } else {
+                    self.queues
+                        .entry(msg.task.clone())
+                        .or_default()
+                        .push_back(msg.clone());
+                }
                 if msg.seq >= self.next_seq {
                     self.next_seq = msg.seq + 1;
                 }
@@ -88,6 +106,11 @@ impl SteeringQueue {
                 lines.push(serde_json::to_string(m).unwrap_or_default());
             }
         }
+        for list in self.inflight.values() {
+            for m in list {
+                lines.push(serde_json::to_string(m).unwrap_or_default());
+            }
+        }
         let tmp = self.file.with_extension("jsonl.tmp");
         if std::fs::write(&tmp, lines.join("\n") + "\n").is_ok() {
             let _ = std::fs::rename(&tmp, &self.file);
@@ -101,6 +124,7 @@ impl SteeringQueue {
             task: task.clone(),
             message,
             queued_at: maestro_protocol::now_ms(),
+            inflight: false,
         };
         self.next_seq += 1;
         self.queues
@@ -111,30 +135,70 @@ impl SteeringQueue {
         msg
     }
 
-    /// flush：取走该任务全部积压（按序）
-    pub fn drain(&mut self, task: &TaskId) -> Vec<SteeringMsg> {
-        let out: Vec<SteeringMsg> = self
+    /// poll：取走积压（进入 inflight）+ 重投未确认的（at-least-once）
+    pub fn poll(&mut self, task: &TaskId) -> Vec<SteeringMsg> {
+        let queued: Vec<SteeringMsg> = self
             .queues
             .get_mut(task)
             .map(|q| q.drain(..).collect())
             .unwrap_or_default();
+        let inflight = self.inflight.entry(task.clone()).or_default();
+        for mut m in queued {
+            m.inflight = true;
+            inflight.push(m);
+        }
+        let out = inflight.clone();
         if !out.is_empty() {
             self.persist_rewrite();
         }
         out
     }
 
-    /// hold：丢弃并返回（调用方对每条发 SteeringDropped 事件 —— 不静默，用例 B7）
+    /// 确认消费（worker 用过后上报）：从 inflight 移除。返回确认数。
+    pub fn ack(&mut self, task: &TaskId, seqs: &[u64]) -> usize {
+        let Some(list) = self.inflight.get_mut(task) else {
+            return 0;
+        };
+        let before = list.len();
+        list.retain(|m| !seqs.contains(&m.seq));
+        let n = before - list.len();
+        if list.is_empty() {
+            self.inflight.remove(task);
+        }
+        if n > 0 {
+            self.persist_rewrite();
+        }
+        n
+    }
+
+    /// respawn / 重试注入：取走全部（积压 + 未确认）。
+    /// daemon 侧直接进 prompt = daemon 确认的投递（不要求 worker 再 ack）
+    pub fn take_all(&mut self, task: &TaskId) -> Vec<SteeringMsg> {
+        let mut out: Vec<SteeringMsg> = self
+            .queues
+            .get_mut(task)
+            .map(|q| q.drain(..).collect())
+            .unwrap_or_default();
+        out.extend(self.inflight.remove(task).unwrap_or_default());
+        if !out.is_empty() {
+            self.persist_rewrite();
+        }
+        out
+    }
+
+    /// hold/终态：丢弃积压 + 未确认（调用方对每条发 SteeringDropped —— 不静默）
     pub fn drop_all(&mut self, task: &TaskId) -> Vec<SteeringMsg> {
-        self.drain(task) // 同 drain；语义差异在调用方发什么事件
+        self.take_all(task) // 同 take_all；语义差异在调用方发什么事件
     }
 
     pub fn pending(&self, task: &TaskId) -> usize {
         self.queues.get(task).map(|q| q.len()).unwrap_or(0)
+            + self.inflight.get(task).map(|l| l.len()).unwrap_or(0)
     }
 
     pub fn total_pending(&self) -> usize {
-        self.queues.values().map(|q| q.len()).sum()
+        self.queues.values().map(|q| q.len()).sum::<usize>()
+            + self.inflight.values().map(|l| l.len()).sum::<usize>()
     }
 }
 
@@ -155,14 +219,60 @@ mod tests {
         let mut q2 = SteeringQueue::open(tmp.path());
         assert_eq!(q2.pending(&TaskId::new("t1")), 2);
         assert_eq!(q2.pending(&TaskId::new("t2")), 1);
-        let drained = q2.drain(&TaskId::new("t1"));
+        let drained = q2.poll(&TaskId::new("t1"));
         assert_eq!(drained.len(), 2);
         assert_eq!(drained[0].message, "别动那个文件", "顺序保持");
-        assert_eq!(drained[1].message, "先跑测试");
-        // drain 后重开：已投递的不复活
+        assert_eq!(drained[1].message, "先跑测试", "顺序保持");
+        // poll 后未确认：pending 仍计入（at-least-once）
+        assert_eq!(q2.pending(&TaskId::new("t1")), 2, "未确认应仍在册");
+        // take_all（respawn）取走后重开：不复活
+        let _ = q2.take_all(&TaskId::new("t1"));
         let q3 = SteeringQueue::open(tmp.path());
         assert_eq!(q3.pending(&TaskId::new("t1")), 0);
         assert_eq!(q3.pending(&TaskId::new("t2")), 1);
+    }
+
+    /// at-least-once：poll 未确认 → 重开重投；ack 后不再投
+    #[test]
+    fn inflight_redelivered_until_acked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut q = SteeringQueue::open(tmp.path());
+        let m = q.push(&TaskId::new("t"), "重要指示".into());
+        // 第一次 poll：取走
+        let got = q.poll(&TaskId::new("t"));
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].seq, m.seq);
+        // 未确认：再次 poll 重投同一条
+        let again = q.poll(&TaskId::new("t"));
+        assert_eq!(again.len(), 1);
+        assert_eq!(again[0].seq, m.seq, "未确认消息应重投");
+        // kill -9 重开：inflight 仍在（持久化）
+        drop(q);
+        let mut q2 = SteeringQueue::open(tmp.path());
+        assert_eq!(q2.pending(&TaskId::new("t")), 1, "inflight 应持久化");
+        let after = q2.poll(&TaskId::new("t"));
+        assert_eq!(after.len(), 1, "重启后未确认消息仍可重投");
+        // ack 后清空
+        assert_eq!(q2.ack(&TaskId::new("t"), &[m.seq]), 1);
+        assert_eq!(q2.pending(&TaskId::new("t")), 0);
+        assert!(q2.poll(&TaskId::new("t")).is_empty(), "ack 后不再投");
+        // 重复 ack：无效果无报错
+        assert_eq!(q2.ack(&TaskId::new("t"), &[m.seq]), 0);
+    }
+
+    /// ack 多条 + 混合积压：只清 ack 的，新积压保留
+    #[test]
+    fn ack_partial_keeps_new_queue() {
+        let mut q = SteeringQueue::in_memory();
+        let t = TaskId::new("t");
+        let a = q.push(&t, "a".into()).seq;
+        let polled = q.poll(&t);
+        assert_eq!(polled.len(), 1);
+        let _ = q.push(&t, "b".into()); // poll 后新入队
+        assert_eq!(q.ack(&t, &[a]), 1);
+        let next = q.poll(&t);
+        assert_eq!(next.len(), 1, "新积压应可投");
+        assert_eq!(next[0].message, "b");
     }
 
     /// seq 持续递增（跨重启）

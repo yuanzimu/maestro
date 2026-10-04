@@ -479,3 +479,81 @@ fn structured_overload_maps_to_suspended() {
     );
     assert!(d.wait_state(&t, WorkerState::Cancelled, 5000));
 }
+
+/// 混沌⑦：steering at-least-once（R32）—— poll 未确认重投、ack 后清空、
+/// 过期 worker ack 拒绝。模拟「rounder 在 poll 与下一轮之间被杀」的消息不丢
+#[test]
+#[serial]
+fn steering_at_least_once_semantics() {
+    let (_repo, work) = git_repo();
+    let mock_tmp = tempfile::tempdir().unwrap();
+    let cli = mock_tmp.path().join("mock-claude");
+    write_mock_cli(&cli, &mock_tmp.path().join("state"));
+    let d = TestDaemon::start(&rounder_bin(), &["--", cli.to_str().unwrap()]);
+    let t = d.create_task("alo", &work);
+    assert!(d.wait_state(&t, WorkerState::Working, 5000));
+    let workers = d.api(Method::WorkerList, serde_json::json!({}));
+    let cur = workers["workers"][0]["id"].as_str().unwrap().to_string();
+
+    // 轻推入队
+    d.api(
+        Method::TaskSteer,
+        serde_json::json!({ "task": t.as_str(), "message": "补充指示：输出加前缀 [A]" }),
+    );
+    // 第一次 poll：取走（进 inflight）
+    let v1 = d
+        .try_api(
+            Method::TaskSteerPoll,
+            serde_json::json!({ "task": t.as_str(), "worker": cur }),
+        )
+        .unwrap();
+    let seq1 = v1["messages"][0]["seq"].as_u64().unwrap();
+    assert_eq!(v1["messages"].as_array().map(|a| a.len()), Some(1));
+
+    // ⚠️ 不 ack —— 再次 poll 应重投同一条（rounder 被杀后新实例的视角）
+    let v2 = d
+        .try_api(
+            Method::TaskSteerPoll,
+            serde_json::json!({ "task": t.as_str(), "worker": cur }),
+        )
+        .unwrap();
+    assert_eq!(
+        v2["messages"][0]["seq"].as_u64().unwrap(),
+        seq1,
+        "未确认消息应重投（at-least-once）: {v2}"
+    );
+
+    // 过期 worker 不得 ack（防幽灵进程吞消息）
+    let e = d.try_api(
+        Method::TaskSteerAck,
+        serde_json::json!({ "task": t.as_str(), "worker": "w-ghost", "seqs": [seq1] }),
+    );
+    assert_eq!(e.unwrap_err().0, -403, "过期 worker 不得 ack");
+
+    // 当前 worker ack → 清空；再 poll 为空
+    let acked = d
+        .try_api(
+            Method::TaskSteerAck,
+            serde_json::json!({ "task": t.as_str(), "worker": cur, "seqs": [seq1] }),
+        )
+        .unwrap();
+    assert_eq!(acked["acked"].as_u64().unwrap(), 1, "{acked}");
+    let v3 = d
+        .try_api(
+            Method::TaskSteerPoll,
+            serde_json::json!({ "task": t.as_str(), "worker": cur }),
+        )
+        .unwrap();
+    assert_eq!(
+        v3["messages"].as_array().map(|a| a.len()),
+        Some(0),
+        "ack 后不再投"
+    );
+
+    // 清理
+    d.api(
+        Method::TaskSteer,
+        serde_json::json!({ "task": t.as_str(), "message": "结束" }),
+    );
+    assert!(d.wait_state(&t, WorkerState::Done, 20000));
+}

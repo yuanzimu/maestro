@@ -76,6 +76,10 @@ fn main() {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
     let mut next_prompt = prompt;
+    // at-least-once（R32）：本轮 prompt 里注入的消息 seq —— 轮尝试完成后
+    // （成功/CLI 失败/结构化错误，CLI 已跑过该 prompt）经 TaskSteerAck 确认；
+    // rounder 在 CLI 启动前被杀 → 未确认 → daemon 重投
+    let mut injected_seqs: Vec<u64> = vec![];
     // 方言（0.6 适配器）：默认 claude，MAESTRO_CLI_DIALECT 可换（B7 Codex/Gemini）
     let dialect = maestro_daemon::adapter::dialect_by_name(
         &std::env::var("MAESTRO_CLI_DIALECT").unwrap_or_default(),
@@ -91,12 +95,14 @@ fn main() {
         let out = match cmd.output() {
             Ok(o) => o,
             Err(e) => {
+                // CLI 未跑（spawn 失败）→ 不 ack（消息未被消费，daemon 会重投）
                 eprintln!("maestro-rounder: spawn 内层 CLI 失败: {e}");
                 std::process::exit(3);
             }
         };
         if !out.status.success() {
-            // 透传退出码：daemon 按 adapter::classify_exit 分类（断连 → suspended 等）
+            // CLI 跑过本轮 prompt（注入消息已消费）→ 先 ack 再透传退出码
+            ack_steering(&client, &task, &worker, &injected_seqs);
             eprint!("{}", String::from_utf8_lossy(&out.stderr));
             std::process::exit(out.status.code().unwrap_or(1));
         }
@@ -107,6 +113,7 @@ fn main() {
         // 预算）；不可重试 → 透传结构化错误文本走 Failed。
         // error_max_turns 不算错误（--max-turns 1 的正常出口，轮循环继续）
         if oc.is_error && (oc.api_error_status.is_some() || !oc.errors.is_empty()) {
+            ack_steering(&client, &task, &worker, &injected_seqs);
             let msg = oc
                 .api_error_status
                 .map(|s| format!("API Error: {s}"))
@@ -122,9 +129,15 @@ fn main() {
         let _ = std::fs::write(&session_file, &sid);
         let answer = oc.answer.clone();
 
-        // 2. 轮边界拉轻推（U4：注入下一轮）
+        // 2. 确认上轮注入消息已消费（在 poll 前 —— 防自己重投自己）
+        if !injected_seqs.is_empty() {
+            ack_steering(&client, &task, &worker, &injected_seqs);
+            injected_seqs.clear();
+        }
+        // 3. 轮边界拉轻推（U4：注入下一轮；at-least-once 重投未确认）
         let steering = poll_steering(&client, &task, &worker);
         let injected = !steering.is_empty();
+        injected_seqs = steering.iter().map(|(s, _)| *s).collect();
 
         // 3. 轮账落盘
         let rec = RoundRecord {
@@ -173,7 +186,11 @@ fn main() {
         // 6. 下一轮 prompt：有轻推 → 轻推内容；无 → 继续指令。
         //    无轻推时按轮间隔歇一拍（防秒回型 CLI 热循环）
         if injected {
-            next_prompt = steering.join("\n");
+            next_prompt = steering
+                .iter()
+                .map(|(_, m)| m.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
         } else {
             std::thread::sleep(std::time::Duration::from_millis(round_gap_ms));
             next_prompt = "继续当前任务；没有剩余工作时输出完成信号".into();
@@ -181,8 +198,9 @@ fn main() {
     }
 }
 
-/// 拉 steering（尽力而为：daemon 不可达时不阻塞任务，下一轮再试）
-fn poll_steering(client: &MaestroClient, task: &str, worker: &str) -> Vec<String> {
+/// 拉 steering（尽力而为：daemon 不可达时不阻塞任务，下一轮再试）。
+/// 返回 (seq, message) —— seq 用于消费后 ack（at-least-once）
+fn poll_steering(client: &MaestroClient, task: &str, worker: &str) -> Vec<(u64, String)> {
     match client.call(
         "steer-poll",
         Method::TaskSteerPoll,
@@ -192,10 +210,26 @@ fn poll_steering(client: &MaestroClient, task: &str, worker: &str) -> Vec<String
             .as_array()
             .map(|a| {
                 a.iter()
-                    .filter_map(|m| m["message"].as_str().map(String::from))
+                    .filter_map(|m| {
+                        let seq = m["seq"].as_u64()?;
+                        let msg = m["message"].as_str()?;
+                        Some((seq, msg.to_string()))
+                    })
                     .collect()
             })
             .unwrap_or_default(),
         Err(_) => vec![],
     }
+}
+
+/// 确认 steering 消费（尽力而为：daemon 不可达时下轮 poll 会重投 —— 可接受）
+fn ack_steering(client: &MaestroClient, task: &str, worker: &str, seqs: &[u64]) {
+    if seqs.is_empty() {
+        return;
+    }
+    let _ = client.call(
+        "steer-ack",
+        Method::TaskSteerAck,
+        serde_json::json!({ "task": task, "worker": worker, "seqs": seqs }),
+    );
 }

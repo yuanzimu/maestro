@@ -15,7 +15,7 @@ use crate::worker::{self, SpawnSpec, WorkerMeta};
 use maestro_protocol::api::{
     CheckpointRollbackParams, CheckpointRollbackResult, EmergencyStopParams, Method, Request,
     Response, ResumeAllParams, RpcError, ServerStatusResult, SteeringMode, TaskCreateParams,
-    TaskCreateResult, TaskRoundReportParams, TaskSteerParams,
+    TaskCreateResult, TaskRoundReportParams, TaskSteerAckParams, TaskSteerParams,
 };
 use maestro_protocol::events::{Event, Task, UsageEntry};
 use maestro_protocol::types::*;
@@ -352,6 +352,13 @@ impl Core {
                 };
                 self.api_steer(&req, &params)
             }
+            Method::TaskSteerAck => {
+                let params: TaskSteerAckParams = match serde_json::from_value(req.params.clone()) {
+                    Ok(p) => p,
+                    Err(_) => return self.err(&req, -400, "bad params"),
+                };
+                self.api_steer_ack(&req, &params)
+            }
             Method::TaskRoundReport => {
                 let params: TaskRoundReportParams = match serde_json::from_value(req.params.clone())
                 {
@@ -643,8 +650,8 @@ impl Core {
         }
     }
 
-    /// 轻推拉取（多轮驱动 Worker 轮边界调用）：取走积压轻推并标记投递。
-    /// 仅当前 worker 可拉（防过期驱动进程抽走消息）。
+    /// 轻推拉取（多轮驱动 Worker 轮边界调用）：取走积压 + 重投未确认
+    /// （at-least-once，R32）。仅当前 worker 可拉（防过期驱动进程抽走消息）。
     fn api_steer_poll(&mut self, req: &Request, task: &TaskId, worker: &WorkerId) -> Response {
         let Some(t) = self.ctx.authority.get(task).cloned() else {
             return self.err(req, -404, "task not found");
@@ -655,10 +662,11 @@ impl Core {
         if t.worker.as_ref() != Some(worker) {
             return self.err(req, -403, "not the current worker");
         }
-        let msgs = self.steering.drain(task);
+        let msgs = self.steering.poll(task);
         let out: Vec<serde_json::Value> = msgs
             .iter()
             .map(|m| {
+                // 重投也发 Delivered（审计可见投递次数）
                 self.ctx.publish(Event::SteeringDelivered {
                     task: task.clone(),
                     round: t.round,
@@ -668,6 +676,22 @@ impl Core {
             })
             .collect();
         self.ok(req, serde_json::json!({ "messages": out }))
+    }
+
+    /// 轻推确认（at-least-once）：worker 用过后上报，未确认的会重投。
+    /// 仅当前 worker 可确认。
+    fn api_steer_ack(&mut self, req: &Request, params: &TaskSteerAckParams) -> Response {
+        let Some(t) = self.ctx.authority.get(&params.task).cloned() else {
+            return self.err(req, -404, "task not found");
+        };
+        if t.worker.as_ref() != Some(&params.worker) {
+            return self.err(req, -403, "not the current worker");
+        }
+        let n = self.steering.ack(&params.task, &params.seqs);
+        self.ok(
+            req,
+            serde_json::json!({ "acked": n, "remaining": self.steering.pending(&params.task) }),
+        )
     }
 
     /// 轮账上报（rounder 每轮）：usage → 牌价计价 → LedgerEntry 事件
@@ -1322,13 +1346,14 @@ impl Core {
     // 内部工具
     // -----------------------------------------------------------------------
 
-    /// 投递语义 v0.15（rounder 接管后的统一口径）：
+    /// 投递语义 v0.15/0.32（rounder 接管后的统一口径）：
     /// - **respawn 路径**（resume 死 worker / 验收重试 / 自动恢复 / resume_all 补拉）
-    ///   → 本方法：drain + 事件留痕 + 拼成下一轮 prompt 前缀（真投递）
-    /// - **活 worker**：轻推留在队列，rounder 轮边界 TaskSteerPoll 取走
+    ///   → 本方法：取走积压+未确认（take_all）+ 事件留痕 + 拼成下一轮 prompt
+    ///   前缀（daemon 确认的投递 —— 不要求 worker 再 ack）
+    /// - **活 worker**：poll（at-least-once）→ worker 用过后 TaskSteerAck
     /// - **终态**：drop_pending_steering（SteeringDropped，不静默）
     fn steering_prefix(&mut self, task: &TaskId) -> Option<String> {
-        let msgs = self.steering.drain(task);
+        let msgs = self.steering.take_all(task);
         if msgs.is_empty() {
             return None;
         }

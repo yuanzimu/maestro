@@ -58,6 +58,8 @@ pub enum Method {
     TaskSteer,
     /// 轻推拉取：多轮驱动 Worker 在轮边界拉走积压轻推（并标记已投递）
     TaskSteerPoll,
+    /// 轻推确认：worker 用过消息后上报（at-least-once —— 未确认的重投）
+    TaskSteerAck,
     /// 轮账上报：多轮驱动 Worker 每轮上报 usage → LedgerEntry 事件入账
     TaskRoundReport,
     /// 账本：任务的轮数/耗时/成本汇总（token 经济口径）
@@ -130,6 +132,15 @@ pub enum SteeringMode {
 pub struct TaskSteerParams {
     pub task: TaskId,
     pub message: String,
+}
+
+/// `task.steer_poll` 结果项 / `task.steer_ack` 参数共用 seq 口径
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TaskSteerAckParams {
+    pub task: TaskId,
+    pub worker: WorkerId,
+    /// 已消费的消息 seq（poll 返回值里带的）
+    pub seqs: Vec<u64>,
 }
 
 /// `task.round_report` 参数（rounder 每轮上报）

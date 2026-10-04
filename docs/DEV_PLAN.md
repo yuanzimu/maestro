@@ -292,7 +292,7 @@ P2：U4 完整版（需内置 Executor D2）· U6 v2 检讨（需失败事件库
 | ✅ | 0.13 CLI | status/task/worker/inbox/stop/resume/events/doctor/shutdown + 表格化列表 + 收件箱行动建议（R19） |
 | ✅ | 0.14 LLM client | OpenAI 兼容（ureq 阻塞式）+ 牌价表（含 cache 读价，R24 修 haiku 输出价 40→400）+ **cache 感知计价闭环**（rounder 轮账 → priced_usage_entry → actual/counterfactual cents）；T1/U3/U8 消费方在 P1 接入 |
 | ✅ | 0.15 多轮驱动 | **R23 机制层完成**：maestro-rounder 二进制（轮循环 + `--resume` 续接 + session 持久化 + DONE 信号 + 轮间隔防热循环）+ TaskSteerPoll 轮间投递（仅当前 worker 可拉）+ **TaskRoundReport 轮账入账**（usage→LedgerEntry，token 计量闭环）+ 2 e2e（U4 轻推改下一轮输出 / kill -9 跨实例续接 session）；**真实 claude CLI 验证待 API key** |
-| ✅ | 0.16 steering 队列 | jsonl 持久化 + flush/hold + kill -9 不丢 + 重试轮回喂投递；**R23 投递语义修正**：活 worker 留队轮边界 poll 取走、respawn 路径前置注入 prompt（真投递）、终态 SteeringDropped 不静默 |
+| ✅ | 0.16 steering 队列 | jsonl 持久化 + flush/hold + kill -9 不丢 + 重试轮回喂投递；**R23 投递语义修正**（活 worker poll / respawn 前置注入 / 终态 Dropped 不静默）；**R32 at-least-once**：poll 进 inflight 未确认重投、TaskSteerAck 消费确认（仅当前 worker）、inflight 持久化跨重启、CLI 已跑过的失败轮也确认（防网络故障指令死循环重投） |
 | ✅ | 0.17 suspended 状态机 | 七值枚举 + 自动恢复矩阵（30s→5m 退避，10 次升 blocked）+ 孤儿清理（绝不收养） |
 | ✅ | 0.18 emergency_stop | FREEZE→SNAPSHOT→DECIDE 三阶段 + 竞态修复（过期退出误杀/死 worker 假恢复，R14） |
 | ✅ | 0.19 checkpoint | git plumbing 零打扰 + pre-rollback 安全垫 + pinned（baseline/验收点）+ 滚动 GC |
@@ -302,9 +302,9 @@ P2：U4 完整版（需内置 Executor D2）· U6 v2 检讨（需失败事件库
 **R28 调研落地（竞品对标，来源见 git log 提交）**：
 - **计价修正**：cache_creation（写 cache）单独计价 —— Anthropic 1.25x/2x 输入价、OpenAI = 输入价不加价（测试抓到「计 0 价」错误实现并修正）；UsageEntry/轮账参数加 cache_creation_tokens，三桶互斥计价
 - **结构化错误**：Claude Code 官方错误源是 result 事件的 errors[] + api_error_status（非 stderr）—— rounder 已转译，可重试（429/5xx）→ Suspended 自动恢复，防过载烧光轮数预算
-- **P1 待办（调研发现，未实现）**：① stream-json stdin 常驻会话（官方 steering 通道，工具边界注入 —— Copilot「Steer with Message」/OpenClaw 六模式对标）；② 长任务上下文轮转（silta-session 的 handoff→/compact→换 id 策略，防裸 resume 上下文无限膨胀）；③ steering 队列 at-least-once（投递未确认保留重发）；④ total_cost_usd 增量对账（resume 后是全会话累计，直接用会重复计费）；⑤ CLI schema 漂移检测（init.capabilities feature-detect）
+- **P1 待办（调研发现，未实现）**：① stream-json stdin 常驻会话（官方 steering 通道，工具边界注入 —— Copilot「Steer with Message」/OpenClaw 六模式对标）；② 长任务上下文轮转（silta-session 的 handoff→/compact→换 id 策略，防裸 resume 上下文无限膨胀）；③ ~~steering 队列 at-least-once~~ **R32 已落地**（poll/ack/inflight 持久化）；④ total_cost_usd 增量对账（resume 后是全会话累计，直接用会重复计费）；⑤ CLI schema 漂移检测（init.capabilities feature-detect）
 
-**测试**：134 项全绿（R1~R28，daemon 单测 63 + e2e 50 + protocol 12 + testkit 8 + CLI 3，clippy 零告警）。里程碑见 git log。**已知缺陷（v0 接受）**见 [acceptance.rs](../crates/maestro-daemon/src/acceptance.rs) 模块头：无产物型任务误判（0.15 结构化验收断言接管）、workdir 外产物不可见。
+**测试**：138 项全绿（R1~R32，daemon 单测 65 + e2e 51 + protocol 12 + testkit 8 + CLI 3，clippy 零告警）。里程碑见 git log。**已知缺陷（v0 接受）**见 [acceptance.rs](../crates/maestro-daemon/src/acceptance.rs) 模块头：无产物型任务误判（0.15 结构化验收断言接管）、workdir 外产物不可见。
 
 **R23 调试战果（dash vfork 之谜）**：sigstop/b1 测试 ~33% flake 的根因不是「高负载 D 态」而是 **dash 对单条外部命令用 vfork**——父进程阻塞在不可中断的 vfork-wait 直到子进程 exec；STOP 恰落在 vfork 窗口时父进程停在 D（子进程 T），SIGSTOP 已投递且回用户态即生效，但 /proc 主 pid 永不显示 T。测试断言改为 T|D 双态（= 组不再执行用户代码）。产品语义（I1 冻结 = kill 返回）不受影响。
 
