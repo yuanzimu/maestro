@@ -42,15 +42,15 @@ fn main() -> anyhow::Result<()> {
 
     // worker 配置：命令行优先（--worker X -- Y Z），其次环境变量，
     // 默认占位（v0 echo worker）。⚠️ rounder 约定 argv 含 "--" 分隔
-    // （-- 之后的才是内层 CLI）—— clap 的 last 参数吃掉了 "--"，这里回补
-    let (worker_program, worker_args) = match (&cli.worker, cli.worker_args.split_first()) {
-        (Some(prog), Some((_, rest))) => {
+    // （-- 之后的才是内层 CLI）—— clap 的 last 参数吃掉了 "--"
+    // （实测 worker_args 不含它），这里回补且不得丢首元素（内层 CLI）
+    let (worker_program, worker_args) = match &cli.worker {
+        Some(prog) => {
             let mut args = vec!["--".to_string()];
-            args.extend(rest.iter().cloned());
+            args.extend(cli.worker_args.iter().cloned());
             (prog.clone(), args)
         }
-        (Some(prog), None) => (prog.clone(), vec![]),
-        (None, _) => {
+        None => {
             // 默认 echo worker（占位演示用）：平台各自的 shell
             #[cfg(unix)]
             let (dprog, dargs): (&str, Vec<&str>) = ("/bin/sh", vec!["-c", "echo maestro-worker-v0"]);

@@ -47,7 +47,7 @@ fn main() {
     // "--" 之后是底层 CLI
     let split = args.iter().position(|a| a == "--").unwrap_or(0);
     let (mine, cli) = args.split_at(split);
-    let cli = if cli.is_empty() {
+    let cli = if cli.len() < 2 {
         eprintln!("maestro-rounder: 需要 `-- <inner-cli> [args...]`");
         std::process::exit(2);
     } else {

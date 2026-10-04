@@ -1,5 +1,8 @@
 target/
 data/
+clients/macos/.build/
+clients/macos/dist/
+clients/macos/icon.iconset/
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
