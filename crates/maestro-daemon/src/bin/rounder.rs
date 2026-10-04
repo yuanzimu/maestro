@@ -229,8 +229,14 @@ fn main() {
             std::process::exit(0);
         }
         if round >= max_rounds {
-            eprintln!("maestro-rounder: 达最大轮数 {max_rounds}");
-            std::process::exit(0);
+            // 轮数预算耗尽 ≠ 任务完成（R42）：exit 5 + 标记行 —— daemon 转
+            // blocked(RoundsExhausted) 进收件箱，等用户 resume 续跑（session
+            // 已持久化，respawn 从上一完成轮续接）或放弃。不得静默 exit 0
+            // 让半途任务过验收门标 Done
+            eprintln!(
+                "maestro-rounder: ROUNDS_EXHAUSTED {max_rounds} 轮预算耗尽，任务未输出完成信号"
+            );
+            std::process::exit(5);
         }
 
         // 6. 上下文占用检测（R37）：输入侧 token（含缓存命中与写缓存——

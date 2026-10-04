@@ -950,3 +950,71 @@ fn steering_beats_compact_and_compact_retriggers() {
         "ContextCompacted 事件数应等于压缩轮数"
     );
 }
+
+/// 混沌⑬ 轮数预算耗尽（R42）：MAX_ROUNDS 到顶但无完成信号 —— 不得标
+/// Done（半途任务过验收门是语义缺陷）；应 blocked(rounds_exhausted) 进
+/// 收件箱；resume → requeue → respawn 从 session 续接跑完
+#[test]
+#[serial]
+fn rounds_exhausted_blocks_then_resume_continues() {
+    let (_repo, work) = git_repo();
+    let mock_tmp = tempfile::tempdir().unwrap();
+    let cli = mock_tmp.path().join("mock-claude");
+    write_mock_cli(&cli, &mock_tmp.path().join("state"));
+    let d = TestDaemon::start_with_worker_env(
+        &rounder_bin(),
+        &["--", cli.to_str().unwrap()],
+        vec![
+            ("MAESTRO_MAX_ROUNDS".into(), "2".into()),
+            // 压缩不干扰本测试：阈值拉满
+            ("MAESTRO_CONTEXT_LIMIT".into(), "99999999".into()),
+        ],
+    );
+
+    // 「上下文增长」永不输出 DONE → 2 轮预算耗尽
+    let t = d.create_task_with_prompt("re", "上下文增长：每轮记录新发现", &work);
+    assert!(
+        d.wait_state(&t, WorkerState::Blocked, 20000),
+        "轮数耗尽应 Blocked，实际: {:?}",
+        d.task_state(&t)
+    );
+    let g = d.api(Method::TaskGet, serde_json::json!({ "task": t.as_str() }));
+    assert_eq!(g["blocked_kind"], "rounds_exhausted", "{g}");
+
+    // resume → requeue → respawn（新 rounder 从 .maestro/<task>/session 续接）
+    d.api(
+        Method::TaskResume,
+        serde_json::json!({ "task": t.as_str() }),
+    );
+    assert!(
+        d.wait_state(&t, WorkerState::Working, 10000),
+        "resume 应重拉 worker，实际: {:?}",
+        d.task_state(&t)
+    );
+    // 注入「结束」→ 续接的 rounder 轮边界 poll → DONE 收敛
+    d.api(
+        Method::TaskSteer,
+        serde_json::json!({ "task": t.as_str(), "message": "结束" }),
+    );
+    assert!(
+        d.wait_state(&t, WorkerState::Done, 20000),
+        "续跑后应完成，实际: {:?}",
+        d.task_state(&t)
+    );
+
+    // 跨 respawn 同一 session（续接而非重开）
+    let rounds = std::fs::read_to_string(task_state_dir(&work, &t).join("rounds.jsonl")).unwrap();
+    let recs: Vec<serde_json::Value> = rounds
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    assert!(recs.len() >= 3, "至少 2+1 轮: {recs:?}");
+    let sids: Vec<&str> = recs
+        .iter()
+        .map(|r| r["session_id"].as_str().unwrap())
+        .collect();
+    assert!(
+        sids.windows(2).all(|w| w[0] == w[1]),
+        "respawn 后应续接同一 session: {sids:?}"
+    );
+}

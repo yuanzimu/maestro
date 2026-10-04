@@ -176,6 +176,9 @@ pub enum BlockedKind {
     AcceptanceFailed,
     /// 基础设施持续不可达（自动恢复 10 次耗尽后升级）
     Infra,
+    /// 轮数预算耗尽（R42）：任务未输出完成信号但 MAX_ROUNDS 到顶 ——
+    /// 半途任务不得标 Done，进收件箱等用户续跑（resume 从 session 续接）或放弃
+    RoundsExhausted,
 }
 
 // ---------------------------------------------------------------------------

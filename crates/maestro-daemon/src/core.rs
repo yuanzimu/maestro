@@ -1163,6 +1163,16 @@ impl Core {
                 round: t.round,
             });
             self.schedule_resume(&exit.task, 0);
+        } else if exit.exit_code == Some(5) && exit.stderr_tail.contains("ROUNDS_EXHAUSTED") {
+            // 轮数预算耗尽（R42）：半途任务不标 Done —— blocked 等用户
+            // resume（session 已持久化，respawn 续接）或放弃。steering 不
+            // drop（Blocked 非终态：requeue 后 respawn 前置注入积压）
+            self.pre_spawn.remove(&exit.task);
+            self.ctx.publish(Event::RoundsExhausted {
+                task: exit.task.clone(),
+                worker: exit.worker.clone(),
+                rounds: t.round,
+            });
         } else if exit.exit_code == Some(0) {
             self.acceptance_gate(&exit.task, &t);
         } else {

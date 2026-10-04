@@ -208,6 +208,13 @@ pub enum Event {
         task: TaskId,
         round: u32,
     },
+    /// 轮数预算耗尽（R42）：MAX_ROUNDS 到顶但任务未输出完成信号 ——
+    /// 半途任务标 Done 是语义缺陷；进 blocked(RoundsExhausted) 等用户决策
+    RoundsExhausted {
+        task: TaskId,
+        worker: WorkerId,
+        rounds: u32,
+    },
 
     // ---- provider / batch（U11/T6）----
     ProviderSwitched {
@@ -277,7 +284,8 @@ impl Event {
             | AutoRecoveryExhausted { .. }
             | EmergencyStopped { .. }
             | BatchFailed { .. }
-            | AcceptanceGateFailed { .. } => Priority::Critical,
+            | AcceptanceGateFailed { .. }
+            | RoundsExhausted { .. } => Priority::Critical,
 
             // blocked 语义的等待项（Goal 3 轮、审批门）也是 Critical
             GoalProgress {

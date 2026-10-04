@@ -221,6 +221,12 @@ impl Authority {
                     t.suspend = None;
                 }
             }
+            RoundsExhausted { task, .. } => {
+                if let Some(t) = self.tasks.get_mut(task) {
+                    t.state = WorkerState::Blocked;
+                    t.blocked_kind = Some(BlockedKind::RoundsExhausted);
+                }
+            }
             AcceptanceGateFailed { task, failures, .. } => {
                 if let Some(t) = self.tasks.get_mut(task) {
                     t.acceptance_failures = *failures;
