@@ -45,7 +45,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Test (full suite)
-        run: cargo test --workspace
+        run: cargo test --workspace --no-fail-fast
 
   test-cross:
     name: test (${{ matrix.name }})
@@ -55,11 +55,9 @@ jobs:
         include:
           - name: macos-latest, full
             os: macos-latest
-            args: --workspace
           - name: windows-latest, platform-neutral
             os: windows-latest
             # 平台无关层 + daemon/testkit 单测面（cfg 门控后自动跳过 Unix 专属用例）
-            args: --workspace
     runs-on: ${{ matrix.os }}
     continue-on-error: true # 试验性：跨平台差距先可见，转正后移除
     steps:
@@ -67,4 +65,5 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Test
-        run: cargo test ${{ matrix.args }}
+        # --no-fail-fast：一次暴露该平台全部失败（而非一轮修一个）
+        run: cargo test --workspace --no-fail-fast

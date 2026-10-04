@@ -352,7 +352,8 @@ mod imp {
                     .remove(&pid)
                     .and_then(|mut c| c.wait().ok().and_then(|s| s.code()));
                 finish_exit(meta, on_exit, exit_code);
-            })
+            })?;
+        Ok(())
     }
 
     pub fn graceful_kill_group(pgid: u32) {
@@ -386,6 +387,10 @@ mod imp {
 
     pub fn proc_stat(_pid: u32) -> Option<(String, u32, u64)> {
         None // 无 /proc
+    }
+
+    pub fn proc_start_time(_pid: u32) -> u64 {
+        0 // 无 /proc 双因子 —— 恒 0（is_our_process 走注册表）
     }
 
     fn kill_pid(pid: u32) -> bool {

@@ -16,11 +16,12 @@ fn b1_b5_emergency_freeze_snapshot_resume() {
     let t = d.create_task("freeze-test", &work);
     assert!(d.wait_state(&t, WorkerState::Working, 5000));
 
-    // worker 进程 pid
+    // worker 进程 pid。存活/状态断言用 testkit 的跨平台 proc_state
+    //（macOS 无 /proc，daemon 的 worker::proc_stat 恒 None）
     let workers = d.api(Method::WorkerList, serde_json::json!({}));
     let pid = workers["workers"][0]["pid"].as_u64().expect("pid") as u32;
     assert!(
-        maestro_daemon::worker::proc_stat(pid).is_some(),
+        maestro_testkit::script_worker::proc_state(pid).is_some(),
         "worker 应存活"
     );
 
@@ -32,19 +33,19 @@ fn b1_b5_emergency_freeze_snapshot_resume() {
     assert!(freeze_ms < 500, "FREEZE 超时: {freeze_ms}ms");
     // worker 进入冻结态：T（已停）或 D（stop pending —— dash 对 `sh -c "sleep 300"`
     // 单命令用 vfork 优化，父进程卡不可中断 vfork-wait，STOP 落在 vfork 窗口内
-    // 时父进程停在 D 直到子进程恢复；两种状态都 = 组不再执行用户代码）
+    // 时父进程停在 D 直到子进程恢复；macOS BSD ps 的不可中断态是 U）
     let mut stopped = false;
     for _ in 0..100 {
         if matches!(
-            maestro_daemon::worker::proc_stat(pid).map(|(st, _, _)| st),
-            Some(s) if s == "T" || s == "D"
+            maestro_testkit::script_worker::proc_state(pid),
+            Some(s) if s.starts_with('T') || s.starts_with('D') || s.starts_with('U')
         ) {
             stopped = true;
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    assert!(stopped, "worker 应在 2s 内进入冻结态（T/D，SIGSTOP）");
+    assert!(stopped, "worker 应在 2s 内进入冻结态（T/D/U，SIGSTOP）");
     // 任务 suspended(EmergencyStop)
     assert!(d.wait_state(&t, WorkerState::Suspended, 2000));
     let v = d.api(Method::TaskGet, serde_json::json!({ "task": t.as_str() }));
@@ -66,7 +67,7 @@ fn b1_b5_emergency_freeze_snapshot_resume() {
     assert!(d.wait_state(&t, WorkerState::Working, 2000));
     std::thread::sleep(std::time::Duration::from_millis(100));
     assert_ne!(
-        maestro_daemon::worker::proc_stat(pid).map(|(st, _, _)| st),
+        maestro_testkit::script_worker::proc_state(pid),
         Some("T".to_string()),
         "resume 后不应再是 T 态"
     );
