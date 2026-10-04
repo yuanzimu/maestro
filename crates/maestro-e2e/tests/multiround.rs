@@ -742,3 +742,97 @@ fn second_task_in_same_workdir_gets_fresh_session() {
         "B 首轮不应召回 FACT_1（跨任务 session 泄漏！answer: {ans}）"
     );
 }
+
+/// 混沌⑪ 上下文轮转（R37，P1 待办②机制层）：会话线性膨胀（200 token/轮）
+/// → 轮边界占用 ≥ MAESTRO_CONTEXT_LIMIT(600) → 注入 /compact 指令轮 →
+/// 压缩后 usage 回落 → 继续正常轮。全程同一 session（compact 不换 id）
+#[test]
+#[serial]
+fn context_rotation_compacts_when_over_limit() {
+    let (_repo, work) = git_repo();
+    let mock_tmp = tempfile::tempdir().unwrap();
+    let cli = mock_tmp.path().join("mock-claude");
+    write_mock_cli(&cli, &mock_tmp.path().join("state"));
+    let d = TestDaemon::start_with_worker_env(
+        &rounder_bin(),
+        &["--", cli.to_str().unwrap()],
+        vec![("MAESTRO_CONTEXT_LIMIT".into(), "600".into())],
+    );
+
+    let t = d.create_task_with_prompt("ctx", "上下文增长：每轮记录新发现", &work);
+    assert!(d.wait_state(&t, WorkerState::Working, 5000));
+
+    // 等压缩轮出现（膨胀 3 轮到 600 → 第 4 轮压缩）
+    let rounds_path = task_state_dir(&work, &t).join("rounds.jsonl");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut compact_rec: Option<serde_json::Value> = None;
+    while std::time::Instant::now() < deadline {
+        if let Ok(c) = std::fs::read_to_string(&rounds_path) {
+            compact_rec = c
+                .lines()
+                .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                .find(|r| r["compacted"].as_bool().unwrap_or(false));
+            if compact_rec.is_some() {
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let compact = compact_rec.expect("30s 内应出现压缩轮（膨胀 3 轮 ≥600）");
+
+    // 压缩轮断言：prompt 是 /compact 指令、usage 回落（CTX 截为 1 行 → 200）
+    let p = compact["prompt"].as_str().unwrap();
+    assert!(p.contains("/compact"), "压缩轮 prompt 应为压缩指令: {p}");
+    assert_eq!(compact["answer"].as_str().unwrap(), "已压缩上下文");
+    // 压缩前恰 3 轮膨胀（200/轮：轮3 达 600 触发），压缩是第 4 轮
+    let all = std::fs::read_to_string(&rounds_path).unwrap();
+    let recs: Vec<serde_json::Value> = all
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    let growth_rounds: Vec<u64> = recs
+        .iter()
+        .take_while(|r| !r["compacted"].as_bool().unwrap_or(false))
+        .map(|r| r["round"].as_u64().unwrap())
+        .collect();
+    assert_eq!(
+        growth_rounds,
+        vec![1, 2, 3],
+        "膨胀 3 轮（600=200×3）后应触发压缩"
+    );
+
+    // 任务经「结束」轻推收敛（压缩后正常轮继续，不是死循环压缩）
+    d.api(
+        Method::TaskSteer,
+        serde_json::json!({ "task": t.as_str(), "message": "结束" }),
+    );
+    assert!(
+        d.wait_state(&t, WorkerState::Done, 20000),
+        "压缩后应继续任务并收敛，实际: {:?}",
+        d.task_state(&t)
+    );
+
+    // 全程同一 session（compact 不换 session id —— 调研结论的机制验证）
+    let sids: Vec<&str> = recs
+        .iter()
+        .map(|r| r["session_id"].as_str().unwrap())
+        .collect();
+    assert!(
+        sids.windows(2).all(|w| w[0] == w[1]),
+        "压缩前后应同一 session: {sids:?}"
+    );
+
+    // daemon 感知：ContextCompacted 事件（U3 叙事「上下文已压缩」）
+    let store = maestro_daemon::persist::EventStore::open(&d.data_dir).unwrap();
+    let compacted_events = store
+        .replay_all()
+        .iter()
+        .filter(|e| {
+            matches!(
+                &e.event,
+                maestro_protocol::events::Event::ContextCompacted { task, .. } if task == &t
+            )
+        })
+        .count();
+    assert_eq!(compacted_events, 1, "应恰有一条 ContextCompacted 事件");
+}

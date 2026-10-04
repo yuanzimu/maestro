@@ -169,6 +169,9 @@ pub struct TaskRoundReportParams {
     /// CLI 自报本轮费用（result.total_cost_usd；daemon 与牌价计费对账用）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_cost_usd: Option<f64>,
+    /// 本轮 prompt 是否为上下文压缩指令（R37 轮转；daemon 发 ContextCompacted）
+    #[serde(default)]
+    pub compacted: bool,
 }
 
 /// `task.create` 参数

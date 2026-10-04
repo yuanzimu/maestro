@@ -42,6 +42,23 @@ fn cost_branches_produce_valid_stream() {
     assert_eq!(b.usage_in, 200);
 }
 
+/// 上下文轮转 mock 分支（R37）：增长分支 usage 线性膨胀、/compact 分支回落
+#[test]
+fn context_branches_grow_and_compact() {
+    let (_tmp, mut d) = setup("ctx");
+    // 3 轮增长：usage_in = 200 × 会话行数（每轮 +1 行）
+    let r1 = d.run_round("上下文增长：记录").unwrap();
+    assert_eq!(r1.usage_in, 200, "{}", r1.answer);
+    let r2 = d.run_round("上下文增长：记录").unwrap();
+    assert_eq!(r2.usage_in, 400);
+    let r3 = d.run_round("上下文增长：记录").unwrap();
+    assert_eq!(r3.usage_in, 600);
+    // 压缩：CTX 截为 1 行 → 回落
+    let c = d.run_round("/compact 保留任务状态").unwrap();
+    assert_eq!(c.answer, "已压缩上下文");
+    assert_eq!(c.usage_in, 200, "压缩后应回落: {}", c.usage_in);
+}
+
 /// S2 深召回：隔 2 轮干扰任务后早期事实仍可召回
 #[test]
 fn s2_deep_recall_after_interference() {

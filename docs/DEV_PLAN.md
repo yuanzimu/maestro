@@ -302,11 +302,11 @@ P2：U4 完整版（需内置 Executor D2）· U6 v2 检讨（需失败事件库
 **R28 调研落地（竞品对标，来源见 git log 提交）**：
 - **计价修正**：cache_creation（写 cache）单独计价 —— Anthropic 1.25x/2x 输入价、OpenAI = 输入价不加价（测试抓到「计 0 价」错误实现并修正）；UsageEntry/轮账参数加 cache_creation_tokens，三桶互斥计价
 - **结构化错误**：Claude Code 官方错误源是 result 事件的 errors[] + api_error_status（非 stderr）—— rounder 已转译，可重试（429/5xx）→ Suspended 自动恢复，防过载烧光轮数预算
-- **P1 待办（调研发现，未实现）**：① stream-json stdin 常驻会话（官方 steering 通道，工具边界注入 —— Copilot「Steer with Message」/OpenClaw 六模式对标）；② 长任务上下文轮转（**R36 调研完成**：`claude -p "/compact" --resume` 是官方受支持路径、compact 不换 session id、各家触发阈值 70~90% —— 实现留 P1，方案见 R3_PROTOCOL §7.5）；③ ~~steering 队列 at-least-once~~ **R32 已落地**（poll/ack/inflight 持久化）；④ ~~total_cost_usd 增量对账~~ **R34 已落地**（adapter 解析 result.total_cost_usd → daemon 与牌价计费比对，漂移 >25% 发 CostDrift(Warning) 事件；入账仍以 daemon 计费为准）；⑤ ~~CLI schema 漂移检测~~ **R35 已落地**（schema_drift：system.session_id/result.result/usage 三要素 feature-detect，缺任一 → rounder exit 3 带人话诊断 → TaskFailed；未知新事件类型前向兼容不算漂移）
+- **P1 待办（调研发现，未实现）**：① stream-json stdin 常驻会话（官方 steering 通道，工具边界注入 —— Copilot「Steer with Message」/OpenClaw 六模式对标）；② ~~长任务上下文轮转~~ **R36 调研 + R37 机制层落地**（轮边界占用 ≥ MAESTRO_CONTEXT_LIMIT 默认 200k → 注入 `/compact` 指令轮，官方受支持路径；压缩轮防抖跳检防死循环；轻推优先于压缩；ContextCompacted 事件进 U3 叙事；e2e 混沌⑪ 全链：膨胀 200/轮 → 600 触发 → 压缩回落 → 同 session 继续）；③ ~~steering 队列 at-least-once~~ **R32 已落地**（poll/ack/inflight 持久化）；④ ~~total_cost_usd 增量对账~~ **R34 已落地**（adapter 解析 result.total_cost_usd → daemon 与牌价计费比对，漂移 >25% 发 CostDrift(Warning) 事件；入账仍以 daemon 计费为准）；⑤ ~~CLI schema 漂移检测~~ **R35 已落地**（schema_drift：system.session_id/result.result/usage 三要素 feature-detect，缺任一 → rounder exit 3 带人话诊断 → TaskFailed；未知新事件类型前向兼容不算漂移）
 
 **R36 跨任务会话隔离（混沌⑩证伪驱动的真 bug 修复）**：rounder 状态目录从 `.maestro/` 迁移到 `.maestro/<task_id>/` —— 之前同 workdir 串行两任务，B 任务 resume A 的 session（跨任务上下文泄漏：A 通读后 B 无需通读即可召回 FACT）。证伪素材：mock 的 FACT 召回需会话内 read 标记。同任务 respawn/崩溃恢复读同一路径，续接语义不变。
 
-**测试**：144 项全绿（R1~R36，daemon 单测 67 + e2e 55 + protocol 12 + testkit 8 + CLI 3，clippy 零告警）。里程碑见 git log。**已知缺陷（v0 接受）**见 [acceptance.rs](../crates/maestro-daemon/src/acceptance.rs) 模块头：无产物型任务误判（0.15 结构化验收断言接管）、workdir 外产物不可见。
+**测试**：146 项全绿（R1~R37，daemon 单测 67 + e2e 57 + protocol 12 + testkit 8 + CLI 3，clippy 零告警，3 连跑稳定）。里程碑见 git log。**已知缺陷（v0 接受）**见 [acceptance.rs](../crates/maestro-daemon/src/acceptance.rs) 模块头：无产物型任务误判（0.15 结构化验收断言接管）、workdir 外产物不可见。
 
 **R23 调试战果（dash vfork 之谜）**：sigstop/b1 测试 ~33% flake 的根因不是「高负载 D 态」而是 **dash 对单条外部命令用 vfork**——父进程阻塞在不可中断的 vfork-wait 直到子进程 exec；STOP 恰落在 vfork 窗口时父进程停在 D（子进程 T），SIGSTOP 已投递且回用户态即生效，但 /proc 主 pid 永不显示 T。测试断言改为 T|D 双态（= 组不再执行用户代码）。产品语义（I1 冻结 = kill 返回）不受影响。
 

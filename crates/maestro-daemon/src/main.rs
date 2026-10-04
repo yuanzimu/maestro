@@ -33,6 +33,11 @@ fn main() -> anyhow::Result<()> {
             .unwrap_or(maestro_daemon::core::DEFAULT_MAX_PARALLEL_WORKERS),
         default_model: std::env::var("MAESTRO_MODEL")
             .unwrap_or_else(|_| maestro_daemon::core::DEFAULT_MODEL.into()),
+        // Worker 环境白名单透传（R37 上下文轮转阈值等）
+        worker_env: ["MAESTRO_CONTEXT_LIMIT", "MAESTRO_CLI_DIALECT"]
+            .iter()
+            .filter_map(|k| std::env::var(k).ok().map(|v| ((*k).to_string(), v)))
+            .collect(),
     };
 
     let clock = Arc::new(maestro_protocol::SystemClock);

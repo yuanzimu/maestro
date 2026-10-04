@@ -280,6 +280,16 @@ case "$PROMPT" in
        "{{\"type\":\"system\",\"subtype\":\"init\"}}" \
        "{{\"type\":\"result\",\"result\":\"bad schema\"}}"
      exit 0;;
+  *上下文增长*)
+     # R37 轮转：置「增长模式」标记（会话状态驱动，后续每轮自动 +1 行，
+     # 模拟真实会话逐轮积累上下文 → usage_in 线性膨胀）
+     echo '{{"grew":true}}' >> "$CTX"
+     ANSWER="继续"; GREW_THIS=1;;
+  */compact*)
+     # R37 轮转：模拟 compact —— CTX 截为单行摘要（grew 标记一并清除
+     # → 窗口回收、增长停止，usage 回落）
+     echo '{{"read":true,"compacted":true}}' > "$CTX"
+     ANSWER="已压缩上下文";;
   *过载模拟*)
      # 结构化错误路径（R28）：错误经 stdout 的 result 事件（不是 stderr）——
      # is_error + api_error_status 529，exit 0（rounder 负责转译退出）
@@ -299,13 +309,18 @@ esac
 P=$(prefix)
 if [ -n "$P" ] && [ "$ANSWER" != "已记录前缀 $P" ]; then ANSWER="$P $ANSWER"; fi
 
+# 增长模式（R37）：会话有 grew 标记时每轮追加一行（首分支已写标记，跳过）
+growing() {{ grep -q '"grew":true' "$CTX" 2>/dev/null; }}
+if growing && [ -z "${{GREW_THIS:-}}" ]; then echo '{{"log":1}}' >> "$CTX"; fi
+
 # 产物落盘（daemon 验收门读回校验用；对 R3 harness 测试无影响；
 # 无产物模拟模式跳过 —— 验收门 3 振出局测试用）
 if [ -z "${{SKIP_ARTIFACT:-}}" ]; then echo "$ANSWER" >> out.txt; fi
 
-# usage：平台型（常量 in + cache 命中 + 写 cache）；MOCK_REPLAY=1 时线性重放
+# usage：平台型（常量 in + cache 命中 + 写 cache）；增长模式（会话含 grew
+# 标记，R37）或 MOCK_REPLAY=1 时按会话行数线性（200/行）
 LINES=$(wc -l < "$CTX")
-if [ "$MOCK_REPLAY" = "1" ]; then IN=$((200*LINES)); CR=0; CC=0; else IN=200; CR=120; CC=30; fi
+if [ "$MOCK_REPLAY" = "1" ] || growing; then IN=$((200*LINES)); CR=0; CC=0; else IN=200; CR=120; CC=30; fi
 OUT=40
 # total_cost_usd 字段（费用自洽/虚报分支才有；其余 CLI 不报 → daemon 跳过对账）
 COST_FIELD=""

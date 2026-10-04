@@ -202,6 +202,12 @@ pub enum Event {
         /// CLI 自报折算（美分）
         cli_cents: u64,
     },
+    /// 上下文压缩（R37 轮转，U3 叙事）：轮边界占用超阈值 → 注入
+    /// /compact 指令轮完成压缩 ——「上下文已压缩，任务继续」
+    ContextCompacted {
+        task: TaskId,
+        round: u32,
+    },
 
     // ---- provider / batch（U11/T6）----
     ProviderSwitched {

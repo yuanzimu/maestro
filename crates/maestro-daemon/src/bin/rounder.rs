@@ -23,6 +23,12 @@ use std::process::Command;
 
 const MAX_ROUNDS_DEFAULT: u32 = 20;
 const DONE_MARKER: &str = "MAESTRO_DONE";
+/// 上下文轮转（R37，R3_PROTOCOL §7.5）：占用 ≥ 阈值 → 轮边界注入压缩指令
+/// （`claude -p "/compact ..." --resume` 官方受支持路径；compact 不换
+/// session id）。默认 200k ≈ claude 窗口；比 CLI 被动 compact（~85-95%，
+/// 时机在 turn 中间）提前可控触发
+const CONTEXT_LIMIT_DEFAULT: u64 = 200_000;
+const COMPACT_INSTRUCTION: &str = "/compact 保留任务状态、关键结论与文件路径，然后继续当前任务";
 
 #[derive(Serialize)]
 struct RoundRecord {
@@ -31,6 +37,9 @@ struct RoundRecord {
     prompt: String,
     answer: String,
     steering_injected: bool,
+    /// 本轮 prompt 是否为压缩指令（上下文轮转触发）
+    #[serde(default)]
+    compacted: bool,
 }
 
 fn main() {
@@ -60,6 +69,11 @@ fn main() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(1000);
+    // 上下文轮转阈值（R37）：经 daemon worker_env 白名单透传
+    let context_limit: u64 = std::env::var("MAESTRO_CONTEXT_LIMIT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(CONTEXT_LIMIT_DEFAULT);
     if task.is_empty() || socket.is_empty() {
         eprintln!("maestro-rounder: 缺少 MAESTRO_TASK_ID/MAESTRO_SOCKET_PATH");
         std::process::exit(2);
@@ -103,8 +117,14 @@ fn main() {
     );
 
     let mut round: u32 = 0;
+    // 上下文轮转状态（R37）：compact_pending = 下一轮注入压缩指令；
+    // 防抖——压缩轮本身 usage 仍高（输入=全上下文），压缩后跳过一次检测
+    // 给压缩生效留一轮（若仍超限，隔轮再压，不是死循环）
+    let mut compact_pending = false;
     loop {
         round += 1;
+        let this_round_is_compact = compact_pending;
+        compact_pending = false;
         // 1. 跑一轮底层 CLI（方言构造参数）
         let mut cmd = Command::new(&cli[0]);
         cmd.args(&cli[1..])
@@ -171,6 +191,7 @@ fn main() {
             prompt: next_prompt.clone(),
             answer: answer.clone(),
             steering_injected: injected,
+            compacted: this_round_is_compact,
         };
         if let Ok(line) = serde_json::to_string(&rec) {
             use std::io::Write;
@@ -198,6 +219,8 @@ fn main() {
                 "summary": answer.chars().take(200).collect::<String>(),
                 // CLI 自报费用（R34 对账；无该字段的 CLI 为 null → daemon 跳过对账）
                 "total_cost_usd": oc.total_cost_usd,
+                // 上下文轮转（R37）：daemon 发 ContextCompacted 事件（U3 叙事）
+                "compacted": this_round_is_compact,
             }),
         );
 
@@ -210,14 +233,25 @@ fn main() {
             std::process::exit(0);
         }
 
-        // 6. 下一轮 prompt：有轻推 → 轻推内容；无 → 继续指令。
-        //    无轻推时按轮间隔歇一拍（防秒回型 CLI 热循环）
+        // 6. 上下文占用检测（R37）：输入侧 token（含缓存命中）近似占用。
+        //    压缩轮跳过（防抖——压缩生效需一轮，见上）
+        let context_used = oc.usage_in + oc.cache_read.unwrap_or(0);
+        if !this_round_is_compact && context_used >= context_limit {
+            compact_pending = true;
+        }
+
+        // 7. 下一轮 prompt：轻推 > 压缩 > 继续。
+        //    轻推优先（用户实时指令最急，压缩顺延到下轮检测）；
+        //    无内容时按轮间隔歇一拍（防秒回型 CLI 热循环）
         if injected {
             next_prompt = steering
                 .iter()
                 .map(|(_, m)| m.as_str())
                 .collect::<Vec<_>>()
                 .join("\n");
+        } else if compact_pending {
+            eprintln!("maestro-rounder: 上下文占用 {context_used} ≥ {context_limit}，注入压缩指令");
+            next_prompt = COMPACT_INSTRUCTION.into();
         } else {
             std::thread::sleep(std::time::Duration::from_millis(round_gap_ms));
             next_prompt = "继续当前任务；没有剩余工作时输出完成信号".into();

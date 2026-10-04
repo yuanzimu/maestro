@@ -53,6 +53,9 @@ pub struct CoreConfig {
     /// 计价默认模型（轮账上报未带 model 时用；MAESTRO_MODEL 可覆盖。
     /// 0.6 适配器 / 0.8 路由接管前的占位）
     pub default_model: String,
+    /// 透传给 Worker 的额外环境（白名单式；如 MAESTRO_CONTEXT_LIMIT
+    /// —— 上下文轮转阈值，R37）
+    pub worker_env: Vec<(String, String)>,
 }
 
 /// 默认槽位数：本地守护进程的保守起点（调研 R12 校准项）
@@ -74,6 +77,7 @@ impl Default for CoreConfig {
             socket_path: "/tmp/maestro.sock".into(),
             max_parallel_workers: DEFAULT_MAX_PARALLEL_WORKERS,
             default_model: std::env::var("MAESTRO_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into()),
+            worker_env: vec![],
         }
     }
 }
@@ -708,6 +712,13 @@ impl Core {
             .model
             .clone()
             .unwrap_or_else(|| self.cfg.default_model.clone());
+        // 上下文压缩（R37 轮转）：压缩轮上报 → U3 叙事「上下文已压缩，任务继续」
+        if params.compacted {
+            self.ctx.publish(Event::ContextCompacted {
+                task: params.task.clone(),
+                round: params.round,
+            });
+        }
         // 轮进度事件（U3 叙事）：CLI/Desktop 实时渲染「它正在干什么」
         self.ctx.publish(Event::RoundProgress {
             task: params.task.clone(),
@@ -1434,7 +1445,7 @@ impl Core {
             args: self.cfg.worker_args.clone(),
             workdir: PathBuf::from(&t.task.workdir),
             log_dir: self.cfg.data_dir.join("logs"),
-            extra_env: vec![],
+            extra_env: self.cfg.worker_env.clone(),
             prompt,
         };
         // WorkerExit → CoreMsg 转发（waiter 线程只懂 WorkerExit）

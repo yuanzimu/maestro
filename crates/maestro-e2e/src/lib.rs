@@ -37,6 +37,7 @@ impl TestDaemon {
             worker_args,
             data_dir,
             DEFAULT_MAX_PARALLEL_WORKERS,
+            vec![],
         )
     }
 
@@ -47,7 +48,23 @@ impl TestDaemon {
         data_dir: Option<PathBuf>,
         max_parallel: usize,
     ) -> Self {
-        Self::build(worker_program, worker_args, data_dir, max_parallel)
+        Self::build(worker_program, worker_args, data_dir, max_parallel, vec![])
+    }
+
+    /// Worker 额外环境可指定（R37 上下文轮转阈值等，经 CoreConfig.worker_env
+    /// 白名单透传给 worker 进程）
+    pub fn start_with_worker_env(
+        worker_program: &str,
+        worker_args: &[&str],
+        worker_env: Vec<(String, String)>,
+    ) -> Self {
+        Self::build(
+            worker_program,
+            worker_args,
+            None,
+            DEFAULT_MAX_PARALLEL_WORKERS,
+            worker_env,
+        )
     }
 
     fn build(
@@ -55,6 +72,7 @@ impl TestDaemon {
         worker_args: &[&str],
         data_dir: Option<PathBuf>,
         max_parallel: usize,
+        worker_env: Vec<(String, String)>,
     ) -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let dir = data_dir.unwrap_or_else(|| tmp.path().to_path_buf());
@@ -66,6 +84,7 @@ impl TestDaemon {
             socket_path: dir.join("maestro.api.sock").display().to_string(),
             max_parallel_workers: max_parallel,
             default_model: "claude-sonnet-4".into(),
+            worker_env,
         };
         let clock = Arc::new(MockClock::new());
         let (core, _) = Core::recover(cfg, clock.clone());
