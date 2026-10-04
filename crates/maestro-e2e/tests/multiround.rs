@@ -17,6 +17,11 @@ fn rounder_bin() -> String {
     .to_string()
 }
 
+/// 任务级 rounder 状态目录（R36：.maestro/<task_id>/，跨任务会话隔离）
+fn task_state_dir(work: &std::path::Path, task: &TaskId) -> std::path::PathBuf {
+    work.join(".maestro").join(task.as_str())
+}
+
 #[test]
 #[serial]
 fn steering_injected_mid_task_changes_next_round() {
@@ -37,7 +42,7 @@ fn steering_injected_mid_task_changes_next_round() {
         Method::TaskSteer,
         serde_json::json!({ "task": t.as_str(), "message": "补充指示：从现在起每句输出加前缀 [S]" }),
     );
-    let rounds_path = work.join(".maestro/rounds.jsonl");
+    let rounds_path = task_state_dir(&work, &t).join("rounds.jsonl");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let mut injected_seen = false;
     while std::time::Instant::now() < deadline {
@@ -63,7 +68,7 @@ fn steering_injected_mid_task_changes_next_round() {
     );
 
     // 轮账断言：存在注入轮，且其后的轮输出带 [S] 前缀
-    let rounds = std::fs::read_to_string(work.join(".maestro/rounds.jsonl")).unwrap();
+    let rounds = std::fs::read_to_string(task_state_dir(&work, &t).join("rounds.jsonl")).unwrap();
     let recs: Vec<serde_json::Value> = rounds
         .lines()
         .filter_map(|l| serde_json::from_str(l).ok())
@@ -155,12 +160,15 @@ fn crash_recovery_resumes_session() {
         assert!(d.wait_state(&t, WorkerState::Working, 5000));
         // 等 round 1 落盘（session 建立）
         for _ in 0..50 {
-            if work.join(".maestro/session").exists() {
+            if task_state_dir(&work, &t).join("session").exists() {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        assert!(work.join(".maestro/session").exists(), "session 应已建立");
+        assert!(
+            task_state_dir(&work, &t).join("session").exists(),
+            "session 应已建立"
+        );
     } // drop = kill -9
 
     // 实例 2：恢复 → suspended(DaemonCrash) → 手动 resume → 续接完成
@@ -185,7 +193,7 @@ fn crash_recovery_resumes_session() {
     );
 
     // 轮账：跨实例共用同一 session（续接而非重开）
-    let rounds = std::fs::read_to_string(work.join(".maestro/rounds.jsonl")).unwrap();
+    let rounds = std::fs::read_to_string(task_state_dir(&work, &t).join("rounds.jsonl")).unwrap();
     let recs: Vec<serde_json::Value> = rounds
         .lines()
         .filter_map(|l| serde_json::from_str(l).ok())
@@ -293,7 +301,7 @@ fn disconnect_mid_task_recovers_session() {
     assert!(d.wait_state(&t, WorkerState::Working, 5000));
 
     // 等 round 1 落盘（保证故障指令注入到后续轮而非首轮）
-    let rounds_path = work.join(".maestro/rounds.jsonl");
+    let rounds_path = task_state_dir(&work, &t).join("rounds.jsonl");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while std::time::Instant::now() < deadline {
         if let Ok(c) = std::fs::read_to_string(&rounds_path) {
@@ -386,8 +394,8 @@ fn two_concurrent_multiround_tasks() {
     );
 
     // 轮账各自落在各自 workdir
-    assert!(work1.join(".maestro/rounds.jsonl").exists());
-    assert!(work2.join(".maestro/rounds.jsonl").exists());
+    assert!(task_state_dir(&work1, &t1).join("rounds.jsonl").exists());
+    assert!(task_state_dir(&work2, &t2).join("rounds.jsonl").exists());
     // ledger 独立且都 ≥1 轮
     for t in [&t1, &t2] {
         let v = d.api(
@@ -429,8 +437,8 @@ fn multiround_fake_completion_three_strikes() {
     assert_eq!(g["acceptance_failures"], 3, "{g}");
 
     // .maestro 状态目录不算产物：session/轮账存在但门不误判
-    assert!(work.join(".maestro/session").exists());
-    assert!(work.join(".maestro/rounds.jsonl").exists());
+    assert!(task_state_dir(&work, &t).join("session").exists());
+    assert!(task_state_dir(&work, &t).join("rounds.jsonl").exists());
 
     // 轮账：3 次 respawn 各 1 轮（假完成轮也计量 token —— 钱真花了）
     let l = d.api(
@@ -677,5 +685,60 @@ fn bad_cli_schema_fails_with_diagnosis() {
     assert!(
         failed.contains("session_id") && failed.contains("usage"),
         "两条漂移都应报出: {failed}"
+    );
+}
+
+/// 混沌⑩ 跨任务会话隔离（R36）：同 workdir 串行两任务，B 不得继承 A 的
+/// session——否则 B 的上下文被 A 污染（跨任务信息泄漏）。证伪素材：mock 的
+/// FACT 召回需「通读」前置（会话内 read 标记），A 通读后 B 首轮问 FACT_1：
+/// 继承 → 召回成功（错）；隔离 → 「我不知道」（对）
+#[test]
+#[serial]
+fn second_task_in_same_workdir_gets_fresh_session() {
+    let (_repo, work) = git_repo();
+    let mock_tmp = tempfile::tempdir().unwrap();
+    let cli = mock_tmp.path().join("mock-claude");
+    write_mock_cli(&cli, &mock_tmp.path().join("state"));
+    let d = TestDaemon::start(&rounder_bin(), &["--", cli.to_str().unwrap()]);
+
+    // A：通读建立上下文（会话内 read 标记），经「结束」轻推收敛
+    let a = d.create_task_with_prompt("task-a", "通读 README 与 src", &work);
+    assert!(d.wait_state(&a, WorkerState::Working, 5000));
+    d.api(
+        Method::TaskSteer,
+        serde_json::json!({ "task": a.as_str(), "message": "结束" }),
+    );
+    assert!(
+        d.wait_state(&a, WorkerState::Done, 20000),
+        "A 实际: {:?}",
+        d.task_state(&a)
+    );
+
+    // B：同 workdir（互斥保证串行，A 已 Done 释放）。首轮问 FACT_1
+    let b = d.create_task_with_prompt("task-b", "FACT_1 在哪个文件？", &work);
+    assert!(d.wait_state(&b, WorkerState::Working, 5000));
+    d.api(
+        Method::TaskSteer,
+        serde_json::json!({ "task": b.as_str(), "message": "结束" }),
+    );
+    assert!(
+        d.wait_state(&b, WorkerState::Done, 20000),
+        "B 实际: {:?}",
+        d.task_state(&b)
+    );
+
+    // B 首轮 answer 必须是「无上下文」——继承 A 的 session 才能召回
+    // （R36 隔离后 B 的轮账在独立目录，不受 A 污染）
+    let rounds_path = task_state_dir(&work, &b).join("rounds.jsonl");
+    let content = std::fs::read_to_string(&rounds_path).unwrap();
+    let b_first = content
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find(|r| r["prompt"].as_str().unwrap_or("").contains("FACT_1"))
+        .expect("B 的 FACT_1 轮应在轮账");
+    let ans = b_first["answer"].as_str().unwrap();
+    assert!(
+        ans.contains("我不知道"),
+        "B 首轮不应召回 FACT_1（跨任务 session 泄漏！answer: {ans}）"
     );
 }

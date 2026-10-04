@@ -75,7 +75,7 @@ S0→S1→S3→S7c 先跑（Block 项里最快证伪的组合，约 20 分钟）
 
 | 落地物 | 位置 | 说明 |
 |---|---|---|
-| **maestro-rounder 二进制** | `crates/maestro-daemon/src/bin/rounder.rs` | 轮循环：每轮调底层 CLI 单轮 + `--resume` 续接；session 持久化于 `<cwd>/.maestro/session`；轮账 `.maestro/rounds.jsonl`；完成信号 `MAESTRO_DONE`；`MAESTRO_MAX_ROUNDS`（默认 20）防失控；`MAESTRO_ROUND_GAP_MS`（默认 1000）防秒回型 CLI 热循环 |
+| **maestro-rounder 二进制** | `crates/maestro-daemon/src/bin/rounder.rs` | 轮循环：每轮调底层 CLI 单轮 + `--resume` 续接；session 持久化于 `<cwd>/.maestro/<task_id>/session`（R36 按任务隔离——同 workdir 串行任务不共享会话）；轮账 `.maestro/<task_id>/rounds.jsonl`；完成信号 `MAESTRO_DONE`；`MAESTRO_MAX_ROUNDS`（默认 20）防失控；`MAESTRO_ROUND_GAP_MS`（默认 1000）防秒回型 CLI 热循环 |
 | **adapter 三件套** | `crates/maestro-daemon/src/adapter.rs` | `parse_stream_json` → RoundOutcome（session_id/usage 三桶/工具/结构化错误）；`classify_exit` → ExitClass（**Disconnect≠failed**，认证/配额 Fatal 优先，未知默认 Fatal）；`Dialect` trait（claude 默认，`MAESTRO_CLI_DIALECT` 可插拔，B7 Codex/Gemini 预留） |
 | **轮间投递 API** | `crates/maestro-protocol/src/api.rs` | `TaskSteerPoll`（活 worker 轮边界拉取，仅当前 worker）· `TaskSteerAck`（消费确认，R32）· `TaskRoundReport`（轮账上报：usage 三桶/model/工具/摘要）· `TaskLedger`（查询） |
 | **steering at-least-once** | `crates/maestro-daemon/src/steering.rs` | poll 取走进 inflight（未确认重投）、ack 消费确认、inflight 持久化跨重启、respawn 时 `take_all` 前置拼入 prompt、终态 `SteeringDropped` 不静默 |
@@ -104,3 +104,20 @@ multiround.rs 另有：断连自动恢复（MockClock 推退避）、双任务�
 2. S6 真实 cache_read 命中率（决定「重要指示每轮重注」的性价比）
 3. `--resume`/`--output-format stream-json`/`--max-turns` flag 与实际 CLI 版本的差异（喂 R2）
 4. stream-json result 事件的 errors[]/api_error_status 字段实测（adapter 结构化错误路径）
+
+### 7.5 上下文轮转方案（R36 调研结论，实现留 P1）
+
+长任务（几十轮）下裸 `--resume` 的上下文无限膨胀是真实风险。竞品调研结论（2026-10 查证）：
+
+| CLI | 自动压缩阈值 | 机制 | session id |
+|---|---|---|---|
+| Claude Code | ~83-95%（`--autocompact`/env 可调，只能调低） | microcompact（旧工具结果换占位符，零 API 成本）+ full compact（LLM 摘要，复用 prompt cache） | **不变**（compact_boundary 追加记录） |
+| Codex CLI | ~85-90%（上限锁 90%） | OpenAI 远程 compact 端点，AES 加密 checkpoint（有损） | — |
+| Gemini CLI | 70%（0.5 可配） | 摘要旧历史 + 保留最近 30% | — |
+| OpenCode | `limit − min(20K, max_output)` | 迭代更新同一份摘要；有 HTTP API `POST /session/<id>/compact` | — |
+
+**Maestro 方案**（headless 多轮驱动的适配）：
+1. **触发点**：轮边界检测——rounder 已每轮拿 usage，context 占用 ≥70-75% 即主动压缩，不等 CLI 的 ~85-95% 被动触发（时机在 turn 中间、摘要质量不可控）
+2. **手段**：轮边界注入 `claude -p "/compact <保留指令>" --resume <sid>`——官方受支持路径（Agent SDK slash commands；v2.1.267 专门修过 `-p --resume` + `/compact`），可带定制摘要指令（3-5x 优于自动压缩）；同时 `--autocompact` 兜底防单轮爆窗
+3. **session id**：compact 不换 id，`--resume` 链继续；但 daemon 应每轮捕获 result 的 session_id 并更新（防 fork 路径），rounder 已每轮写 `.maestro/<task>/session` ✓
+4. **关键状态外置**：任务树/todo/约束写 CLAUDE.md 类文件，天然免疫压缩丢失

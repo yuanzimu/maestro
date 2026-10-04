@@ -2,14 +2,16 @@
 //!
 //! daemon 把本程序作为 worker_program 拉起；它持有任务循环：
 //! 每轮调一次底层 CLI（单轮 + `--resume` 续接），轮边界拉取轻推
-//! （steering）注入下一轮 prompt。会话引用持久化在 workdir/.maestro/，
-//! daemon 崩溃恢复后重拉 rounder 能从上一完成轮续接（R3 S7c 语义）。
+//! （steering）注入下一轮 prompt。会话引用持久化在 workdir/.maestro/<task_id>/，
+//! daemon 崩溃恢复后重拉 rounder 能从上一完成轮续接（R3 S7c 语义）；
+//! 状态按任务隔离 —— 同 workdir 串行任务不共享会话（R36）。
 //!
 //! 用法（由 daemon 经 SpawnSpec 拉起）：
 //!   maestro-rounder -- <inner-cli> [inner args...]
 //! 环境：MAESTRO_TASK_ID / MAESTRO_WORKER_ID / MAESTRO_SOCKET_PATH /
 //!       MAESTRO_PROMPT（daemon 注入）
-//! 状态：<cwd>/.maestro/session（session id）、.maestro/rounds.jsonl（轮账）
+//! 状态：<cwd>/.maestro/<task_id>/session（session id）、
+//!       <cwd>/.maestro/<task_id>/rounds.jsonl（轮账）
 //! 结束：底层 CLI 回答含 MAESTRO_DONE（结构化完成信号，v0）或达
 //!       MAESTRO_MAX_ROUNDS（默认 20）或 CLI 非零退出（透传退出码）。
 
@@ -64,9 +66,24 @@ fn main() {
     }
 
     let client = MaestroClient::from_api_socket(std::path::Path::new(&socket));
+    // 状态按任务隔离（R36）：session/轮账放 .maestro/<task_id>/ ——
+    // 同 workdir 串行任务不得共享会话（跨任务上下文泄漏，混沌⑩证伪后修复）；
+    // 同任务 respawn/崩溃恢复读同一路径，续接语义不变。
+    // task id 做目录名：非法字符替换 _（防御性，正常 id 为 t-N 形）
+    let safe_task: String = task
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
     let state_dir = std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
-        .join(".maestro");
+        .join(".maestro")
+        .join(&safe_task);
     let _ = std::fs::create_dir_all(&state_dir);
     let session_file = state_dir.join("session");
     let rounds_file = state_dir.join("rounds.jsonl");
