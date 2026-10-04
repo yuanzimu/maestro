@@ -640,3 +640,42 @@ fn cost_reconciliation_drift_event() {
         assert_eq!(v["actual_cost_cents"].as_u64(), Some(1), "{v}");
     }
 }
+
+/// 混沌⑨ CLI schema 漂移检测（R35，R28 调研待办⑤）：坏 schema
+/// （system 缺 session_id + result 缺 usage）→ rounder exit 3 带人话诊断 →
+/// 任务 Failed 且诊断进事件流，不静默空转烧轮数
+#[test]
+#[serial]
+fn bad_cli_schema_fails_with_diagnosis() {
+    let (_repo, work) = git_repo();
+    let mock_tmp = tempfile::tempdir().unwrap();
+    let cli = mock_tmp.path().join("mock-claude");
+    write_mock_cli(&cli, &mock_tmp.path().join("state"));
+    let d = TestDaemon::start(&rounder_bin(), &["--", cli.to_str().unwrap()]);
+
+    let t = d.create_task_with_prompt("bad-schema", "坏schema", &work);
+    assert!(
+        d.wait_state(&t, WorkerState::Failed, 15000),
+        "实际: {:?}",
+        d.task_state(&t)
+    );
+
+    // 诊断人话进事件流（TaskFailed.error 含 stderr 尾部）
+    let store = maestro_daemon::persist::EventStore::open(&d.data_dir).unwrap();
+    let failed = store
+        .replay_all()
+        .iter()
+        .filter_map(|e| match &e.event {
+            maestro_protocol::events::Event::TaskFailed { task, error, .. } if task == &t => {
+                Some(error.clone())
+            }
+            _ => None,
+        })
+        .last()
+        .expect("应有 TaskFailed 事件");
+    assert!(failed.contains("schema"), "诊断应含 schema 字样: {failed}");
+    assert!(
+        failed.contains("session_id") && failed.contains("usage"),
+        "两条漂移都应报出: {failed}"
+    );
+}

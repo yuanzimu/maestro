@@ -745,10 +745,13 @@ impl Core {
         // 漂移 > 25% → CostDrift 事件（牌价表过期 / usage 口径变化的信号）。
         // 不影响入账金额（daemon 计费为准）；双方都 > 0 才有对账意义
         if let (Some(usd), Some(ledger)) = (params.total_cost_usd, usage.actual_cost_cents) {
-            let cli = (usd * 100.0).round() as u64;
+            // NaN/负数 → 0 → 跳过；超大值 as u64 饱和（对账仍成立，漂移 100%）
+            let cli = (usd * 100.0).max(0.0).round() as u64;
             if cli > 0 && ledger > 0 {
                 let hi = cli.max(ledger);
-                let drift_pct = (hi - cli.min(ledger)) * 100 / hi;
+                let lo = cli.min(ledger);
+                // u128 中间量：极端值（usd 饱和到 u64::MAX）下 (hi-lo)*100 不溢出
+                let drift_pct = ((hi - lo) as u128 * 100 / hi as u128) as u64;
                 if drift_pct > 25 {
                     self.ctx.publish(Event::CostDrift {
                         task: params.task.clone(),

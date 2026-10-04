@@ -121,10 +121,18 @@ fn main() {
             eprintln!("maestro-rounder: {msg}");
             std::process::exit(1);
         }
-        let Some(sid) = oc.session_id.clone() else {
-            eprintln!("maestro-rounder: stream-json 缺 session_id");
+        // schema 漂移检测（R35）：续接凭据/计量/回答捕获任一缺失 = 核心能力
+        // 静默失效 —— 显式报错带人话诊断（exit 3 → daemon 判 Fatal），
+        // 不让坏 schema 的轮次空转烧预算
+        let drifts = maestro_daemon::adapter::schema_drift(&oc);
+        if !drifts.is_empty() {
+            eprintln!("maestro-rounder: CLI schema 漂移: {}", drifts.join("; "));
             std::process::exit(3);
-        };
+        }
+        let sid = oc
+            .session_id
+            .clone()
+            .expect("schema_drift 已保证 session_id");
         session = Some(sid.clone());
         let _ = std::fs::write(&session_file, &sid);
         let answer = oc.answer.clone();

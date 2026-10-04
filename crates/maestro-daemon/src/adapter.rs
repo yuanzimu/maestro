@@ -41,6 +41,8 @@ pub struct RoundOutcome {
     pub api_error_status: Option<u16>,
     /// result.total_cost_usd（CLI 自报本轮费用；daemon 对账用 —— R34）
     pub total_cost_usd: Option<f64>,
+    /// 观察到的事件类型（去重保序）—— CLI schema 签名素材（R35）
+    pub event_types: Vec<String>,
 }
 
 /// 解析 stream-json stdout（逐行 JSON 事件流）。
@@ -51,6 +53,11 @@ pub fn parse_stream_json(stdout: &[u8]) -> RoundOutcome {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
+        if let Some(t) = v["type"].as_str() {
+            if !out.event_types.iter().any(|e| e == t) {
+                out.event_types.push(t.to_string());
+            }
+        }
         match v["type"].as_str() {
             Some("system") => {
                 if let Some(s) = v["session_id"].as_str() {
@@ -155,6 +162,33 @@ pub fn classify_exit(_code: Option<i32>, stderr: &str) -> ExitClass {
         return ExitClass::Disconnect;
     }
     ExitClass::Fatal
+}
+
+/// schema 漂移检测（R35，R28 调研待办⑤）：CLI 输出对**关键事件/字段**的
+/// feature-detect。Maestro 依赖三项不可前向兼容的要素——缺任一即核心
+/// 能力（续接/计量/回答捕获）静默失效，必须在轮边界显式报错而非吞掉：
+/// 1. system.session_id —— `--resume` 续接凭据
+/// 2. result.result —— 本轮回答（DONE 信号检测源）
+/// 3. result.usage.input_tokens —— 计量闭环（T4 账本）
+/// 返回人话描述列表（空 = 无漂移）。未知**新**事件类型不算漂移（前向兼容）。
+pub fn schema_drift(out: &RoundOutcome) -> Vec<String> {
+    let mut drifts = vec![];
+    if !out.event_types.iter().any(|t| t == "system") {
+        drifts.push("缺 system 事件（session_id 续接凭据丢失）".into());
+    } else if out.session_id.is_none() {
+        drifts.push("system 事件缺 session_id 字段（CLI schema 变化？）".into());
+    }
+    if !out.event_types.iter().any(|t| t == "result") {
+        drifts.push("缺 result 事件（answer/usage 丢失）".into());
+    } else {
+        if out.answer.is_empty() {
+            drifts.push("result 事件缺 result 字段（回答捕获失效）".into());
+        }
+        if out.usage_in == 0 && out.usage_out == 0 {
+            drifts.push("result 事件缺 usage（计量闭环破坏）".into());
+        }
+    }
+    drifts
 }
 
 // ---------------------------------------------------------------------------
@@ -284,7 +318,7 @@ mod tests {
         assert_eq!(out.total_cost_usd, None);
     }
 
-    /// 未识别事件类型忽略（前向兼容）；空流全默认
+    /// 未识别事件类型忽略（前向兼容：内容不解析，但类型记录进签名）
     #[test]
     fn unknown_events_ignored() {
         let out = parse_stream_json(&stream(&[
@@ -292,7 +326,56 @@ mod tests {
             "not json at all",
             "",
         ]));
-        assert_eq!(out, RoundOutcome::default());
+        assert_eq!(out.event_types, vec!["future_event"], "未知类型记录签名");
+        // 其余字段全默认
+        assert_eq!(out.session_id, None);
+        assert_eq!(out.answer, "");
+        assert_eq!(out.usage_in, 0);
+        assert_eq!(out.tools_used, Vec::<String>::new());
+    }
+
+    /// schema 漂移检测（R35）：三要素（续接/回答/计量）缺失逐项报
+    #[test]
+    fn detects_schema_drift() {
+        // 完整流 → 无漂移
+        let ok = parse_stream_json(&stream(&[
+            r#"{"type":"system","session_id":"s"}"#,
+            r#"{"type":"result","result":"done","usage":{"input_tokens":10,"output_tokens":2}}"#,
+        ]));
+        assert!(schema_drift(&ok).is_empty(), "{:?}", schema_drift(&ok));
+
+        // system 缺 session_id
+        let d = parse_stream_json(&stream(&[
+            r#"{"type":"system","subtype":"init"}"#,
+            r#"{"type":"result","result":"x","usage":{"input_tokens":1,"output_tokens":1}}"#,
+        ]));
+        assert_eq!(
+            schema_drift(&d),
+            vec!["system 事件缺 session_id 字段（CLI schema 变化？）"]
+        );
+
+        // result 缺 usage（计量闭环破坏）
+        let d = parse_stream_json(&stream(&[
+            r#"{"type":"system","session_id":"s"}"#,
+            r#"{"type":"result","result":"x"}"#,
+        ]));
+        assert_eq!(
+            schema_drift(&d),
+            vec!["result 事件缺 usage（计量闭环破坏）"]
+        );
+
+        // 缺 result 事件 + 缺 system 事件（双缺失全报）
+        let d = parse_stream_json(&stream(&[r#"{"type":"assistant","message":{}}"#]));
+        let drifts = schema_drift(&d);
+        assert_eq!(drifts.len(), 2, "{drifts:?}");
+
+        // 未知新事件类型不算漂移（前向兼容）
+        let d = parse_stream_json(&stream(&[
+            r#"{"type":"future_event","payload":1}"#,
+            r#"{"type":"system","session_id":"s"}"#,
+            r#"{"type":"result","result":"x","usage":{"input_tokens":1,"output_tokens":0}}"#,
+        ]));
+        assert!(schema_drift(&d).is_empty());
     }
 
     /// 断连分类矩阵

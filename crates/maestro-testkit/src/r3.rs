@@ -273,6 +273,13 @@ case "$PROMPT" in
   *费用虚报*)
      # R34 对账：同 usage 但自报 $0.50 → 漂移 98% → daemon 发 CostDrift
      ANSWER="对账漂移 MAESTRO_DONE"; COST_USD=0.50;;
+  *坏schema*)
+     # R35 漂移检测：system 缺 session_id + result 缺 usage —— rounder
+     # schema_drift 应报两条并 exit 3（daemon → TaskFailed 带诊断）
+     printf '%s\n' \
+       "{{\"type\":\"system\",\"subtype\":\"init\"}}" \
+       "{{\"type\":\"result\",\"result\":\"bad schema\"}}"
+     exit 0;;
   *过载模拟*)
      # 结构化错误路径（R28）：错误经 stdout 的 result 事件（不是 stderr）——
      # is_error + api_error_status 529，exit 0（rounder 负责转译退出）
