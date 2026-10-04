@@ -5,3 +5,6 @@ data/
 *.sqlite-shm
 .DS_Store
 reference/herdr
+dist/*
+!dist/linux/
+dist/linux/out/
