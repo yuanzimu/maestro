@@ -75,8 +75,13 @@ enum TaskAction {
         #[arg(long)]
         json: bool,
     },
-    /// 任务详情
-    Get { id: String },
+    /// 任务详情（一句话进度置顶；--json 输出原始 JSON）
+    Get {
+        /// 输出原始 JSON（面向管道/jq）
+        #[arg(long)]
+        json: bool,
+        id: String,
+    },
     /// 暂停
     Pause { id: String },
     /// 恢复（blocked = 用户确认重试并重新入队）
@@ -142,7 +147,7 @@ fn run(client: &MaestroClient, cmd: Cmd) -> Result<(), String> {
                     print!("{}", fmt_task_list(&v));
                 }
             }
-            TaskAction::Get { id } => {
+            TaskAction::Get { id, json } => {
                 let v = client
                     .call(
                         "task-get",
@@ -150,7 +155,11 @@ fn run(client: &MaestroClient, cmd: Cmd) -> Result<(), String> {
                         serde_json::json!({ "task": id }),
                     )
                     .map_err(fmt_err)?;
-                println!("{}", serde_json::to_string_pretty(&v).unwrap());
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&v).unwrap());
+                } else {
+                    print!("{}", fmt_task_get(&v));
+                }
             }
             TaskAction::Pause { id } => {
                 let v = client
@@ -464,6 +473,54 @@ fn fmt_ledger(v: &Value) -> String {
     out
 }
 
+/// task get 响应 → 人话（B1 闭环，R47）：narrative 一句话进度紧随状态行 ——
+/// 「它现在怎么样了」两行内回答；事实字段（阻塞/挂起/会话）按需追加不制造噪音
+fn fmt_task_get(v: &Value) -> String {
+    let id = v["id"].as_str().unwrap_or("?");
+    let title = v["title"].as_str().unwrap_or("");
+    let state = v["state"].as_str().unwrap_or("?");
+    let round = v["round"].as_u64().unwrap_or(0);
+    let state_human = match state {
+        "done" => "✓ 完成",
+        "failed" => "✗ 失败",
+        "working" => "运行中",
+        "queued" => "排队中",
+        "blocked" => "⚑ 阻塞",
+        "suspended" => "挂起",
+        other => other,
+    };
+    let mut out = format!("任务 {id} 「{title}」\n");
+    let mut line = format!("  状态: {state_human}");
+    if round > 0 {
+        line.push_str(&format!("（第 {round} 轮）"));
+    }
+    if let Some(w) = v["worker"].as_str() {
+        line.push_str(&format!(" · worker {w}"));
+    }
+    out.push_str(&line);
+    out.push('\n');
+    // B1 叙事降级模板（R46）：一句话进度 —— 人机回路的头条
+    if let Some(n) = v["narrative"].as_str() {
+        out.push_str(&format!("  进度: {n}\n"));
+    }
+    if let Some(k) = v["blocked_kind"].as_str() {
+        out.push_str(&format!("  阻塞类型: {k}\n"));
+    }
+    if let Some(r) = v["suspend_reason"].as_str() {
+        out.push_str(&format!("  挂起原因: {r}\n"));
+    }
+    if let Some(f) = v["acceptance_failures"].as_u64().filter(|f| *f > 0) {
+        out.push_str(&format!("  验收失败: {f} 次（3 次出局）\n"));
+    }
+    if let Some(s) = v["session_ref"].as_str().filter(|s| !s.is_empty()) {
+        out.push_str(&format!("  会话: {s}（续接凭据）\n"));
+    }
+    if let Some(c) = v["checkpoint_ref"].as_str().filter(|c| !c.is_empty()) {
+        out.push_str(&format!("  检查点: {c}\n"));
+    }
+    out
+}
+
 /// doctor v0：daemon/socket/版本/git（0.13 核心命令）
 fn doctor(client: &MaestroClient) {
     let mut fail = 0;
@@ -620,6 +677,46 @@ mod tests {
             worker: WorkerId::new("w-1"),
         }));
         assert!(s.contains("task_started"), "{s}");
+    }
+
+    /// task get 人话渲染（R47）：状态行 + narrative 进度行，事实字段按需追加
+    #[test]
+    fn task_get_human_rendering() {
+        let v = serde_json::json!({
+            "id": "t-1", "title": "重构 auth", "state": "working", "round": 3,
+            "worker": "w-7", "session_ref": "sid-abc",
+            "narrative": "第 3 轮，Read×7 · Bash×3，累计 12¢（12k in / 2k out），耗时 1m23s｜最近：重构 auth 模块"
+        });
+        let s = fmt_task_get(&v);
+        assert!(s.contains("任务 t-1 「重构 auth」"), "{s}");
+        assert!(s.contains("状态: 运行中（第 3 轮） · worker w-7"), "{s}");
+        assert!(s.contains("进度: 第 3 轮"), "{s}");
+        assert!(s.contains("会话: sid-abc（续接凭据）"), "{s}");
+        // 零轮排队任务：无轮次括号、无噪音行
+        let v = serde_json::json!({
+            "id": "t-2", "title": "新任务", "state": "queued",
+            "narrative": "尚未开始（无轮账）"
+        });
+        let s = fmt_task_get(&v);
+        assert!(s.contains("状态: 排队中\n"), "{s}");
+        assert!(!s.contains("验收失败"), "{s}");
+        // 轮数耗尽（R42）：阻塞类型 + 验收失败计数
+        let v = serde_json::json!({
+            "id": "t-3", "title": "长活", "state": "blocked", "round": 20,
+            "blocked_kind": "rounds_exhausted",
+            "narrative": "第 20 轮，…"
+        });
+        let s = fmt_task_get(&v);
+        assert!(s.contains("⚑ 阻塞"), "{s}");
+        assert!(s.contains("阻塞类型: rounds_exhausted"), "{s}");
+        let v = serde_json::json!({
+            "id": "t-4", "title": "假完成", "state": "failed",
+            "acceptance_failures": 3,
+            "narrative": "第 2 轮，…"
+        });
+        let s = fmt_task_get(&v);
+        assert!(s.contains("✗ 失败"), "{s}");
+        assert!(s.contains("验收失败: 3 次（3 次出局）"), "{s}");
     }
 
     #[test]
