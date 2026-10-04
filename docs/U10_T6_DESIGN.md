@@ -55,6 +55,16 @@
 - **B 组**：B1+B5（合并测）· B7（hold 侧）· B8 · B12 · B13 已测；B2/B3/B4/B6/B9/B10/B11 属 P1 补强；B14 随 T6
 - **混沌补强**（multiround.rs，超出原设计）：stale worker 双防护 -403、断连自动恢复、结构化过载 529→Suspended、at-least-once 全链、双任务并发
 
+## §0.6 R34~R42 增量（blocked 语义扩展与多轮驱动深化）
+
+| 变更 | 说明 |
+|---|---|
+| **blocked 子类型新增 RoundsExhausted（R42）** | 多轮驱动 Worker 达 MAX_ROUNDS 未输出完成信号 → exit 5 + 标记 → Blocked(RoundsExhausted) 进收件箱（Critical）。**语义依据 §2.1**：blocked = 等待用户决策；「半途任务标 Done」违反不变量——resume 从 session ref 续接（同 §2.2 的恢复走 `--resume`），steering 留队（非终态不 drop） |
+| 上下文轮转（R37/R39） | 轮边界占用 ≥ 阈值 → 注入 `/compact` 指令轮；轻推优先于压缩（竞争时压缩意图作废重触发）；ContextCompacted 事件 |
+| 跨任务会话隔离（R36） | worker 状态目录 `.maestro/<task_id>/`——同 workdir 串行任务不共享 session（泄漏由混沌⑩证伪） |
+| 费用对账 CostDrift（R34） | CLI 自报 total_cost_usd vs 牌价计费，漂移 >25% → Warning 事件；入账以 daemon 为准 |
+| schema 漂移检测（R35） | system.session_id / result.result / usage 三要素缺失 → 人话诊断进 TaskFailed |
+
 ---
 
 # 第一部分 U10 危机安全网

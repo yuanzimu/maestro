@@ -346,6 +346,12 @@ fn fmt_inbox(v: &Value) -> String {
                 "基础设施故障（网络/供应商），自动恢复已耗尽",
                 format!("网络恢复后重试: maestro task resume {task}"),
             ),
+            "rounds_exhausted" => (
+                "轮数预算耗尽（未输出完成信号，会话现场完整保留）",
+                format!(
+                    "续跑（从上一完成轮续接）: maestro task resume {task}   或放弃: maestro task cancel {task}"
+                ),
+            ),
             other => (other, format!("maestro task get {task}")),
         };
         out.push_str(&format!("{task} 「{title}」\n  {what}\n  → {hint}\n"));
@@ -489,10 +495,15 @@ mod tests {
     fn inbox_gives_actionable_hints() {
         let v = serde_json::json!({ "items": [
             { "task": "t-9", "kind": "acceptance_failed", "title": "假完成" },
+            { "task": "t-10", "kind": "rounds_exhausted", "title": "长活" },
         ]});
         let s = fmt_inbox(&v);
         assert!(s.contains("假完成"), "{s}");
         assert!(s.contains("maestro task resume t-9"), "{s}");
+        // 轮数耗尽（R42）：续跑/放弃双建议
+        assert!(s.contains("轮数预算耗尽"), "{s}");
+        assert!(s.contains("maestro task resume t-10"), "{s}");
+        assert!(s.contains("maestro task cancel t-10"), "{s}");
         assert!(fmt_inbox(&serde_json::json!({ "items": [] })).contains("空的"));
     }
 

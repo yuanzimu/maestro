@@ -980,6 +980,14 @@ fn rounds_exhausted_blocks_then_resume_continues() {
     );
     let g = d.api(Method::TaskGet, serde_json::json!({ "task": t.as_str() }));
     assert_eq!(g["blocked_kind"], "rounds_exhausted", "{g}");
+    // 收件箱含该项（U9：Critical 进收件箱，CLI 给续跑/放弃建议）
+    let inbox = d.api(Method::InboxList, serde_json::json!({}));
+    assert!(
+        inbox["items"].as_array().is_some_and(|a| a
+            .iter()
+            .any(|it| it["task"] == *t.as_str() && it["kind"] == "rounds_exhausted")),
+        "收件箱应含 rounds_exhausted 项: {inbox}"
+    );
 
     // resume → requeue → respawn（新 rounder 从 .maestro/<task>/session 续接）
     d.api(
