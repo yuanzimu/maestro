@@ -87,17 +87,20 @@ impl MaestroClient {
         }
     }
 
-    /// 订阅事件流（阻塞回调）
+    /// 订阅事件流（阻塞回调）。
+    /// - follow=true：持续跟随新事件（连接保持）
+    /// - follow=false：daemon 重放完 [from_seq, 现在) 即关闭连接（看历史用）
     pub fn subscribe<F: FnMut(maestro_protocol::events::Envelope) -> bool>(
         &self,
         from_seq: u64,
+        follow: bool,
         mut on_event: F,
     ) -> Result<(), ClientError> {
         let mut stream = self
             .events
             .connect()
             .map_err(|e| ClientError::Connect(e.to_string()))?;
-        let hello = serde_json::json!({ "from_seq": from_seq });
+        let hello = serde_json::json!({ "from_seq": from_seq, "live": follow });
         stream
             .write_all(serde_json::to_string(&hello).unwrap().as_bytes())
             .and_then(|_| stream.write_all(b"\n"))

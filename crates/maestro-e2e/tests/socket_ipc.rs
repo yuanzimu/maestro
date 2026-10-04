@@ -147,7 +147,7 @@ fn events_socket_stream() {
     let (tx, rx) = std::sync::mpsc::channel();
     let _sub = std::thread::spawn(move || {
         client
-            .subscribe(0, |env| {
+            .subscribe(0, true, |env| {
                 let _ = tx.send(env);
                 false // 收到第一个就断
             })
@@ -198,6 +198,50 @@ fn events_socket_stream() {
         assert!(task.title.contains("evt"));
     }
     // 订阅可能先收到其他事件（重放起点 0 已含历史）—— 只要收到事件就算通
+}
+
+/// 非 follow 订阅（live=false）：重放完历史后 daemon 主动关闭，subscribe 必须返回
+/// —— 回归 R58：此前非 follow 模式会永久阻塞在 read_line
+#[test]
+fn events_replay_without_follow_returns() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("data");
+    std::fs::create_dir_all(&dir).unwrap();
+    let (_core, _paths) = spawn_socket_daemon(&dir);
+
+    // 产生若干事件（status 不发事件，用 shutdown 前的 task create）
+    let repo = tmp.path().join("repo3");
+    std::fs::create_dir_all(&repo).unwrap();
+    for a in [
+        vec!["init", "-q"],
+        vec!["config", "user.email", "t@t"],
+        vec!["config", "user.name", "t"],
+        vec!["commit", "--allow-empty", "-q", "-m", "init"],
+    ] {
+        let mut cmd = std::process::Command::new("git");
+        cmd.arg("-C").arg(&repo).args(&a);
+        let _ = cmd.output();
+    }
+    let client = MaestroClient::new(&dir);
+    client
+        .call(
+            "r1",
+            Method::TaskCreate,
+            serde_json::json!({ "title": "replay", "prompt": "p", "workdir": repo.display().to_string() }),
+        )
+        .unwrap();
+
+    // 非 follow：从 seq 1 重放全部历史，drain 完 daemon 关连接 → subscribe 返回
+    let mut count = 0usize;
+    let start = std::time::Instant::now();
+    client
+        .subscribe(1, false, |_env| {
+            count += 1;
+            true
+        })
+        .expect("subscribe 应正常返回");
+    assert!(start.elapsed() < std::time::Duration::from_secs(5), "非 follow 不应阻塞");
+    assert!(count >= 1, "重放应至少含 1 个事件（TaskCreated），实际 {count}");
 }
 
 /// stale socket 清理：假 socket 文件不阻碍新 daemon 起服务

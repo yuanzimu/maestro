@@ -56,7 +56,7 @@ fn bind(client: MaestroClient, port: u16) -> std::io::Result<(TcpListener, Arc<U
         let buf = ev_buf.clone();
         // from_seq=1：触发 daemon 全量重放（hub 语义 from_seq>0 才重放）——
         // UI 无论何时连上（含 daemon 后起/重启）都能拿到完整历史 + 增量
-        let _ = sub_client.subscribe(1, move |env| {
+        let _ = sub_client.subscribe(1, true, move |env| {
             if let Ok(mut q) = buf.lock() {
                 q.push_back(env);
                 while q.len() > MAX_EVENTS {

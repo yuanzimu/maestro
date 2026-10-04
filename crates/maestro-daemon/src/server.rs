@@ -182,13 +182,17 @@ fn handle_events_conn(
     let mut stream = stream;
     let mut reader = BufReader::new(stream.try_clone()?);
 
-    // 首行：订阅游标（默认 0=从现在开始）
+    // 首行：订阅游标（默认 0=从现在开始）+ 是否跟随（默认 true，兼容老客户端）
     let mut from_seq = 0u64;
+    let mut live = true;
     let mut first = String::new();
     if reader.read_line(&mut first)? > 0 {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&first) {
             if let Some(s) = v.get("from_seq").and_then(|x| x.as_u64()) {
                 from_seq = s;
+            }
+            if let Some(l) = v.get("live").and_then(|x| x.as_bool()) {
+                live = l;
             }
         }
     }
@@ -203,6 +207,18 @@ fn handle_events_conn(
     } else {
         hub.subscribe(None, from_seq)
     };
+
+    // 非跟随模式（看历史）：drain 重放（含临界新事件）后即关闭
+    if !live {
+        while let Ok(env) = subscription.rx.try_recv() {
+            let line = serde_json::to_string(&env).unwrap_or_default();
+            if writeln!(stream, "{line}").and_then(|_| stream.flush()).is_err() {
+                break; // 客户端已断开
+            }
+        }
+        hub.unsubscribe(subscription.id);
+        return Ok(());
+    }
 
     // 推送循环
     while let Ok(env) = subscription.rx.recv() {

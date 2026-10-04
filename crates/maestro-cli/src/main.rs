@@ -37,10 +37,10 @@ enum Cmd {
         #[arg(long, default_value = "flush")]
         steering: String,
     },
-    /// 事件流（--follow 持续；--human 可读渲染）
+    /// 事件流（默认从 seq 1 重放全部历史；--follow 持续跟随；--human 可读渲染）
     Events {
-        /// 从哪个 seq 开始
-        #[arg(long, default_value_t = 0)]
+        /// 从哪个 seq 开始（默认 1 = 全部历史）
+        #[arg(long, default_value_t = 1)]
         from: u64,
         /// 持续跟随
         #[arg(short, long)]
@@ -110,7 +110,7 @@ fn main() {
         Some(d) => MaestroClient::new(std::path::Path::new(d)),
         None => MaestroClient::connect_default(),
     };
-    let code = match run(&client, cli.command) {
+    let code = match run(&client, cli.data_dir.as_deref(), cli.command) {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("错误: {e}");
@@ -120,7 +120,7 @@ fn main() {
     std::process::exit(code);
 }
 
-fn run(client: &MaestroClient, cmd: Cmd) -> Result<(), String> {
+fn run(client: &MaestroClient, data_dir: Option<&str>, cmd: Cmd) -> Result<(), String> {
     match cmd {
         Cmd::Status => {
             let v = client
@@ -290,7 +290,7 @@ fn run(client: &MaestroClient, cmd: Cmd) -> Result<(), String> {
             human,
         } => {
             client
-                .subscribe(from, |env| {
+                .subscribe(from, follow, |env| {
                     if human {
                         println!("{}", fmt_event_human(&env));
                     } else {
@@ -300,7 +300,11 @@ fn run(client: &MaestroClient, cmd: Cmd) -> Result<(), String> {
                 })
                 .map_err(|e| e.to_string())?;
         }
-        Cmd::Doctor => doctor(client),
+        Cmd::Doctor => {
+            if !doctor(client, data_dir) {
+                std::process::exit(2); // 检查项有失败：非零退出码供脚本判定
+            }
+        }
         Cmd::Ui { port } => {
             println!("Maestro 指挥台启动中… 浏览器打开: http://localhost:{port}");
             println!("（Ctrl+C 停止；daemon 不在也没关系，起好后界面自动连上）");
@@ -559,8 +563,9 @@ fn fmt_task_get(v: &Value) -> String {
     out
 }
 
-/// doctor v0：daemon/socket/版本/git（0.13 核心命令）
-fn doctor(client: &MaestroClient) {
+/// doctor v0：daemon/socket/版本/git（0.13 核心命令）。
+/// 返回 false = 有检查项失败（调用方以非零退出码结束，供脚本判定）
+fn doctor(client: &MaestroClient, data_dir: Option<&str>) -> bool {
     let mut fail = 0;
     println!("maestro doctor");
     println!("──────────────────────────────");
@@ -596,8 +601,10 @@ fn doctor(client: &MaestroClient) {
         }
     }
 
-    // 4. 数据目录可写
-    let data_dir = maestro_client::default_data_dir();
+    // 4. 数据目录可写（--data-dir 指定则检查指定目录，否则默认目录）
+    let data_dir = data_dir
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(maestro_client::default_data_dir);
     match std::fs::create_dir_all(&data_dir) {
         Ok(()) => println!("[ok]   数据目录可写: {}", data_dir.display()),
         Err(e) => {
@@ -609,8 +616,10 @@ fn doctor(client: &MaestroClient) {
     println!("──────────────────────────────");
     if fail == 0 {
         println!("全部通过");
+        true
     } else {
         println!("{fail} 项失败");
+        false
     }
 }
 
