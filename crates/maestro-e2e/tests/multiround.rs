@@ -835,6 +835,12 @@ fn context_rotation_compacts_when_over_limit() {
         })
         .count();
     assert_eq!(compacted_events, 1, "应恰有一条 ContextCompacted 事件");
+    // 账本汇总（R40 轮转感知）：ledger API 带 compactions 计数
+    let lv = d.api(
+        Method::TaskLedger,
+        serde_json::json!({ "task": t.as_str() }),
+    );
+    assert_eq!(lv["compactions"].as_u64(), Some(1), "{lv}");
 }
 
 /// 混沌⑫ 轻推与压缩竞争（R39）：超限轮的边界同时有轻推 —— 轻推优先占

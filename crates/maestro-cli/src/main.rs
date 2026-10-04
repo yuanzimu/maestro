@@ -385,6 +385,10 @@ fn fmt_ledger(v: &Value) -> String {
         if saved > 0 {
             out.push_str(&format!(" · 省 {saved}¢（对比冷跑 {cf}¢）"));
         }
+        // 上下文轮转（R37）：长任务的压缩次数 —— 「这任务上下文太大」的信号
+        if let Some(n) = v["compactions"].as_u64().filter(|c| *c > 0) {
+            out.push_str(&format!(" · 上下文压缩 {n} 次"));
+        }
     } else {
         out.push_str(" · 暂无 token 用量（单发 worker / 多轮未入账）");
     }
@@ -506,6 +510,17 @@ mod tests {
         assert!(s.contains("1m23s"), "{s}");
         assert!(s.contains("1000 in / 200 out"), "{s}");
         assert!(s.contains("cache 命中 600（60%）"), "{s}");
+        // 无压缩 → 不显示（不制造噪音）
+        assert!(!s.contains("压缩"), "{s}");
+        // 有压缩 → 显示次数（R37 轮转感知）
+        let v = serde_json::json!({
+            "task": "t-1", "rounds": 9, "wall_ms": 500_000,
+            "input_tokens": 9000, "output_tokens": 900,
+            "actual_cost_cents": 10, "counterfactual_cost_cents": 20, "saved_cents": 10,
+            "compactions": 2
+        });
+        let s = fmt_ledger(&v);
+        assert!(s.contains("上下文压缩 2 次"), "{s}");
         // 无 token（单发 worker）：不显示待接入字样
         let empty = serde_json::json!({
             "task": "t-2", "rounds": 1, "wall_ms": 500,

@@ -807,12 +807,14 @@ impl Core {
         let mut counterfactual_cents = 0u64;
         let mut entries = 0u64;
         let mut spawns = 0u64;
+        let mut compactions = 0u64;
         for env in &events {
             let mine = match &env.event {
                 Event::TaskCreated { task: t, .. } => &t.id == task,
                 Event::WorkerSpawned { task: t, .. } | Event::LedgerEntry { task: t, .. } => {
                     t == task
                 }
+                Event::ContextCompacted { task: t, .. } => t == task,
                 _ => false,
             };
             if !mine {
@@ -822,6 +824,7 @@ impl Core {
             last_ts = Some(env.ts);
             match &env.event {
                 Event::WorkerSpawned { .. } => spawns += 1,
+                Event::ContextCompacted { .. } => compactions += 1,
                 Event::LedgerEntry { usage, .. } => {
                     entries += 1;
                     input_tokens += usage.input_tokens;
@@ -856,6 +859,7 @@ impl Core {
                 "actual_cost_cents": actual_cents,
                 "counterfactual_cost_cents": counterfactual_cents,
                 "saved_cents": saved_cents,
+                "compactions": compactions,
             }),
         )
     }
