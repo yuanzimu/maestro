@@ -14,6 +14,7 @@ pub mod core;
 pub mod emergency;
 pub mod eventhub;
 pub mod llm;
+pub mod narrative;
 pub mod persist;
 pub mod routing;
 pub mod security;

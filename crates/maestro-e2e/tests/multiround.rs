@@ -1026,3 +1026,69 @@ fn rounds_exhausted_blocks_then_resume_continues() {
         "respawn 后应续接同一 session: {sids:?}"
     );
 }
+
+/// B1 叙事降级模板（R46）：task get 的 narrative 字段 —— 事件流单遍聚合出
+/// 「第 N 轮：Read×N，累计 …¢，耗时 …｜最近：…」一句话进度（LLM 缺席的降级路径）
+#[test]
+#[serial]
+fn task_get_narrative_line() {
+    let (_repo, work) = git_repo();
+    let tmp = tempfile::tempdir().unwrap();
+    let cli = tmp.path().join("mock-claude");
+    write_mock_cli(&cli, &tmp.path().join("state"));
+
+    let rb = rounder_bin();
+    let d = TestDaemon::start(&rb, &["--", cli.to_str().unwrap()]);
+
+    // 零轮任务（确定性）：坏schema 首轮即 exit 3 → TaskFailed，无任何
+    // RoundProgress → 降级模板空态分支。用独立 workdir 避开 R13 workdir 互斥
+    let idle_work = tmp.path().join("idle-work");
+    std::fs::create_dir_all(&idle_work).unwrap();
+    let t0 = d.create_task_with_prompt("narrative-idle", "坏schema", &idle_work);
+    assert!(
+        d.wait_state(&t0, WorkerState::Failed, 5000),
+        "坏schema 应终态 Failed，实际: {:?}",
+        d.task_state(&t0)
+    );
+    let v0 = d.api(
+        Method::TaskGet,
+        serde_json::json!({ "task": t0.as_str() }),
+    );
+    assert_eq!(v0["narrative"].as_str().unwrap(), "尚未开始（无轮账）");
+
+    // 多轮任务：注入「结束」快速收敛 → narrative 聚合轮数/工具/成本/摘要
+    let t = d.create_task("narrative", &work);
+    assert!(d.wait_state(&t, WorkerState::Working, 5000));
+    d.api(
+        Method::TaskSteer,
+        serde_json::json!({ "task": t.as_str(), "message": "结束" }),
+    );
+    assert!(
+        d.wait_state(&t, WorkerState::Done, 20000),
+        "实际: {:?}",
+        d.task_state(&t)
+    );
+
+    let rounds = std::fs::read_to_string(task_state_dir(&work, &t).join("rounds.jsonl")).unwrap();
+    let n = rounds
+        .lines()
+        .filter(|l| serde_json::from_str::<serde_json::Value>(l).is_ok())
+        .count();
+    assert!(n >= 1, "至少 1 轮: {rounds}");
+
+    let v = d.api(Method::TaskGet, serde_json::json!({ "task": t.as_str() }));
+    let narrative = v["narrative"].as_str().unwrap_or_default();
+    assert!(
+        narrative.starts_with(&format!("第 {n} 轮")),
+        "narrative 应以真实轮数开头: {narrative}"
+    );
+    assert!(
+        narrative.contains(&format!("Read×{n}")),
+        "mock 每轮一次 Read，工具频次应等于轮数: {narrative}"
+    );
+    assert!(narrative.contains("累计"), "成本应入叙事: {narrative}");
+    assert!(
+        narrative.contains("｜最近："),
+        "最近轮摘要应收尾: {narrative}"
+    );
+}

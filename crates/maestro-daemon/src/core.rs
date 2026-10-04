@@ -335,17 +335,22 @@ impl Core {
                     .and_then(|v| v.as_str())
                     .map(TaskId::new);
                 match task_id.and_then(|id| self.ctx.authority.get(&id).cloned()) {
-                    Some(t) => self.ok(
-                        &req,
-                        serde_json::json!({
-                            "id": t.task.id, "title": t.task.title, "state": t.state,
-                            "round": t.round, "worker": t.worker,
-                            "session_ref": t.session_ref, "checkpoint_ref": t.checkpoint_ref,
-                            "suspend_reason": t.suspend.as_ref().map(|s| s.reason),
-                            "blocked_kind": t.blocked_kind,
-                            "acceptance_failures": t.acceptance_failures,
-                        }),
-                    ),
+                    Some(t) => {
+                        // B1 叙事降级模板（R46）：事件流单遍聚合 → 一句话进度
+                        let vitals = self.task_vitals(&t.task.id);
+                        self.ok(
+                            &req,
+                            serde_json::json!({
+                                "id": t.task.id, "title": t.task.title, "state": t.state,
+                                "round": t.round, "worker": t.worker,
+                                "session_ref": t.session_ref, "checkpoint_ref": t.checkpoint_ref,
+                                "suspend_reason": t.suspend.as_ref().map(|s| s.reason),
+                                "blocked_kind": t.blocked_kind,
+                                "acceptance_failures": t.acceptance_failures,
+                                "narrative": crate::narrative::progress_line(&vitals),
+                            }),
+                        )
+                    }
                     None => self.err(&req, -404, "task not found"),
                 }
             }
@@ -862,6 +867,63 @@ impl Core {
                 "compactions": compactions,
             }),
         )
+    }
+
+    /// B1 叙事素材（R46）：事件流单遍聚合该任务的执行概况。
+    /// 与 api_ledger 同一口径（store 重放），只取叙事需要的字段。
+    fn task_vitals(&self, task: &TaskId) -> crate::narrative::TaskVitals {
+        let events = self
+            .store
+            .as_ref()
+            .map(|s| s.lock().unwrap().replay_all())
+            .unwrap_or_default();
+        let mut v = crate::narrative::TaskVitals::default();
+        let mut tool_counts: HashMap<String, u32> = HashMap::new();
+        let mut first_ts: Option<u64> = None;
+        let mut last_ts: Option<u64> = None;
+        for env in &events {
+            let mine = match &env.event {
+                Event::TaskCreated { task: t, .. } => &t.id == task,
+                Event::RoundProgress { task: t, .. }
+                | Event::LedgerEntry { task: t, .. }
+                | Event::ContextCompacted { task: t, .. } => t == task,
+                _ => false,
+            };
+            if !mine {
+                continue;
+            }
+            first_ts.get_or_insert(env.ts);
+            last_ts = Some(env.ts);
+            match &env.event {
+                Event::RoundProgress {
+                    tools_used,
+                    summary,
+                    ..
+                } => {
+                    v.rounds += 1;
+                    for name in tools_used {
+                        *tool_counts.entry(name.clone()).or_insert(0) += 1;
+                    }
+                    // 摘要钳 40 字（事件里已钳 120，这里再压一层 —— 一句话进度容不下全文）
+                    v.last_summary = summary.chars().take(40).collect();
+                }
+                Event::LedgerEntry { usage, .. } => {
+                    v.tokens_in += usage.input_tokens;
+                    v.tokens_out += usage.output_tokens;
+                    v.cost_cents += usage.actual_cost_cents.unwrap_or(0);
+                }
+                Event::ContextCompacted { .. } => v.compactions += 1,
+                _ => {}
+            }
+        }
+        // 工具按次数降序、并列按名字稳定序（top3 截取交给 progress_line）
+        v.tools = tool_counts.into_iter().collect();
+        v.tools.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        v.wall_ms = match (first_ts, last_ts) {
+            (Some(a), Some(b)) => b.saturating_sub(a),
+            _ => 0,
+        };
+        v
     }
 
     fn api_steer(&mut self, req: &Request, params: &TaskSteerParams) -> Response {
