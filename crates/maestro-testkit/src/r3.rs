@@ -266,6 +266,13 @@ case "$PROMPT" in
      ANSWER="已记录前缀 $P";;
   *网络故障*) echo "Error: connection reset by peer" >&2; exit 1;;
   *无产物模拟*) ANSWER="MAESTRO_DONE"; SKIP_ARTIFACT=1;;
+  *费用自洽*)
+     # R34 对账：result 带 total_cost_usd，与 daemon 按下方常量 usage 的
+     # 牌价计费一致（IN=200 OUT=40 CR=120 CC=30 → claude-sonnet-4 计 1¢ = $0.01）
+     ANSWER="对账一致 MAESTRO_DONE"; COST_USD=0.01;;
+  *费用虚报*)
+     # R34 对账：同 usage 但自报 $0.50 → 漂移 98% → daemon 发 CostDrift
+     ANSWER="对账漂移 MAESTRO_DONE"; COST_USD=0.50;;
   *过载模拟*)
      # 结构化错误路径（R28）：错误经 stdout 的 result 事件（不是 stderr）——
      # is_error + api_error_status 529，exit 0（rounder 负责转译退出）
@@ -293,11 +300,14 @@ if [ -z "${{SKIP_ARTIFACT:-}}" ]; then echo "$ANSWER" >> out.txt; fi
 LINES=$(wc -l < "$CTX")
 if [ "$MOCK_REPLAY" = "1" ]; then IN=$((200*LINES)); CR=0; CC=0; else IN=200; CR=120; CC=30; fi
 OUT=40
+# total_cost_usd 字段（费用自洽/虚报分支才有；其余 CLI 不报 → daemon 跳过对账）
+COST_FIELD=""
+if [ -n "${{COST_USD:-}}" ]; then COST_FIELD=",\"total_cost_usd\":$COST_USD"; fi
 
 printf '%s\n' \
   "{{\"type\":\"system\",\"session_id\":\"$SID\"}}" \
   "{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"tool_use\",\"name\":\"Read\"}},{{\"type\":\"text\",\"text\":\"$ANSWER\"}}]}}}}" \
-  "{{\"type\":\"result\",\"result\":\"$ANSWER\",\"usage\":{{\"input_tokens\":$IN,\"output_tokens\":$OUT,\"cache_read_input_tokens\":$CR,\"cache_creation_input_tokens\":$CC}}}}"
+  "{{\"type\":\"result\",\"result\":\"$ANSWER\",\"usage\":{{\"input_tokens\":$IN,\"output_tokens\":$OUT,\"cache_read_input_tokens\":$CR,\"cache_creation_input_tokens\":$CC}}$COST_FIELD}}"
 "#,
         state = state_dir.display(),
     );

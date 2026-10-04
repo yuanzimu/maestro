@@ -171,6 +171,8 @@ fn main() {
                 "tools_used": oc.tools_used,
                 // 摘要（U3 叙事）：全文可能很长，rounder 侧先截 200 字符
                 "summary": answer.chars().take(200).collect::<String>(),
+                // CLI 自报费用（R34 对账；无该字段的 CLI 为 null → daemon 跳过对账）
+                "total_cost_usd": oc.total_cost_usd,
             }),
         );
 

@@ -557,3 +557,86 @@ fn steering_at_least_once_semantics() {
     );
     assert!(d.wait_state(&t, WorkerState::Done, 20000));
 }
+
+/// 混沌⑧ 费用对账（R34，T4 增量对账）：CLI 自报 total_cost_usd 与
+/// daemon 牌价计费比对 —— 自洽轮静默；虚报轮（98% 漂移 > 25% 阈）发
+/// CostDrift(Warning) 事件且不影响入账金额（daemon 计费为准）
+#[test]
+#[serial]
+fn cost_reconciliation_drift_event() {
+    let mock_tmp = tempfile::tempdir().unwrap();
+    let cli = mock_tmp.path().join("mock-claude");
+    write_mock_cli(&cli, &mock_tmp.path().join("state"));
+    let d = TestDaemon::start(&rounder_bin(), &["--", cli.to_str().unwrap()]);
+
+    // 两任务独立 workdir（避免 session/out.txt 串扰）
+    let (_r1, work_a) = git_repo();
+    let (_r2, work_b) = git_repo();
+    // 自洽：mock usage(IN=200 OUT=40 CR=120 CC=30) 按牌价 = 1¢ = $0.01 → 零漂移
+    let a = d.create_task_with_prompt("cost-a", "费用自洽", &work_a);
+    assert!(
+        d.wait_state(&a, WorkerState::Done, 15000),
+        "A 实际: {:?}",
+        d.task_state(&a)
+    );
+    // 虚报：同 usage 自报 $0.50 → |1-50|/50 = 98% > 25% → CostDrift
+    let b = d.create_task_with_prompt("cost-b", "费用虚报", &work_b);
+    assert!(
+        d.wait_state(&b, WorkerState::Done, 15000),
+        "B 实际: {:?}",
+        d.task_state(&b)
+    );
+
+    let store = maestro_daemon::persist::EventStore::open(&d.data_dir).unwrap();
+    let all = store.replay_all();
+    let drifts: Vec<&maestro_protocol::events::Envelope> = all
+        .iter()
+        .filter(|e| matches!(&e.event, maestro_protocol::events::Event::CostDrift { .. }))
+        .collect();
+    // 自洽任务零事件
+    assert!(
+        drifts.iter().all(|e| !matches!(
+            &e.event,
+            maestro_protocol::events::Event::CostDrift { task, .. } if task == &a
+        )),
+        "自洽轮不得发 CostDrift: {:?}",
+        drifts.iter().map(|e| &e.event).collect::<Vec<_>>()
+    );
+    // 虚报任务恰好一条，数值与口径正确
+    let b_drifts: Vec<&maestro_protocol::events::Envelope> = drifts
+        .iter()
+        .copied()
+        .filter(|e| {
+            matches!(
+                &e.event,
+                maestro_protocol::events::Event::CostDrift { task, .. } if task == &b
+            )
+        })
+        .collect();
+    assert_eq!(b_drifts.len(), 1, "虚报轮应发一条 CostDrift");
+    match &b_drifts[0].event {
+        maestro_protocol::events::Event::CostDrift {
+            ledger_cents,
+            cli_cents,
+            model,
+            ..
+        } => {
+            assert_eq!(*ledger_cents, 1, "daemon 侧计费（89850 mc → 1¢）");
+            assert_eq!(*cli_cents, 50, "CLI 自报 $0.50 → 50¢");
+            assert_eq!(model, "claude-sonnet-4");
+            assert_eq!(
+                b_drifts[0].priority,
+                maestro_protocol::types::Priority::Warning
+            );
+        }
+        _ => unreachable!(),
+    }
+    // 入账金额不受虚报影响（daemon 计费为准）：B 的账本 cents 与 A 相同
+    for t in [&a, &b] {
+        let v = d.api(
+            Method::TaskLedger,
+            serde_json::json!({ "task": t.as_str() }),
+        );
+        assert_eq!(v["actual_cost_cents"].as_u64(), Some(1), "{v}");
+    }
+}

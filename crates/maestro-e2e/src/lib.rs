@@ -143,9 +143,14 @@ impl TestDaemon {
 
     /// 创建任务并返回 task_id
     pub fn create_task(&self, title: &str, workdir: &Path) -> TaskId {
+        self.create_task_with_prompt(title, "p", workdir)
+    }
+
+    /// prompt 可显式指定（mock CLI 的分支按 prompt 路由 —— 如「费用自洽」）
+    pub fn create_task_with_prompt(&self, title: &str, prompt: &str, workdir: &Path) -> TaskId {
         let v = self.api(
             Method::TaskCreate,
-            serde_json::json!({ "title": title, "prompt": "p", "workdir": workdir.display().to_string() }),
+            serde_json::json!({ "title": title, "prompt": prompt, "workdir": workdir.display().to_string() }),
         );
         let id = v["task"]["id"].as_str().expect("task id").to_string();
         TaskId::new(id)

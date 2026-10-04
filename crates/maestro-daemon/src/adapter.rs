@@ -39,6 +39,8 @@ pub struct RoundOutcome {
     pub errors: Vec<String>,
     /// result.api_error_status（429/500/529 等HTTP 状态；可重试判定用）
     pub api_error_status: Option<u16>,
+    /// result.total_cost_usd（CLI 自报本轮费用；daemon 对账用 —— R34）
+    pub total_cost_usd: Option<f64>,
 }
 
 /// 解析 stream-json stdout（逐行 JSON 事件流）。
@@ -91,6 +93,7 @@ pub fn parse_stream_json(stdout: &[u8]) -> RoundOutcome {
                 out.api_error_status = v["api_error_status"]
                     .as_u64()
                     .and_then(|s| u16::try_from(s).ok());
+                out.total_cost_usd = v["total_cost_usd"].as_f64();
             }
             _ => {}
         }
@@ -266,6 +269,19 @@ mod tests {
         assert!(is_retryable_status(500));
         assert!(!is_retryable_status(401));
         assert!(!is_retryable_status(200));
+    }
+
+    /// total_cost_usd（R34 对账素材）：CLI 自报费用；缺省 None
+    #[test]
+    fn parses_total_cost_usd() {
+        let out = parse_stream_json(&stream(&[
+            r#"{"type":"result","result":"ok","total_cost_usd":0.0123,"usage":{"input_tokens":10,"output_tokens":5}}"#,
+        ]));
+        assert!((out.total_cost_usd.unwrap() - 0.0123).abs() < 1e-9);
+        let out = parse_stream_json(&stream(&[
+            r#"{"type":"result","result":"ok","usage":{"input_tokens":10,"output_tokens":5}}"#,
+        ]));
+        assert_eq!(out.total_cost_usd, None);
     }
 
     /// 未识别事件类型忽略（前向兼容）；空流全默认

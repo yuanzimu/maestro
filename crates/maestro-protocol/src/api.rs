@@ -166,6 +166,9 @@ pub struct TaskRoundReportParams {
     /// 本轮回答摘要（rounder 侧截断；daemon 再钳 120 字符）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    /// CLI 自报本轮费用（result.total_cost_usd；daemon 与牌价计费对账用）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_cost_usd: Option<f64>,
 }
 
 /// `task.create` 参数

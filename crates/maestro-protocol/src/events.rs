@@ -191,6 +191,17 @@ pub enum Event {
         tokens_in: u64,
         tokens_out: u64,
     },
+    /// 费用对账漂移（R34，T4 增量对账）：CLI 自报 total_cost_usd 与
+    /// daemon 牌价计费差超 25% —— 牌价表过期 / CLI usage 口径变化的信号
+    CostDrift {
+        task: TaskId,
+        round: u32,
+        model: String,
+        /// daemon 侧计费（美分）
+        ledger_cents: u64,
+        /// CLI 自报折算（美分）
+        cli_cents: u64,
+    },
 
     // ---- provider / batch（U11/T6）----
     ProviderSwitched {
@@ -273,6 +284,7 @@ impl Event {
             | SteeringDropped { .. }
             | ResumeAttempt { .. }
             | AcceptanceGatePassed { .. }
+            | CostDrift { .. }
             | Suspended { .. } => Priority::Warning,
 
             // done 结果卡也弹通知（U9 三类之一）

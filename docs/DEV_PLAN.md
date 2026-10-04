@@ -302,9 +302,9 @@ P2：U4 完整版（需内置 Executor D2）· U6 v2 检讨（需失败事件库
 **R28 调研落地（竞品对标，来源见 git log 提交）**：
 - **计价修正**：cache_creation（写 cache）单独计价 —— Anthropic 1.25x/2x 输入价、OpenAI = 输入价不加价（测试抓到「计 0 价」错误实现并修正）；UsageEntry/轮账参数加 cache_creation_tokens，三桶互斥计价
 - **结构化错误**：Claude Code 官方错误源是 result 事件的 errors[] + api_error_status（非 stderr）—— rounder 已转译，可重试（429/5xx）→ Suspended 自动恢复，防过载烧光轮数预算
-- **P1 待办（调研发现，未实现）**：① stream-json stdin 常驻会话（官方 steering 通道，工具边界注入 —— Copilot「Steer with Message」/OpenClaw 六模式对标）；② 长任务上下文轮转（silta-session 的 handoff→/compact→换 id 策略，防裸 resume 上下文无限膨胀）；③ ~~steering 队列 at-least-once~~ **R32 已落地**（poll/ack/inflight 持久化）；④ total_cost_usd 增量对账（resume 后是全会话累计，直接用会重复计费）；⑤ CLI schema 漂移检测（init.capabilities feature-detect）
+- **P1 待办（调研发现，未实现）**：① stream-json stdin 常驻会话（官方 steering 通道，工具边界注入 —— Copilot「Steer with Message」/OpenClaw 六模式对标）；② 长任务上下文轮转（silta-session 的 handoff→/compact→换 id 策略，防裸 resume 上下文无限膨胀）；③ ~~steering 队列 at-least-once~~ **R32 已落地**（poll/ack/inflight 持久化）；④ ~~total_cost_usd 增量对账~~ **R34 已落地**（adapter 解析 result.total_cost_usd → daemon 与牌价计费比对，漂移 >25% 发 CostDrift(Warning) 事件；入账仍以 daemon 计费为准）；⑤ CLI schema 漂移检测（init.capabilities feature-detect）
 
-**测试**：138 项全绿（R1~R32，daemon 单测 65 + e2e 51 + protocol 12 + testkit 8 + CLI 3，clippy 零告警）。里程碑见 git log。**已知缺陷（v0 接受）**见 [acceptance.rs](../crates/maestro-daemon/src/acceptance.rs) 模块头：无产物型任务误判（0.15 结构化验收断言接管）、workdir 外产物不可见。
+**测试**：141 项全绿（R1~R34，daemon 单测 66 + e2e 53 + protocol 12 + testkit 8 + CLI 3，clippy 零告警）。里程碑见 git log。**已知缺陷（v0 接受）**见 [acceptance.rs](../crates/maestro-daemon/src/acceptance.rs) 模块头：无产物型任务误判（0.15 结构化验收断言接管）、workdir 外产物不可见。
 
 **R23 调试战果（dash vfork 之谜）**：sigstop/b1 测试 ~33% flake 的根因不是「高负载 D 态」而是 **dash 对单条外部命令用 vfork**——父进程阻塞在不可中断的 vfork-wait 直到子进程 exec；STOP 恰落在 vfork 窗口时父进程停在 D（子进程 T），SIGSTOP 已投递且回用户态即生效，但 /proc 主 pid 永不显示 T。测试断言改为 T|D 双态（= 组不再执行用户代码）。产品语义（I1 冻结 = kill 返回）不受影响。
 

@@ -741,6 +741,25 @@ impl Core {
             counterfactual_cost_cents: None,
             actual_cost_cents: None,
         });
+        // 费用对账（R34，T4 增量对账）：CLI 自报 total_cost_usd vs 牌价计费。
+        // 漂移 > 25% → CostDrift 事件（牌价表过期 / usage 口径变化的信号）。
+        // 不影响入账金额（daemon 计费为准）；双方都 > 0 才有对账意义
+        if let (Some(usd), Some(ledger)) = (params.total_cost_usd, usage.actual_cost_cents) {
+            let cli = (usd * 100.0).round() as u64;
+            if cli > 0 && ledger > 0 {
+                let hi = cli.max(ledger);
+                let drift_pct = (hi - cli.min(ledger)) * 100 / hi;
+                if drift_pct > 25 {
+                    self.ctx.publish(Event::CostDrift {
+                        task: params.task.clone(),
+                        round: params.round,
+                        model: model.clone(),
+                        ledger_cents: ledger,
+                        cli_cents: cli,
+                    });
+                }
+            }
+        }
         self.ctx.publish(Event::LedgerEntry {
             task: params.task.clone(),
             worker: Some(params.worker.clone()),

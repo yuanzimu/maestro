@@ -30,6 +30,18 @@ fn s1_shallow_recall_via_resume() {
     assert!(r.answer.contains("src/a.rs"), "FACT_2 应召回: {}", r.answer);
 }
 
+/// 费用对账 mock 分支（R34）：两分支的 stream-json 必须合法且带 DONE 信号
+#[test]
+fn cost_branches_produce_valid_stream() {
+    let (_tmp, mut d) = setup("cost");
+    let a = d.run_round("费用自洽").unwrap();
+    assert!(a.answer.contains("MAESTRO_DONE"), "{}", a.answer);
+    assert_eq!(a.usage_in, 200);
+    let b = d.run_round("费用虚报").unwrap();
+    assert!(b.answer.contains("MAESTRO_DONE"), "{}", b.answer);
+    assert_eq!(b.usage_in, 200);
+}
+
 /// S2 深召回：隔 2 轮干扰任务后早期事实仍可召回
 #[test]
 fn s2_deep_recall_after_interference() {
