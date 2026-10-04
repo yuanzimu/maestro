@@ -1,8 +1,59 @@
 # U10 危机安全网 & T6 错峰执行 —— 详细设计
 
-> 版本 v1.0 · 2026-10-01
+> 版本 v1.1 · 2026-10-04（v1.0 · 2026-10-01）
 > 隶属：[DEV_PLAN.md](./DEV_PLAN.md) v2.4 的实现依据；需求源自 [UX_DEEP_DIVE.md](./UX_DEEP_DIVE.md) 第二部分 U10/U11/U12
 > 范围：suspended 状态机 / emergency_stop API / Checkpoint 时光机 / T6 调度逻辑与 provider 接入
+
+---
+
+# 第〇部分 实施状态对照（v1.1 新增，P0 实况 R1~R32）
+
+> U10 第一部分（§1~§4）已随 0.17/0.18/0.19 全部落地；T6 第二部分（§5~§9）P1 开工。本部分记录实现与本设计的**语义修正**，冲突时以本部分 + 代码为准。
+
+## §0.1 落地清单
+
+| 设计节 | 里程碑 | 实现位置 | 测试 |
+|---|---|---|---|
+| §2 suspended 状态机 | 0.17 ✅ | `daemon/src/suspend.rs` + `core.rs` | a_suspended.rs / recovery_gap.rs |
+| §2.5 孤儿清理 | 0.17 ✅ | daemon 重启扫描 pidfile，绝不收养 | `recover_reaps_and_marks_daemon_crash` |
+| §2.4 断连检测 | 0.15/0.18 ✅ | `daemon/src/adapter.rs`（见 §0.4 修正） | a_suspended.rs / multiround.rs |
+| §3 emergency_stop 三阶段 | 0.18 ✅ | `daemon/src/emergency.rs` | b_emergency.rs（B1/B5/B7/B8/B12/B13）+ race_window.rs 竞态 |
+| §4 checkpoint 时光机 | 0.19 ✅ | `daemon/src/checkpoint.rs`（git plumbing） | b8 回滚 / security.rs ref 命名空间 |
+| §5~§9 T6 错峰/batch | P1 ⏳ | 未开工 | — |
+
+## §0.2 语义修正一：steering 投递三路口径（R23，取代 §3.1 的 flush 描述）
+
+设计 §3.1 中「resume_all steering=flush → 按序投递」在多轮驱动落地后精确化为**三个投递路口**（`core.rs` steering_prefix / api_steer_poll）：
+
+| 路口 | 时机 | 机制 |
+|---|---|---|
+| **活 worker 轮边界** | 每轮完成后 | worker 调 `TaskSteerPoll` 拉取，注入下一轮 prompt |
+| **respawn / 恢复重拉** | worker 死亡重拉时 | daemon `take_all` 把积压+未确认消息**前置拼入 prompt**（daemon 确认的投递） |
+| **终态** | Done/Failed/Blocked/Cancel | `SteeringDropped` 事件逐条发出——**不静默** |
+
+因此 resume_all 的 `flush` 实现为「**不 drain，留队**」等轮边界 poll 取走（而非直接推送）；`hold` = drop_all + 每条 SteeringDropped。
+
+## §0.3 语义修正二：at-least-once 投递（R32，调研 opencode-queue 落地）
+
+设计未覆盖投递可靠性。实现引入**确认语义**（`steering.rs`）：
+
+- poll 取走的消息进入 `inflight`（**持久化**，kill -9 不丢）；再次 poll 会重投未确认的
+- worker 消费后（下一轮跑完 / CLI 失败轮已跑过该 prompt / 结构化错误轮）调 `TaskSteerAck` 确认；仅当前 worker 有效（stale worker -403）
+- rounder 在 CLI 启动前被杀 → 未确认 → daemon 重投；**已跑过的失败轮也 ack**（防网络故障指令死循环重投）
+
+## §0.4 语义修正三：断连检测升级为「结构化错误优先」（R28 调研落地）
+
+设计 §2.4 仅提 stderr 模式匹配。实现（`adapter.rs` classify_exit）分层：
+
+1. **结构化错误优先**：stream-json result 事件的 `errors[]` / `api_error_status`（Claude Code 官方口径）——429/5xx → retryable → Suspended 自动恢复
+2. stderr 模式匹配兜底：认证/配额/billing → Fatal（不重试）；connection reset/timeout/fetch failed/EPIPE → Disconnect（Suspended，非 failed）
+3. 未知 stderr 默认 Fatal（安全默认）；`error_max_turns` 不算错误
+
+## §0.5 用例组覆盖实况
+
+- **A 组**：A2（disconnect_auto_resumes，MockClock 推退避）· A6 · A8 · A10 已测；A1/A3/A4/A7 属 P1（A3 随 A7 circuit breaker，A4 随宿主睡眠检测，A7 随 E3 预算）——A9 由 persistence.rs events_replay + multiround.rs crash_recovery 覆盖
+- **B 组**：B1+B5（合并测）· B7（hold 侧）· B8 · B12 · B13 已测；B2/B3/B4/B6/B9/B10/B11 属 P1 补强；B14 随 T6
+- **混沌补强**（multiround.rs，超出原设计）：stale worker 双防护 -403、断连自动恢复、结构化过载 529→Suspended、at-least-once 全链、双任务并发
 
 ---
 

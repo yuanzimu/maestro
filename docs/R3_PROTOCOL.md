@@ -1,8 +1,10 @@
 # R3 多轮驱动验证协议
 
-> 版本 v1.0 · 2026-10-01
+> 版本 v1.1 · 2026-10-04（v1.0 · 2026-10-01）
 > 对应 [DEV_PLAN.md](./DEV_PLAN.md) §9.2 R3——**P0 唯一技术风险项，0.15/0.16/U4/T1 的共同前提**
 > 待验证命题：`claude -p` 单轮执行 + `--resume` 续接的**多轮驱动模式**（设计 §2.4/§6.1），能否替代「一次长跑」作为 Maestro 的 Worker 形态
+>
+> **状态：机制层已全部落地（§七），mock CLI 全场景验证通过；真实 claude CLI 端到端待 API key**
 
 ## 一、为什么这是最大风险
 
@@ -64,3 +66,41 @@ S7a [✓]  S7b [分叉/串行/报错]  S7c [✓/✗]
 ## 六、执行顺序建议
 
 S0→S1→S3→S7c 先跑（Block 项里最快证伪的组合，约 20 分钟）——任何一个 ✗ 就提前止损，不用跑完 S5/S6。
+
+## 七、实施状态（R23~R32 落地实况，2026-10-04）
+
+多轮驱动已从「待验证命题」变为**已落地机制**。真实 CLI 的 S 场景验证仍待 API key，但机制层以 mock CLI 全量覆盖（e2e 51 项中的 15 项专测本协议）。
+
+### 7.1 机制层落地物
+
+| 落地物 | 位置 | 说明 |
+|---|---|---|
+| **maestro-rounder 二进制** | `crates/maestro-daemon/src/bin/rounder.rs` | 轮循环：每轮调底层 CLI 单轮 + `--resume` 续接；session 持久化于 `<cwd>/.maestro/session`；轮账 `.maestro/rounds.jsonl`；完成信号 `MAESTRO_DONE`；`MAESTRO_MAX_ROUNDS`（默认 20）防失控；`MAESTRO_ROUND_GAP_MS`（默认 1000）防秒回型 CLI 热循环 |
+| **adapter 三件套** | `crates/maestro-daemon/src/adapter.rs` | `parse_stream_json` → RoundOutcome（session_id/usage 三桶/工具/结构化错误）；`classify_exit` → ExitClass（**Disconnect≠failed**，认证/配额 Fatal 优先，未知默认 Fatal）；`Dialect` trait（claude 默认，`MAESTRO_CLI_DIALECT` 可插拔，B7 Codex/Gemini 预留） |
+| **轮间投递 API** | `crates/maestro-protocol/src/api.rs` | `TaskSteerPoll`（活 worker 轮边界拉取，仅当前 worker）· `TaskSteerAck`（消费确认，R32）· `TaskRoundReport`（轮账上报：usage 三桶/model/工具/摘要）· `TaskLedger`（查询） |
+| **steering at-least-once** | `crates/maestro-daemon/src/steering.rs` | poll 取走进 inflight（未确认重投）、ack 消费确认、inflight 持久化跨重启、respawn 时 `take_all` 前置拼入 prompt、终态 `SteeringDropped` 不静默 |
+| **计价闭环** | `crates/maestro-daemon/src/llm.rs` | 三桶互斥计价（input/cache_read/cache_creation）；Anthropic 写 cache 1.25x、OpenAI = 输入价；counterfactual = 同内容冷跑全价（U8 省钱口径） |
+
+### 7.2 场景矩阵 → e2e 映射
+
+| 场景 | e2e 测试（`crates/maestro-e2e/tests/`） | 状态 |
+|---|---|---|
+| S1 浅召回 | [r3_protocol.rs](../crates/maestro-e2e/tests/r3_protocol.rs) `s1_shallow_recall_via_resume` | ✅ mock |
+| S2 深召回 | `s2_deep_recall_after_interference` | ✅ mock |
+| S3/S4 轻推注入+持久 | `s3_s4_prefix_injection_persists` + multiround.rs `steering_injected_mid_task_changes_next_round` | ✅ mock（S4 记录到衰减行为→按预案不 block） |
+| S5 长会话 | 机制层由 MAX_ROUNDS 循环覆盖；早期事实召回依赖真实 LLM | ⏳ 待真实验证 |
+| S6 成本曲线 | `s6_usage_ledger_complete` + multiround.rs 断言逐轮 usage/cache_read/cache_creation 计价入账 | ✅ mock（三桶数据齐全；真实 cache 命中率待真机） |
+| S7a 坏 sid | `s7a_bad_sid_errors_clearly` | ✅ mock |
+| S7b 并发 resume | 未单列测试——**单写者由 daemon 结构保证**（每任务同时只有一个活 worker，stale worker 调 poll/report 返回 -403，multiround.rs `stale_worker_cannot_poll_or_report`） | ✅ 结构性解决 |
+| S7c 崩溃后续接 | `s7c_crash_then_resume_last_completed_round` + multiround.rs `crash_recovery_resumes_session` | ✅ mock |
+
+### 7.3 混沌补强（超出原协议的 e2e）
+
+multiround.rs 另有：断连自动恢复（MockClock 推退避）、双任务并发、假完成三振出局（acceptance）、结构化过载（api_error_status 529）→ Suspended、at-least-once 重投/过期 ack -403/清空收敛、终态轻推 Dropped 不静默。
+
+### 7.4 待真实 CLI 验证清单（拿到 API key 后）
+
+1. S5 早期事实召回（≥2/3）
+2. S6 真实 cache_read 命中率（决定「重要指示每轮重注」的性价比）
+3. `--resume`/`--output-format stream-json`/`--max-turns` flag 与实际 CLI 版本的差异（喂 R2）
+4. stream-json result 事件的 errors[]/api_error_status 字段实测（adapter 结构化错误路径）
