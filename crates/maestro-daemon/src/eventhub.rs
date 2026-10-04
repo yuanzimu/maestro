@@ -25,6 +25,8 @@ pub struct EventHub {
     next_seq: AtomicU64,
     subscribers: Mutex<Subs>,
     next_sub_id: AtomicU64,
+    /// 广播水位：已完成广播的最大 seq（订阅注册时取快照做重放/live 分界）
+    broadcast_seq: AtomicU64,
     /// 持久化回调
     sink: Mutex<Option<Sink>>,
 }
@@ -50,6 +52,7 @@ impl EventHub {
                 dropped: vec![],
             }),
             next_sub_id: AtomicU64::new(1),
+            broadcast_seq: AtomicU64::new(0),
             sink: Mutex::new(None),
         }
     }
@@ -89,6 +92,8 @@ impl EventHub {
                 subs.map.remove(&id);
                 subs.dropped.push(id);
             }
+            // 广播水位推进（在锁内 —— 订阅注册读到的水位必含全部已完成广播）
+            self.broadcast_seq.fetch_max(env.seq, Ordering::Release);
         }
 
         env
@@ -103,19 +108,26 @@ impl EventHub {
         let (tx, rx) = std::sync::mpsc::sync_channel(SUBSCRIBER_QUEUE_CAP);
         let id = self.next_sub_id.fetch_add(1, Ordering::SeqCst);
         let last_seq = Arc::new(AtomicU64::new(0));
-        // 先登记再重放（防重放期间丢新事件）
-        self.subscribers
-            .lock()
-            .unwrap()
-            .map
-            .insert(id, (tx, last_seq.clone()));
+        // 先登记再重放（防重放期间丢新事件）。同一锁内取广播水位：
+        // ≤ 水位的事件必然在注册前完成广播（没 live 给我们）→ 重放补；
+        // > 水位的必然（或即将）走 live 投递 → 重放跳过。
+        // 没有这个分界，「入库早于注册、广播晚于注册」的窗口事件会双份投递
+        // （G90 负载场景抓到）。
+        let floor = {
+            let mut subs = self.subscribers.lock().unwrap();
+            subs.map.insert(id, (tx, last_seq.clone()));
+            self.broadcast_seq.load(Ordering::Acquire)
+        };
 
         let sub = Subscription { id, rx, last_seq };
 
-        // 重放历史补齐 [from_seq, current)
-        if from_seq > 0 {
+        // 重放历史补齐 [from_seq, floor]
+        if from_seq > 0 && from_seq <= floor {
             if let Some(f) = replay {
                 for env in f(from_seq) {
+                    if env.seq > floor {
+                        continue; // live 投递负责
+                    }
                     // 重放走 try_send：慢客户端此时满队列同样断开
                     let mut subs = self.subscribers.lock().unwrap();
                     match subs.map.get(&id) {
@@ -155,6 +167,13 @@ impl EventHub {
     /// 当前序号（下一个将分配的）
     pub fn current_seq(&self) -> u64 {
         self.next_seq.load(Ordering::SeqCst)
+    }
+
+    /// 最新已发布 seq（无事件时 0）。status.event_seq 用这个：
+    /// 协议其余 seq 全是「含语义」（from_seq=N 重放含 N）—— 报 next 会让
+    /// 客户端拿 status 做续订游标时漏掉最后一条（G63/G65 场景抓到）
+    pub fn last_seq(&self) -> u64 {
+        self.next_seq.load(Ordering::SeqCst).saturating_sub(1)
     }
 
     /// 被背压断开的订阅者列表（诊断/测试）
@@ -207,6 +226,46 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(1))
             .unwrap();
         assert_eq!(got2.seq, 2);
+        hub.unsubscribe(sub.id);
+    }
+
+    /// 订阅注册与重放查询之间发布的事件：恰好投递一次（不得 live + 重放双份）。
+    /// 确定性复现：把「窗口内发布」做进重放闭包 —— f 执行时先 publish（live
+    /// 投递给刚注册的订阅者）再把同一事件包含进重放结果。
+    #[test]
+    fn subscribe_replay_dedups_live_delivered() {
+        let hub = EventHub::new();
+        let history: std::sync::Arc<std::sync::Mutex<Vec<Envelope>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+        let h2 = history.clone();
+        hub.set_sink(Box::new(move |env| {
+            h2.lock().unwrap().push(env.clone());
+        }));
+        hub.publish(ev(1));
+        hub.publish(ev(2));
+        hub.publish(ev(3));
+
+        let h3 = history.clone();
+        let hub_ref = &hub;
+        let replay = move |from: u64| -> Vec<Envelope> {
+            // 模拟竞态窗口内的新发布：注册已完成 → live 投递；入库 → 重放可见
+            let env = hub_ref.publish(ev(4));
+            h3.lock().unwrap().push(env.clone());
+            h3.lock()
+                .unwrap()
+                .iter()
+                .filter(|e| e.seq >= from)
+                .cloned()
+                .collect()
+        };
+        let sub = hub.subscribe(Some(&replay), 1);
+
+        let mut got: Vec<u64> = vec![];
+        while let Ok(e) = sub.rx.recv_timeout(std::time::Duration::from_millis(300)) {
+            got.push(e.seq);
+        }
+        got.sort();
+        assert_eq!(got, vec![1, 2, 3, 4], "seq=4 恰好一次（live 或重放）");
         hub.unsubscribe(sub.id);
     }
 

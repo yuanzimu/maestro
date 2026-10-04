@@ -1,10 +1,10 @@
 // DaemonManager.swift — 定位/拉起内嵌 daemon，检测本机可用的 AI CLI
 import Foundation
 
-enum AICli: String, CaseIterable {
+public enum AICli: String, CaseIterable {
     case claude, codex, gemini, amp, opencode
 
-    var displayName: String {
+    public var displayName: String {
         switch self {
         case .claude: return "Claude Code"
         case .codex: return "Codex"
@@ -14,24 +14,24 @@ enum AICli: String, CaseIterable {
         }
     }
     /// daemon/rounder 的方言名（MAESTRO_CLI_DIALECT，与 adapter.rs 对齐）
-    var dialect: String { rawValue }
+    public var dialect: String { rawValue }
 }
 
-final class DaemonManager {
-    let dataDir: URL
-    private(set) var daemonPath: URL?
-    private(set) var rounderPath: URL?
-    private(set) var cliPath: URL?
-    private(set) var detectedCLI: AICli?
+public final class DaemonManager {
+    public let dataDir: URL
+    private(set) public var daemonPath: URL?
+    private(set) public var rounderPath: URL?
+    private(set) public var cliPath: URL?
+    private(set) public var detectedCLI: AICli?
     private var process: Process?
 
-    init(dataDir: URL) {
+    public init(dataDir: URL) {
         self.dataDir = dataDir
     }
 
     // MARK: - 二进制定位（bundle 内优先；开发模式回退 PATH 搜索）
 
-    func locateBinaries() {
+    public func locateBinaries() {
         let bundleBin = Bundle.main.resourceURL?.appendingPathComponent("bin")
         daemonPath = findBinary("maestro-daemon", bundleHint: bundleBin?.appendingPathComponent("maestro-daemon"))
         rounderPath = findBinary("maestro-rounder", bundleHint: bundleBin?.appendingPathComponent("maestro-rounder"))
@@ -81,7 +81,7 @@ final class DaemonManager {
     /// 拉起 daemon。检测到 AI CLI 时接 rounder（多轮驱动 + 轻推 + 计量）；
     /// 检测不到时仍可启动（daemon 自带的演示用 echo worker），由 force 参数兜底。
     @discardableResult
-    func launchDaemon(force: Bool = false) throws {
+    public func launchDaemon(force: Bool = false) throws {
         locateBinaries()
         if process?.isRunning == true { return }
         guard let daemon = daemonPath else {
@@ -122,9 +122,9 @@ final class DaemonManager {
     }
 
     /// daemon 是否是本 GUI 拉起的
-    var isOurProcessRunning: Bool { process?.isRunning == true }
+    public var isOurProcessRunning: Bool { process?.isRunning == true }
 
-    var launchSummary: String {
+    public var launchSummary: String {
         if let cli = detectedCLI {
             return "Worker 引擎：maestro-rounder + \(cli.displayName)"
         }

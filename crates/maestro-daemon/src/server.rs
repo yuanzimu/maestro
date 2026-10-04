@@ -57,7 +57,12 @@ fn accept_loop(
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 std::thread::sleep(Duration::from_millis(20));
             }
-            Err(_) => break,
+            // 未知错误不退出循环（原版 break = 服务面静默死亡成幽灵 daemon，
+            // 新连接永远无人 accept）；退避后重试，停机只认 stop 标志
+            Err(e) => {
+                tracing::error!("accept 异常（退避重试）: {e}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
         }
     }
 }

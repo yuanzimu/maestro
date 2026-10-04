@@ -308,18 +308,18 @@ impl Core {
 
     fn handle_api(&mut self, req: Request) -> Response {
         match req.method {
-            Method::ServerStatus => self.api_status(),
+            Method::ServerStatus => self.api_status(&req),
             Method::ServerEmergencyStop => {
                 let _params: EmergencyStopParams = serde_json::from_value(req.params.clone())
                     .unwrap_or(EmergencyStopParams { reason: None });
-                self.api_emergency_stop()
+                self.api_emergency_stop(&req)
             }
             Method::ServerResumeAll => {
                 let params: ResumeAllParams =
                     serde_json::from_value(req.params.clone()).unwrap_or(ResumeAllParams {
                         steering: SteeringMode::Flush,
                     });
-                self.api_resume_all(params.steering)
+                self.api_resume_all(&req, params.steering)
             }
             Method::ServerShutdown => {
                 let _ = self.tx.send(CoreMsg::Shutdown);
@@ -543,7 +543,7 @@ impl Core {
         }
     }
 
-    fn api_status(&mut self) -> Response {
+    fn api_status(&mut self, req: &Request) -> Response {
         let status = ServerStatusResult {
             version: env!("CARGO_PKG_VERSION").to_string(),
             pid: std::process::id(),
@@ -556,24 +556,25 @@ impl Core {
                 .values()
                 .filter(|w| w.state == WorkerState::Working)
                 .count() as u64,
-            event_seq: self.ctx.hub.current_seq(),
+            // last_seq（含语义）：= 已发布事件数，客户端可安全作续订游标基准
+            event_seq: self.ctx.hub.last_seq(),
         };
         Response::Ok {
-            id: String::new(),
+            id: req.id.clone(),
             result: serde_json::to_value(status).unwrap_or_default(),
         }
     }
 
-    fn api_emergency_stop(&mut self) -> Response {
+    fn api_emergency_stop(&mut self, req: &Request) -> Response {
         let result = emergency::emergency_stop(&mut self.ctx, &self.metas, "user_panic");
         self.emergency = EmergencyPhase::Frozen;
         Response::Ok {
-            id: String::new(),
+            id: req.id.clone(),
             result: serde_json::to_value(&result).unwrap_or_default(),
         }
     }
 
-    fn api_resume_all(&mut self, mode: SteeringMode) -> Response {
+    fn api_resume_all(&mut self, req: &Request, mode: SteeringMode) -> Response {
         let (resumed, dead_suspended) =
             emergency::resume_all(&mut self.ctx, &self.metas, &mut self.steering, mode);
         self.emergency = EmergencyPhase::None;
@@ -597,7 +598,7 @@ impl Core {
         // B12：调度器解冻 —— 补位启动冻结期入队/被搁置的任务（受槽位约束）
         self.try_start_queued();
         Response::Ok {
-            id: String::new(),
+            id: req.id.clone(),
             result: serde_json::json!({ "resumed": resumed }),
         }
     }
@@ -999,11 +1000,14 @@ impl Core {
         let Some(t) = self.ctx.authority.get(task).cloned() else {
             return self.err(req, -404, "task not found");
         };
+        // 全局急停中：单任务 resume 一律拒绝（F60 场景抓到）—— 原 worker
+        // 存活分支缺守卫，会解冻个别进程破坏「Frozen=全冻结」不变量。
+        // 解冻统一走 resume_all（含积压轻推的 flush/hold 决策）。
+        if self.emergency == EmergencyPhase::Frozen {
+            return self.err(req, -409, "emergency frozen; resume_all first");
+        }
         // blocked → 用户确认重试：重新入队（验收计数清零）；槽位空则立即启动
         if t.state == WorkerState::Blocked {
-            if self.emergency == EmergencyPhase::Frozen {
-                return self.err(req, -409, "emergency frozen; resume_all first");
-            }
             let from_kind = t.blocked_kind;
             self.ctx.publish(Event::TaskRequeued {
                 task: task.clone(),
@@ -1042,9 +1046,7 @@ impl Core {
                 new_session_ref: None,
             });
         } else {
-            if self.emergency == EmergencyPhase::Frozen {
-                return self.err(req, -409, "emergency frozen; resume_all first");
-            }
+            // 急停守卫已在函数顶部统一拦截（此处必非 Frozen）
             if !self.slots_free() || self.workdir_occupied(&t.task.workdir) {
                 return self.err(req, -409, "no free slot for respawn");
             }

@@ -2,34 +2,34 @@
 import Foundation
 import AppKit
 
-final class AppState {
+public final class AppState {
     // ---- 视图状态（只在主线程读写）----
-    var connected = false
-    var status: ServerStatus?
-    var tasks: [TaskSummary] = []
-    var inbox: [InboxItem] = []
-    var events: [MaestroEvent] = []       // 新的在前
-    var lastError: String?
-    var isEmergencyStopped = false
-    var isBusy = false
+    public var connected = false
+    public var status: ServerStatus?
+    public var tasks: [TaskSummary] = []
+    public var inbox: [InboxItem] = []
+    public var events: [MaestroEvent] = []       // 新的在前
+    public var lastError: String?
+    public var isEmergencyStopped = false
+    public var isBusy = false
 
     /// 每次 refresh 完成后（主线程）回调 —— UI 刷新入口
-    var onUpdate: (() -> Void)?
+    public var onUpdate: (() -> Void)?
 
-    let api: MaestroAPI
-    let daemon: DaemonManager
+    public let api: MaestroAPI
+    public let daemon: DaemonManager
 
     private var pollTimer: Timer?
     private var eventStream: EventStream?
     private let queue = DispatchQueue(label: "maestro.api", qos: .userInitiated)
 
-    init() {
+    public init() {
         let dir = MaestroAPI.defaultDataDir()
         api = MaestroAPI(dataDir: dir)
         daemon = DaemonManager(dataDir: dir)
     }
 
-    func start() {
+    public func start() {
         daemon.locateBinaries()
         refresh()
         pollTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
@@ -40,7 +40,7 @@ final class AppState {
 
     // MARK: - 刷新
 
-    func refresh() {
+    public func refresh() {
         queue.async { [weak self] in
             guard let self else { return }
             var connected = false
@@ -78,7 +78,7 @@ final class AppState {
     }
 
     /// 非终态在前（blocked/suspended 优先），终态垫底
-    static func sorted(_ tasks: [TaskSummary]) -> [TaskSummary] {
+    public static func sorted(_ tasks: [TaskSummary]) -> [TaskSummary] {
         func rank(_ s: String) -> Int {
             switch s {
             case "blocked": return 0
@@ -135,31 +135,31 @@ final class AppState {
         }
     }
 
-    func createTask(title: String, prompt: String, workdir: String) {
+    public func createTask(title: String, prompt: String, workdir: String) {
         var params: [String: Any] = ["title": title, "prompt": prompt]
         if !workdir.isEmpty { params["workdir"] = workdir }
         act("创建任务") { api in _ = try api.call("task_create", params: params) }
     }
 
-    func steer(task: String, message: String) {
+    public func steer(task: String, message: String) {
         act("轻推") { api in _ = try api.call("task_steer", params: ["task": task, "message": message]) }
     }
 
-    func pause(task: String)   { act("暂停") { api in _ = try api.call("task_pause", params: ["task": task]) } }
-    func resume(task: String)  { act("恢复") { api in _ = try api.call("task_resume", params: ["task": task]) } }
-    func cancel(task: String)  { act("取消") { api in _ = try api.call("task_cancel", params: ["task": task]) } }
+    public func pause(task: String)   { act("暂停") { api in _ = try api.call("task_pause", params: ["task": task]) } }
+    public func resume(task: String)  { act("恢复") { api in _ = try api.call("task_resume", params: ["task": task]) } }
+    public func cancel(task: String)  { act("取消") { api in _ = try api.call("task_cancel", params: ["task": task]) } }
 
-    func emergencyStop() {
+    public func emergencyStop() {
         act("急停") { api in _ = try api.call("server_emergency_stop", params: ["reason": "user_gui"]) }
     }
 
-    func resumeAll() {
+    public func resumeAll() {
         act("恢复全部") { api in _ = try api.call("server_resume_all", params: ["steering": "flush"]) }
     }
 
     // MARK: - Daemon 生命周期
 
-    func startDaemon(force: Bool = false) {
+    public func startDaemon(force: Bool = false) {
         do {
             try daemon.launchDaemon(force: force)
             queue.asyncAfter(deadline: .now() + 0.6) { [weak self] in
@@ -171,15 +171,20 @@ final class AppState {
         }
     }
 
-    func shutdownDaemon() {
+    public func shutdownDaemon() {
         act("关停 daemon") { api in _ = try api.call("server_shutdown") }
     }
 
-    func openDataDir() {
+    public func openDataDir() {
         NSWorkspace.shared.open(api.dataDir)
     }
 
-    func openDaemonLog() {
+    public func openDaemonLog() {
         NSWorkspace.shared.open(api.dataDir.appendingPathComponent("daemon.log"))
+    }
+
+    /// 测试/退出清理：停事件流（轮询 Timer 由 RunLoop 自理）
+    public func eventStreamStopForTest() {
+        eventStream?.stop()
     }
 }

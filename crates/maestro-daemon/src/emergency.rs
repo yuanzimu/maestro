@@ -191,6 +191,12 @@ pub fn cancel_task(ctx: &mut Ctx, metas: &HashMap<WorkerId, WorkerMeta>, task_id
     let Some(record) = ctx.authority.tasks.get(task_id).cloned() else {
         return false;
     };
+    // 终态（done/failed/cancelled）不可 cancel：worker 字段在终态后仍保留
+    // （审计凭据），没有此守卫会发出虚假 TaskCancelled 事件 —— 污染事件史
+    // 与任务叙事（done 之后又显示「已取消」），GUI #044 场景抓到。
+    if record.state.is_terminal() {
+        return false;
+    }
     let Some(worker_id) = record.worker.clone() else {
         return false;
     };
@@ -230,5 +236,72 @@ mod tests {
             freeze_ms: 42,
         };
         assert_eq!(r.freeze_ms, 42);
+    }
+
+    /// 终态任务不得被 cancel（GUI #044 场景抓到的状态污染）：
+    /// done 后 worker 字段仍保留（审计凭据），无守卫会发出 TaskCancelled
+    /// 事件把 Done 强改为 Cancelled。
+    #[test]
+    fn cancel_rejects_terminal_task() {
+        use crate::core::Ctx;
+        use crate::eventhub::EventHub;
+        use maestro_protocol::events::Event;
+        use maestro_protocol::types::{TaskId, WorkerId};
+        use maestro_protocol::events::Task;
+        use std::sync::Arc;
+
+        fn ctx_with(done: bool) -> (Ctx, TaskId) {
+            let mut ctx = Ctx::new(
+                Arc::new(EventHub::new()),
+                Authority::new(),
+                Arc::new(maestro_protocol::SystemClock),
+            );
+            let task_id = TaskId::new("t-1");
+            let task = Task {
+                id: task_id.clone(),
+                title: "t".into(),
+                workdir: "/tmp".into(),
+                created_at: 0,
+            };
+            let worker = WorkerId::new("w-1");
+            ctx.publish(Event::TaskCreated { task, prompt: "p".into() });
+            ctx.publish(Event::WorkerSpawned {
+                worker: worker.clone(),
+                task: task_id.clone(),
+                pid: 111,
+                pgid: 111,
+            });
+            if done {
+                ctx.publish(Event::TaskCompleted {
+                    task: task_id.clone(),
+                    worker,
+                    summary: "done".into(),
+                });
+            }
+            (ctx, task_id)
+        }
+
+        let metas = HashMap::new();
+        // working：可 cancel
+        let (mut live, tid) = ctx_with(false);
+        assert!(cancel_task(&mut live, &metas, &tid), "working 应可 cancel");
+        // done：拒绝且状态不被污染
+        let (mut dead, tid) = ctx_with(true);
+        assert!(
+            !cancel_task(&mut dead, &metas, &tid),
+            "done 任务不得被 cancel"
+        );
+        assert_eq!(
+            dead.authority.tasks.get(&tid).unwrap().state,
+            maestro_protocol::types::WorkerState::Done,
+            "终态不得被 TaskCancelled 强改"
+        );
+        // cancelled：同样拒绝（幂等）
+        let (mut gone, tid) = ctx_with(false);
+        gone.publish(Event::TaskCancelled {
+            task: tid.clone(),
+            worker: WorkerId::new("w-1"),
+        });
+        assert!(!cancel_task(&mut gone, &metas, &tid), "cancelled 幂等拒绝");
     }
 }

@@ -2,29 +2,35 @@
 import Foundation
 import Darwin
 
-enum UnixSocketError: Error, CustomStringConvertible {
+public enum UnixSocketError: Error, CustomStringConvertible {
     case socketCreateFailed(Int32)
     case connectFailed(String, Int32)
     case writeFailed(Int32)
     case readFailed(Int32)
+    case timedOut
     case closed
 
-    var description: String {
+    public var description: String {
         switch self {
         case .socketCreateFailed(let e): return "创建 socket 失败 (errno=\(e))"
         case .connectFailed(let p, let e): return "连接 \(p) 失败 (errno=\(e))"
         case .writeFailed(let e): return "写入失败 (errno=\(e))"
         case .readFailed(let e): return "读取失败 (errno=\(e))"
+        case .timedOut: return "响应超时 —— daemon 无应答"
         case .closed: return "连接已关闭"
         }
     }
 }
 
-final class UnixSocketConnection {
+public final class UnixSocketConnection {
     private let fd: Int32
     private var buffer = Data()
+    private var closed = false
 
-    init(path: String) throws {
+    /// - Parameter receiveTimeout: 读超时（秒）。API 请求/响应用（防 daemon
+    ///   无应答时调用方永久阻塞 —— GUI 冻结）；EventStream 常驻订阅传 nil
+    ///   （靠 close() 打断阻塞读）
+    public init(path: String, receiveTimeout: TimeInterval? = nil) throws {
         fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw UnixSocketError.socketCreateFailed(errno) }
 
@@ -39,7 +45,7 @@ final class UnixSocketConnection {
             return true
         }
         guard copied else {
-            close(fd)
+            Darwin.close(fd)
             throw UnixSocketError.connectFailed(path, 0)
         }
         let r = withUnsafePointer(to: &addr) { ptr in
@@ -49,19 +55,34 @@ final class UnixSocketConnection {
         }
         guard r == 0 else {
             let e = errno
-            close(fd)
+            Darwin.close(fd)
             throw UnixSocketError.connectFailed(path, e)
+        }
+        if let t = receiveTimeout {
+            var tv = timeval(tv_sec: time_t(t),
+                             tv_usec: suseconds_t((t - floor(t)) * 1_000_000))
+            _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
         }
     }
 
-    deinit { close(fd) }
+    deinit {
+        if !closed { Darwin.close(fd) }
+    }
+
+    /// 主动关闭（shutdown 打断阻塞中的 read，线程才能退出 —— EventStream.stop 依赖）
+    public func close() {
+        guard !closed else { return }
+        closed = true
+        _ = Darwin.shutdown(fd, Int32(SHUT_RDWR))
+        Darwin.close(fd)
+    }
 
     /// 探测端点是否可连（daemon 存活检查）
-    static func canConnect(path: String) -> Bool {
+    public static func canConnect(path: String) -> Bool {
         (try? UnixSocketConnection(path: path)) != nil
     }
 
-    func writeAll(_ data: Data) throws {
+    public func writeAll(_ data: Data) throws {
         var offset = 0
         while offset < data.count {
             let n: Int = data.withUnsafeBytes { raw in
@@ -75,7 +96,7 @@ final class UnixSocketConnection {
     }
 
     /// 读一行（按 \n 分隔）。返回 nil = 对端关闭且无残余数据。
-    func readLine() throws -> Data? {
+    public func readLine() throws -> Data? {
         while true {
             if let idx = buffer.firstIndex(of: 0x0A) {
                 let line = buffer.subdata(in: buffer.startIndex..<idx)
@@ -85,7 +106,13 @@ final class UnixSocketConnection {
             }
             var chunk = [UInt8](repeating: 0, count: 65536)
             let n = read(fd, &chunk, chunk.count)
-            if n < 0 { throw UnixSocketError.readFailed(errno) }
+            if n < 0 {
+                // SO_RCVTIMEO 到点：EAGAIN/EWOULDBLOCK —— 明确报超时（而非笼统读失败）
+                if errno == EAGAIN || errno == EWOULDBLOCK {
+                    throw UnixSocketError.timedOut
+                }
+                throw UnixSocketError.readFailed(errno)
+            }
             if n == 0 {
                 if buffer.isEmpty { return nil }
                 let rest = buffer

@@ -1,5 +1,6 @@
 // AppKitUI.swift — 纯 AppKit 界面（不依赖 SwiftUI 宏 —— Command Line Tools 可直接构建）
 import AppKit
+import MaestroCore
 
 // MARK: - 状态徽章
 

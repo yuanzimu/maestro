@@ -1,5 +1,6 @@
 // main.swift — AppKit 引导：窗口构建 + 定时刷新（无需 Xcode 工程）
 import AppKit
+import MaestroCore
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var window: NSWindow?

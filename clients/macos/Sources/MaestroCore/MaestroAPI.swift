@@ -2,12 +2,12 @@
 // 协议与 crates/maestro-protocol 对齐：{"id","method","params"}\n → {"ok":{...}}\n / {"err":{...}}\n
 import Foundation
 
-enum MaestroError: Error, CustomStringConvertible {
+public enum MaestroError: Error, CustomStringConvertible {
     case connect(String)
     case rpc(code: Int, message: String)
     case badResponse(String)
 
-    var description: String {
+    public var description: String {
         switch self {
         case .connect(let m): return "连接失败（daemon 未启动？）\(m)"
         case .rpc(let code, let message): return "RPC 错误 \(code): \(message)"
@@ -18,21 +18,21 @@ enum MaestroError: Error, CustomStringConvertible {
 
 // MARK: - 模型（task_list / task_get / inbox_list / server_status / worker_list 的返回形状）
 
-struct TaskSummary: Identifiable, Equatable {
-    let id: String
-    let title: String
-    let state: String        // queued/planning/working/blocked/suspended/done/failed/cancelled
-    let round: Int
-    let narrative: String?
-    let blockedKind: String?
-    let suspendReason: String?
-    let acceptanceFailures: Int
+public struct TaskSummary: Identifiable, Equatable {
+    public let id: String
+    public let title: String
+    public let state: String        // queued/planning/working/blocked/suspended/done/failed/cancelled
+    public let round: Int
+    public let narrative: String?
+    public let blockedKind: String?
+    public let suspendReason: String?
+    public let acceptanceFailures: Int
 
-    var isTerminal: Bool {
+    public var isTerminal: Bool {
         state == "done" || state == "failed" || state == "cancelled"
     }
 
-    static func from(_ d: [String: Any]) -> TaskSummary? {
+    public static func from(_ d: [String: Any]) -> TaskSummary? {
         guard let id = d["id"] as? String else { return nil }
         return TaskSummary(
             id: id,
@@ -47,15 +47,15 @@ struct TaskSummary: Identifiable, Equatable {
     }
 }
 
-struct ServerStatus {
-    let version: String
-    let pid: Int
-    let uptimeSecs: Int
-    let tasksTotal: Int
-    let workersActive: Int
-    let eventSeq: UInt64
+public struct ServerStatus {
+    public let version: String
+    public let pid: Int
+    public let uptimeSecs: Int
+    public let tasksTotal: Int
+    public let workersActive: Int
+    public let eventSeq: UInt64
 
-    static func from(_ d: [String: Any]) -> ServerStatus? {
+    public static func from(_ d: [String: Any]) -> ServerStatus? {
         guard let version = d["version"] as? String else { return nil }
         return ServerStatus(
             version: version,
@@ -68,13 +68,13 @@ struct ServerStatus {
     }
 }
 
-struct InboxItem: Identifiable {
-    let task: String
-    let kind: String?
-    let title: String
-    var id: String { task }
+public struct InboxItem: Identifiable {
+    public let task: String
+    public let kind: String?
+    public let title: String
+    public var id: String { task }
 
-    var kindText: String {
+    public var kindText: String {
         switch kind {
         case "permission": return "等权限批准"
         case "plan_approval": return "方案待审"
@@ -86,7 +86,7 @@ struct InboxItem: Identifiable {
         }
     }
 
-    static func from(_ d: [String: Any]) -> InboxItem? {
+    public static func from(_ d: [String: Any]) -> InboxItem? {
         guard let task = d["task"] as? String else { return nil }
         return InboxItem(task: task,
                          kind: d["kind"] as? String,
@@ -96,34 +96,37 @@ struct InboxItem: Identifiable {
 
 // MARK: - API 客户端
 
-final class MaestroAPI {
-    let dataDir: URL
+public final class MaestroAPI {
+    public let dataDir: URL
     private var reqCounter = 0
 
-    init(dataDir: URL) { self.dataDir = dataDir }
+    public init(dataDir: URL) { self.dataDir = dataDir }
 
-    var apiSocketPath: String { dataDir.appendingPathComponent("maestro.api.sock").path }
-    var eventsSocketPath: String { dataDir.appendingPathComponent("maestro.events.sock").path }
+    public var apiSocketPath: String { dataDir.appendingPathComponent("maestro.api.sock").path }
+    public var eventsSocketPath: String { dataDir.appendingPathComponent("maestro.events.sock").path }
 
     /// 与 Rust 侧 transport::default_data_dir() 语义一致：
     /// $MAESTRO_DATA_DIR > $TMPDIR/maestro（macOS 上 std::env::temp_dir() 即 $TMPDIR）
-    static func defaultDataDir() -> URL {
+    public static func defaultDataDir() -> URL {
         let env = ProcessInfo.processInfo.environment
         if let dir = env["MAESTRO_DATA_DIR"] { return URL(fileURLWithPath: dir) }
         let tmp = env["TMPDIR"] ?? "/tmp"
         return URL(fileURLWithPath: tmp).appendingPathComponent("maestro")
     }
 
-    var isDaemonAlive: Bool {
+    public var isDaemonAlive: Bool {
         UnixSocketConnection.canConnect(path: apiSocketPath)
     }
 
     /// 同步调用（在后台线程使用）。每次新建连接 —— 与 maestro-cli 同款行为。
-    func call(_ method: String, params: [String: Any] = [:]) throws -> [String: Any] {
+    /// 读超时 10s：daemon 无应答（死连接/内核异常）时快速失败 ——
+    /// AppState 的串行队列不得被一条僵尸连接卡死（=GUI 冻结）。
+    @discardableResult
+    public func call(_ method: String, params: [String: Any] = [:]) throws -> [String: Any] {
         reqCounter += 1
         let req: [String: Any] = ["id": "gui-\(reqCounter)", "method": method, "params": params]
         let body = try JSONSerialization.data(withJSONObject: req)
-        let conn = try UnixSocketConnection(path: apiSocketPath)
+        let conn = try UnixSocketConnection(path: apiSocketPath, receiveTimeout: 10)
         try conn.writeAll(body)
         try conn.writeAll(Data([0x0A]))
 
