@@ -59,7 +59,7 @@ pub fn gc_workdir(workdir: &Path, terminal_ids: &[&str], keep: usize) -> Vec<Pat
         return vec![];
     }
     // mtime 降序（最新在前），删除第 keep 个之后的
-    cand.sort_by(|a, b| b.1.cmp(&a.1));
+    cand.sort_by_key(|(_, t)| std::cmp::Reverse(*t));
     cand.into_iter()
         .skip(keep)
         .map(|(p, _)| {
@@ -173,9 +173,9 @@ mod tests {
         // 终态 ×(KEEP+1) + 非终态（blocked：resume 凭据）—— 同 mtime 下
         // 删除哪个不确定，但「删几个」与「非终态不删」是确定的
         for i in 0..=KEEP_PER_WORKDIR {
-            mk_dir(&Path::new(&work), &format!("t-done-{i}"));
+            mk_dir(Path::new(&work), &format!("t-done-{i}"));
         }
-        mk_dir(&Path::new(&work), "t-blocked");
+        mk_dir(Path::new(&work), "t-blocked");
         let records: Vec<(TaskId, WorkerState, String)> = (0..=KEEP_PER_WORKDIR)
             .map(|i| (TaskId::new(format!("t-done-{i}")), WorkerState::Done, work.clone()))
             .chain(std::iter::once((
@@ -187,7 +187,7 @@ mod tests {
         let report = gc_from_records(records.iter().map(|(a, b, c)| (a, *b, c.as_str())));
         assert_eq!(report.removed.len(), 1, "KEEP+1 个终态应恰好删 1: {report:?}");
         assert!(
-            state_dir(&Path::new(&work), "t-blocked").exists(),
+            state_dir(Path::new(&work), "t-blocked").exists(),
             "非终态目录（resume 凭据）不得删"
         );
     }

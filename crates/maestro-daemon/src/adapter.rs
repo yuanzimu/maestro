@@ -170,6 +170,7 @@ pub fn classify_exit(_code: Option<i32>, stderr: &str) -> ExitClass {
 /// 1. system.session_id —— `--resume` 续接凭据
 /// 2. result.result —— 本轮回答（DONE 信号检测源）
 /// 3. result.usage.input_tokens —— 计量闭环（T4 账本）
+///
 /// 返回人话描述列表（空 = 无漂移）。未知**新**事件类型不算漂移（前向兼容）。
 pub fn schema_drift(out: &RoundOutcome) -> Vec<String> {
     let mut drifts = vec![];
@@ -274,6 +275,7 @@ impl Dialect for AmpDialect {
 /// - item.completed(item.type=agent_message).text → 回答（聚合；turn.completed 无文本）
 /// - item.*(command_execution/file_change/mcp_tool_call/web_search/todo_list) → 工具
 /// - turn.completed.usage → 计量；turn.failed / 顶层 error → 错误
+///
 /// ⚠️ usage 口径差异：**input_tokens 已含 cached**（cached 是子集非加数）——
 /// 解析侧拆桶（in = input - cached），保证轮转检测的三桶合计不双计。
 /// ⚠️ 参数顺序与 cache_write 字段待实测校准（版本演进字段）
@@ -396,6 +398,7 @@ impl Dialect for CodexDialect {
 /// - tool_use.tool_name → 工具
 /// - result.stats → 计量（cached 仅有合并值 → cache_read；无读/写细分）
 /// - result.status=error / error 事件 → 错误
+///
 /// 退出码：0 成功；1 一般错；42 输入错误（Fatal）；**53 轮次上限**
 /// （= claude error_max_turns 语义：轮循环继续，不算失败）
 /// ⚠️ message delta/全文混合序列与 53 时 stdout 完整性待实测校准
@@ -512,6 +515,7 @@ impl Dialect for GeminiDialect {
 /// - step_finish.part.{tokens,cost} → 计量 + **自报费用（USD）** ——
 ///   四方言中唯一带 cost 字段的（对账素材天然存在）
 /// - error.error.data.message → 错误
+///
 /// ⚠️ 无官方 schema 版本承诺：解析对未知 type 跳行容错（与 claude 同策略）；
 /// tokens 的 cache 细分字段未稳定 → cache 桶留空（轮转检测按 in 桶低估，
 /// 待实测校准后补）

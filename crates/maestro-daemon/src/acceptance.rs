@@ -227,14 +227,14 @@ mod tests {
         let data = tmp.path().join("data");
         std::fs::create_dir_all(&data).unwrap();
         assert!(matches!(
-            snapshot(&data, &[data.clone()]),
+            snapshot(&data, std::slice::from_ref(&data)),
             Readback::Unverifiable
         ));
         // workdir 在 data 内部同样不可观测
         let nested = data.join("task1");
         std::fs::create_dir_all(&nested).unwrap();
         assert!(matches!(
-            snapshot(&nested, &[data.clone()]),
+            snapshot(&nested, std::slice::from_ref(&data)),
             Readback::Unverifiable
         ));
     }
@@ -247,12 +247,12 @@ mod tests {
         let data = work.join(".maestro-data");
         std::fs::create_dir_all(&data).unwrap();
         std::fs::write(data.join("events.db"), "noise").unwrap();
-        let before = snap_with(&work, &[data.clone()]);
+        let before = snap_with(&work, std::slice::from_ref(&data));
         std::fs::write(data.join("logs.txt"), "more noise").unwrap();
-        let after_noise = snap_with(&work, &[data.clone()]);
+        let after_noise = snap_with(&work, std::slice::from_ref(&data));
         assert!(!changed(&before, &after_noise), "data_dir 内部噪音不算产物");
         std::fs::write(work.join("src.rs"), "fn main() {}").unwrap();
-        let after_real = snap_with(&work, &[data.clone()]);
+        let after_real = snap_with(&work, std::slice::from_ref(&data));
         assert!(changed(&before, &after_real), "真实源码变化应判有产物");
     }
 

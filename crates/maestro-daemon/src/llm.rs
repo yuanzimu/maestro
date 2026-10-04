@@ -223,9 +223,10 @@ pub fn usage_entry(
 /// 多轮驱动轮账的 cache 感知计价（R24 计价闭环，R28 补写 cache 档）：
 /// - **actual** = 未缓存输入按输入价 + cache 命中按读价（0.1x~0.5x）+
 ///   写 cache 按写价（Anthropic 1.25x/2x；OpenAI = 输入价不加价）+ 输出价
-/// - **counterfactual** = 同内容冷跑（session/cache 全失效）全部按输入价 —— U8 省
-///  了多少的口径基线。⚠️ 读主导的轮 actual ≤ counterfactual；纯写入轮可能
-///  反超（cache 前置投入，回报在后续读）—— 属真实计费语义，不是 bug
+/// - **counterfactual** = 同内容冷跑（session/cache 全失效）全部按输入价 ——
+///   U8 省了多少的口径基线。⚠️ 读主导的轮 actual ≤ counterfactual；纯写入轮
+///   可能反超（cache 前置投入，回报在后续读）—— 属真实计费语义，不是 bug
+///
 /// token 三桶（input/cache_read/cache_write）按 API 语义互斥；异常上报钳到 input。
 /// 返回 None = 模型不在牌价表（条目仍入账但不计价，cents 留空）。
 pub fn priced_usage_entry(

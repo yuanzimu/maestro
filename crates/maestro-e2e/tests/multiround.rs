@@ -10,8 +10,6 @@ use maestro_protocol::types::*;
 use maestro_testkit::r3::write_mock_cli;
 use serial_test::serial;
 
-/// rounder 二进制路径（workspace 共享 target）
-
 /// 任务级 rounder 状态目录（R36：.maestro/<task_id>/，跨任务会话隔离）
 fn task_state_dir(work: &std::path::Path, task: &TaskId) -> std::path::PathBuf {
     work.join(".maestro").join(task.as_str())

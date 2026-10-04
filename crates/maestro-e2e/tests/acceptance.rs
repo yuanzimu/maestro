@@ -191,7 +191,7 @@ fn ledger_reports_rounds_and_wallclock() {
     );
     // 2 轮（第 1 轮假完成重试）
     assert_eq!(v["rounds"].as_u64().unwrap(), 2, "{v}");
-    assert!(v["wall_ms"].as_u64().unwrap() >= 0);
+    assert!(v["wall_ms"].as_u64().is_some(), "wall_ms 应为数字: {v}");
     // token 字段就位（值待 0.15 多轮驱动接入）
     assert!(v["input_tokens"].is_u64());
     assert_eq!(v["ledger_entries"].as_u64().unwrap(), 0);
