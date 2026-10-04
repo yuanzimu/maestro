@@ -54,7 +54,7 @@ fn main() -> anyhow::Result<()> {
         let g = core.lock().unwrap();
         (g.sender(), g.hub_handle(), g.event_store_handle())
     };
-    let _handles = server::serve(hub, core_tx, &paths, store)?;
+    let _guard = server::serve(hub, core_tx, &paths, store)?;
 
     tracing::info!("maestro daemon 就绪: {}", paths.api_sock.display());
 

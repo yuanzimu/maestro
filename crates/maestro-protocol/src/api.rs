@@ -56,6 +56,10 @@ pub enum Method {
     TaskCancel,
     /// 轻推：向运行中任务注入补充指示，下一轮生效
     TaskSteer,
+    /// 轻推拉取：多轮驱动 Worker 在轮边界拉走积压轻推（并标记已投递）
+    TaskSteerPoll,
+    /// 轮账上报：多轮驱动 Worker 每轮上报 usage → LedgerEntry 事件入账
+    TaskRoundReport,
     /// 账本：任务的轮数/耗时/成本汇总（token 经济口径）
     TaskLedger,
 
@@ -126,6 +130,19 @@ pub enum SteeringMode {
 pub struct TaskSteerParams {
     pub task: TaskId,
     pub message: String,
+}
+
+/// `task.round_report` 参数（rounder 每轮上报）
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TaskRoundReportParams {
+    pub task: TaskId,
+    pub worker: WorkerId,
+    pub round: u32,
+    /// 本轮底层 CLI 的 usage（stream-json result 行）
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u64>,
 }
 
 /// `task.create` 参数

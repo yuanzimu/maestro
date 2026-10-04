@@ -291,14 +291,16 @@ P2：U4 完整版（需内置 Executor D2）· U6 v2 检讨（需失败事件库
 | ✅ | 0.12 持久化 | SQLite WAL 事件溯源 + kill -9 重放恢复 + 恢复时自动重排退避调度（R11 审计补的缺口） |
 | ✅ | 0.13 CLI | status/task/worker/inbox/stop/resume/events/doctor/shutdown + 表格化列表 + 收件箱行动建议（R19） |
 | 🔶 | 0.14 LLM client | 骨架完成：OpenAI 兼容（ureq 阻塞式）+ 牌价表 + 微美分计价 + UsageEntry 口径；T1/U3/U8 消费方在 P1 接入 |
-| 🔶 | 0.15 多轮驱动 | R3 harness 完成（机制层 6 场景绿：session 续接/轻推持久/坏 sid/kill -9 恢复/成本账）；**真实 claude CLI 验证待 API key**，Driver 已兼容真实 CLI 参数 |
-| ✅ | 0.16 steering 队列 | jsonl 持久化 + flush/hold + kill -9 不丢 + 重试轮回喂投递 |
+| ✅ | 0.15 多轮驱动 | **R23 机制层完成**：maestro-rounder 二进制（轮循环 + `--resume` 续接 + session 持久化 + DONE 信号 + 轮间隔防热循环）+ TaskSteerPoll 轮间投递（仅当前 worker 可拉）+ **TaskRoundReport 轮账入账**（usage→LedgerEntry，token 计量闭环）+ 2 e2e（U4 轻推改下一轮输出 / kill -9 跨实例续接 session）；**真实 claude CLI 验证待 API key** |
+| ✅ | 0.16 steering 队列 | jsonl 持久化 + flush/hold + kill -9 不丢 + 重试轮回喂投递；**R23 投递语义修正**：活 worker 留队轮边界 poll 取走、respawn 路径前置注入 prompt（真投递）、终态 SteeringDropped 不静默 |
 | ✅ | 0.17 suspended 状态机 | 七值枚举 + 自动恢复矩阵（30s→5m 退避，10 次升 blocked）+ 孤儿清理（绝不收养） |
 | ✅ | 0.18 emergency_stop | FREEZE→SNAPSHOT→DECIDE 三阶段 + 竞态修复（过期退出误杀/死 worker 假恢复，R14） |
 | ✅ | 0.19 checkpoint | git plumbing 零打扰 + pre-rollback 安全垫 + pinned（baseline/验收点）+ 滚动 GC |
 | ⬜ | 0.6 / 0.8 / 0.9 / 0.11 | Claude headless 适配器（待 R2/R3 真实 CLI）、模型路由框架、账本 UI 呈现、allowlist 安全基线 |
 
-**测试**：101 项全绿（daemon 单测 46 + e2e 36 + protocol 12 + testkit 8 + CLI 3，clippy -D warnings 零告警）。里程碑见 git log（d84e300→c580041，11 个提交）。**已知缺陷（v0 接受）**见 [acceptance.rs](../crates/maestro-daemon/src/acceptance.rs) 模块头：无产物型任务误判（0.15 结构化验收断言接管）、workdir 外产物不可见。
+**测试**：118 项全绿（R1~R23，daemon 单测 52 + e2e 44 + protocol 12 + testkit 8 + CLI 3，clippy 零告警）。里程碑见 git log。**已知缺陷（v0 接受）**见 [acceptance.rs](../crates/maestro-daemon/src/acceptance.rs) 模块头：无产物型任务误判（0.15 结构化验收断言接管）、workdir 外产物不可见。
+
+**R23 调试战果（dash vfork 之谜）**：sigstop/b1 测试 ~33% flake 的根因不是「高负载 D 态」而是 **dash 对单条外部命令用 vfork**——父进程阻塞在不可中断的 vfork-wait 直到子进程 exec；STOP 恰落在 vfork 窗口时父进程停在 D（子进程 T），SIGSTOP 已投递且回用户态即生效，但 /proc 主 pid 永不显示 T。测试断言改为 T|D 双态（= 组不再执行用户代码）。产品语义（I1 冻结 = kill 返回）不受影响。
 
 ### P1 Desktop MVP（4~6 周）—— 按信任旅程组织为三个 Sprint
 

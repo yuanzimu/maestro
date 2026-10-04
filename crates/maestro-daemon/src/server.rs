@@ -12,8 +12,10 @@ use maestro_protocol::events::Envelope;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// IPC 路径约定
 pub struct IpcPaths {
@@ -26,6 +28,25 @@ impl IpcPaths {
         Self {
             api_sock: data_dir.join("maestro.api.sock"),
             events_sock: data_dir.join("maestro.events.sock"),
+        }
+    }
+}
+
+/// socket 服务的停机句柄：stop() 退出 accept 循环并回收线程。
+/// 用途：e2e 同 data_dir 起第二实例前释放 socket 路径
+/// （生产 daemon 随进程退出，不需要调用）。
+pub struct ServerGuard {
+    stop: Arc<AtomicBool>,
+    handles: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl ServerGuard {
+    /// 停止 accept 循环（≤ 一个轮询周期）并 join 全部 listener 线程。
+    /// 已建立的连接线程随客户端断开自然退出。
+    pub fn stop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        for h in self.handles.drain(..) {
+            let _ = h.join();
         }
     }
 }
@@ -47,40 +68,63 @@ fn remove_stale_socket(path: &Path) {
     }
 }
 
-/// 启动双 socket 服务（返回各 listener 的 join handles）
+/// accept 循环：非阻塞 + 停机标志轮询（20ms 粒度）。
+/// 已接受的连接流是阻塞模式（Linux accept 不继承 O_NONBLOCK）。
+fn accept_loop(
+    listener: UnixListener,
+    stop: Arc<AtomicBool>,
+    on_conn: impl Fn(UnixStream) + Send + Sync + 'static,
+) {
+    while !stop.load(Ordering::SeqCst) {
+        match listener.accept() {
+            Ok((stream, _)) => on_conn(stream),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(_) => break,
+        }
+    }
+}
+
+/// 启动双 socket 服务（返回停机句柄）
 pub fn serve(
     hub: Arc<EventHub>,
     core_tx: Sender<CoreMsg>,
     paths: &IpcPaths,
     store: Option<Arc<std::sync::Mutex<crate::persist::EventStore>>>,
-) -> std::io::Result<Vec<std::thread::JoinHandle<()>>> {
+) -> std::io::Result<ServerGuard> {
     std::fs::create_dir_all(paths.api_sock.parent().unwrap())?;
     remove_stale_socket(&paths.api_sock);
     remove_stale_socket(&paths.events_sock);
 
     let api_listener = UnixListener::bind(&paths.api_sock)?;
     let events_listener = UnixListener::bind(&paths.events_sock)?;
+    // 非阻塞 accept（停机靠标志轮询）
+    api_listener.set_nonblocking(true)?;
+    events_listener.set_nonblocking(true)?;
     // 0600：仅属主可访问
     for p in [&paths.api_sock, &paths.events_sock] {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600));
     }
 
+    let stop = Arc::new(AtomicBool::new(false));
     let mut handles = vec![];
 
     // ---- API socket：每连接一线程（经 channel，不碰 Core 锁）----
     {
         let tx = core_tx.clone();
+        let stop = stop.clone();
         handles.push(std::thread::spawn(move || {
-            for stream in api_listener.incoming() {
-                let Ok(stream) = stream else { continue };
+            let on_conn = move |stream: UnixStream| {
                 let tx = tx.clone();
                 std::thread::spawn(move || {
                     if let Err(e) = handle_api_conn(stream, &tx) {
                         tracing::debug!("api conn closed: {e}");
                     }
                 });
-            }
+            };
+            accept_loop(api_listener, stop, on_conn);
         }));
     }
 
@@ -88,9 +132,9 @@ pub fn serve(
     {
         let hub = hub.clone();
         let store = store.clone();
+        let stop = stop.clone();
         handles.push(std::thread::spawn(move || {
-            for stream in events_listener.incoming() {
-                let Ok(stream) = stream else { continue };
+            let on_conn = move |stream: UnixStream| {
                 let hub = hub.clone();
                 let store = store.clone();
                 std::thread::spawn(move || {
@@ -98,11 +142,12 @@ pub fn serve(
                         tracing::debug!("events conn closed: {e}");
                     }
                 });
-            }
+            };
+            accept_loop(events_listener, stop, on_conn);
         }));
     }
 
-    Ok(handles)
+    Ok(ServerGuard { stop, handles })
 }
 
 /// API 连接：逐行读 JSON-RPC 请求 → Core → 回响应

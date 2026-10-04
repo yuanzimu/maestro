@@ -15,9 +15,9 @@ use crate::worker::{self, SpawnSpec, WorkerMeta};
 use maestro_protocol::api::{
     CheckpointRollbackParams, CheckpointRollbackResult, EmergencyStopParams, Method, Request,
     Response, ResumeAllParams, RpcError, ServerStatusResult, SteeringMode, TaskCreateParams,
-    TaskCreateResult, TaskSteerParams,
+    TaskCreateResult, TaskRoundReportParams, TaskSteerParams,
 };
-use maestro_protocol::events::{Event, Task};
+use maestro_protocol::events::{Event, Task, UsageEntry};
 use maestro_protocol::types::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -345,6 +345,14 @@ impl Core {
                 };
                 self.api_steer(&req, &params)
             }
+            Method::TaskRoundReport => {
+                let params: TaskRoundReportParams = match serde_json::from_value(req.params.clone())
+                {
+                    Ok(p) => p,
+                    Err(_) => return self.err(&req, -400, "bad params"),
+                };
+                self.api_round_report(&req, &params)
+            }
             Method::TaskLedger => {
                 let task_id = req
                     .params
@@ -354,6 +362,22 @@ impl Core {
                 match task_id {
                     Some(id) => self.api_ledger(&req, &id),
                     None => self.err(&req, -400, "missing task"),
+                }
+            }
+            Method::TaskSteerPoll => {
+                let task_id = req
+                    .params
+                    .get("task")
+                    .and_then(|v| v.as_str())
+                    .map(TaskId::new);
+                let worker_id = req
+                    .params
+                    .get("worker")
+                    .and_then(|v| v.as_str())
+                    .map(WorkerId::new);
+                match (task_id, worker_id) {
+                    (Some(t), Some(w)) => self.api_steer_poll(&req, &t, &w),
+                    _ => self.err(&req, -400, "missing task/worker"),
                 }
             }
             Method::TaskPause => {
@@ -388,6 +412,7 @@ impl Core {
                     Some(id) => {
                         let ok = emergency::cancel_task(&mut self.ctx, &self.metas, &id);
                         if ok {
+                            self.drop_pending_steering(&id);
                             self.ok(&req, serde_json::json!({"cancelled": true}))
                         } else {
                             self.err(&req, -404, "task not found or not cancellable")
@@ -511,7 +536,9 @@ impl Core {
             if !self.slots_free() {
                 break;
             }
-            if let Ok(w) = self.spawn_worker_for(&task) {
+            // 急停期间积压的轻推随 respawn 注入（投递语义 v0.15）
+            let prefix = self.steering_prefix(&task);
+            if let Ok(w) = self.spawn_worker_for(&task, prefix) {
                 self.ctx.publish(Event::Resumed {
                     task: task.clone(),
                     worker: w,
@@ -596,7 +623,7 @@ impl Core {
             );
         }
 
-        match self.spawn_worker_for(&task_id) {
+        match self.spawn_worker_for(&task_id, None) {
             Ok(worker_id) => self.ok(
                 req,
                 serde_json::to_value(TaskCreateResult {
@@ -609,9 +636,64 @@ impl Core {
         }
     }
 
+    /// 轻推拉取（多轮驱动 Worker 轮边界调用）：取走积压轻推并标记投递。
+    /// 仅当前 worker 可拉（防过期驱动进程抽走消息）。
+    fn api_steer_poll(&mut self, req: &Request, task: &TaskId, worker: &WorkerId) -> Response {
+        let Some(t) = self.ctx.authority.get(task).cloned() else {
+            return self.err(req, -404, "task not found");
+        };
+        if t.state != WorkerState::Working {
+            return self.err(req, -409, "task not working");
+        }
+        if t.worker.as_ref() != Some(worker) {
+            return self.err(req, -403, "not the current worker");
+        }
+        let msgs = self.steering.drain(task);
+        let out: Vec<serde_json::Value> = msgs
+            .iter()
+            .map(|m| {
+                self.ctx.publish(Event::SteeringDelivered {
+                    task: task.clone(),
+                    round: t.round,
+                    message: m.message.clone(),
+                });
+                serde_json::json!({ "seq": m.seq, "message": m.message })
+            })
+            .collect();
+        self.ok(req, serde_json::json!({ "messages": out }))
+    }
+
+    /// 轮账上报（rounder 每轮）：usage → LedgerEntry 事件（token 计量闭环）。
+    /// 仅当前 worker 可报（防过期驱动进程灌账）。
+    fn api_round_report(&mut self, req: &Request, params: &TaskRoundReportParams) -> Response {
+        let Some(t) = self.ctx.authority.get(&params.task).cloned() else {
+            return self.err(req, -404, "task not found");
+        };
+        if t.worker.as_ref() != Some(&params.worker) {
+            return self.err(req, -403, "not the current worker");
+        }
+        self.ctx.publish(Event::LedgerEntry {
+            task: params.task.clone(),
+            worker: Some(params.worker.clone()),
+            usage: UsageEntry {
+                input_tokens: params.input_tokens,
+                output_tokens: params.output_tokens,
+                cache_read_tokens: params.cache_read_tokens,
+                path: None,
+                discount: None,
+                counterfactual_cost_cents: None,
+                actual_cost_cents: None,
+            },
+        });
+        self.ok(
+            req,
+            serde_json::json!({ "recorded": true, "round": params.round }),
+        )
+    }
+
     /// 账本（0.9）：轮数/耗时/成本汇总 —— 「这个任务花了多少」一句话回答。
-    /// 数据源 = 事件流重放（与恢复同一口径）；LLM usage 在 0.15 多轮驱动
-    /// 接入后经 LedgerEntry 事件入账。
+    /// 数据源 = 事件流重放（与恢复同一口径）；rounder 每轮经 TaskRoundReport
+    /// 入账 LedgerEntry（token 计量闭环，R24）。
     fn api_ledger(&mut self, req: &Request, task: &TaskId) -> Response {
         if self.ctx.authority.get(task).is_none() {
             return self.err(req, -404, "task not found");
@@ -621,7 +703,6 @@ impl Core {
             .as_ref()
             .map(|s| s.lock().unwrap().replay_all())
             .unwrap_or_default();
-        let mut rounds = 0u64;
         let mut first_ts: Option<u64> = None;
         let mut last_ts: Option<u64> = None;
         let mut input_tokens = 0u64;
@@ -629,6 +710,7 @@ impl Core {
         let mut actual_cents = 0u64;
         let mut counterfactual_cents = 0u64;
         let mut entries = 0u64;
+        let mut spawns = 0u64;
         for env in &events {
             let mine = match &env.event {
                 Event::TaskCreated { task: t, .. } => &t.id == task,
@@ -643,7 +725,7 @@ impl Core {
             first_ts.get_or_insert(env.ts);
             last_ts = Some(env.ts);
             match &env.event {
-                Event::WorkerSpawned { .. } => rounds += 1,
+                Event::WorkerSpawned { .. } => spawns += 1,
                 Event::LedgerEntry { usage, .. } => {
                     entries += 1;
                     input_tokens += usage.input_tokens;
@@ -654,6 +736,9 @@ impl Core {
                 _ => {}
             }
         }
+        // 轮数口径：单发 worker = spawn 次数；rounder = LedgerEntry 数
+        // （spawn 即第 1 轮，后续轮每轮一条）—— 取两者较大值兼容两种模式
+        let rounds = spawns.max(entries);
         let wall_ms = match (first_ts, last_ts) {
             (Some(a), Some(b)) => b.saturating_sub(a),
             _ => 0,
@@ -745,14 +830,8 @@ impl Core {
             return self.err(req, -409, "no suspend info");
         };
         // BudgetExceeded 恢复需确认（预算语义 v0：直接允许，预算引擎 P1 接管）
-        // flush steering（手动恢复走 flush 语义）
-        for msg in self.steering.drain(task) {
-            self.ctx.publish(Event::SteeringDelivered {
-                task: task.clone(),
-                round: t.round,
-                message: msg.message,
-            });
-        }
+        // 轻推不在此 drain：活 worker → rounder 轮边界 TaskSteerPoll 取走；
+        // 死 worker → respawn 路径前置注入（投递语义 v0.15）
         // 活 worker：解冻续跑
         if let Some(w) = &t.worker {
             if let Some(m) = self.metas.get(w) {
@@ -780,7 +859,9 @@ impl Core {
             if !self.slots_free() || self.workdir_occupied(&t.task.workdir) {
                 return self.err(req, -409, "no free slot for respawn");
             }
-            match self.spawn_worker_for(task) {
+            // 挂起期间积压的轻推随 respawn 前置注入
+            let prefix = self.steering_prefix(task);
+            match self.spawn_worker_for(task, prefix) {
                 Ok(w) => {
                     self.ctx.publish(Event::Resumed {
                         task: task.clone(),
@@ -904,7 +985,8 @@ impl Core {
             let Some((is_retry, _, task, _)) = candidates.first().cloned() else {
                 return;
             };
-            match self.spawn_worker_for(&task) {
+            // 排队启动无挂起语义，轻推留队（rounder poll / 终态 Dropped）
+            match self.spawn_worker_for(&task, None) {
                 Ok(w) => {
                     self.ctx.publish(Event::TaskStarted {
                         task: task.clone(),
@@ -987,6 +1069,7 @@ impl Core {
                     exit.stderr_tail.chars().take(200).collect::<String>()
                 ),
             });
+            self.drop_pending_steering(&exit.task);
         }
     }
 
@@ -1019,6 +1102,7 @@ impl Core {
                 worker: t.worker.clone().unwrap_or_else(|| WorkerId::new("none")),
                 summary: "worker exited 0 (gate: exit-code only)".into(),
             });
+            self.drop_pending_steering(task);
             return;
         };
         if crate::acceptance::changed(&before, &after) {
@@ -1041,6 +1125,7 @@ impl Core {
                 worker: t.worker.clone().unwrap_or_else(|| WorkerId::new("none")),
                 summary: format!("acceptance passed: {output}"),
             });
+            self.drop_pending_steering(task);
             return;
         }
 
@@ -1066,6 +1151,7 @@ impl Core {
                 round: t.round,
                 blocked_condition: Some("fake_completion_x3".into()),
             });
+            self.drop_pending_steering(task);
             return; // 3 振出局，等用户 TaskRequeued
         }
         // 反思回喂（aider 模式，R16）：失败差异进 steering，下一轮 worker
@@ -1085,15 +1171,10 @@ impl Core {
         if self.emergency == EmergencyPhase::Frozen {
             return;
         }
-        // 重试轮开工前 flush 轻推（含上面注入的失败反馈），与手动 resume 同语义
-        for msg in self.steering.drain(task) {
-            self.ctx.publish(Event::SteeringDelivered {
-                task: task.clone(),
-                round: t.round,
-                message: msg.message,
-            });
-        }
-        match self.spawn_worker_for(task) {
+        // 重试轮开工前投递积压轻推（含上面注入的失败反馈）：respawn 前置注入
+        // （单发 worker 经 prompt 真收到；rounder 第 1 轮即见）
+        let prefix = self.steering_prefix(task);
+        match self.spawn_worker_for(task, prefix) {
             Ok(w) => {
                 self.ctx.publish(Event::TaskStarted {
                     task: task.clone(),
@@ -1150,7 +1231,9 @@ impl Core {
             self.schedule_resume(&task, attempt);
             return;
         }
-        match self.spawn_worker_for(&task) {
+        // 挂起期间积压的轻推随 respawn 前置注入（投递语义 v0.15）
+        let prefix = self.steering_prefix(&task);
+        match self.spawn_worker_for(&task, prefix) {
             Ok(w) => {
                 self.ctx.publish(Event::Resumed {
                     task: task.clone(),
@@ -1194,8 +1277,50 @@ impl Core {
     // 内部工具
     // -----------------------------------------------------------------------
 
-    /// 安排自动恢复：为 waiter 线程建立 WorkerExit→CoreMsg 转发通道
-    fn spawn_worker_for(&mut self, task: &TaskId) -> Result<WorkerId, String> {
+    /// 投递语义 v0.15（rounder 接管后的统一口径）：
+    /// - **respawn 路径**（resume 死 worker / 验收重试 / 自动恢复 / resume_all 补拉）
+    ///   → 本方法：drain + 事件留痕 + 拼成下一轮 prompt 前缀（真投递）
+    /// - **活 worker**：轻推留在队列，rounder 轮边界 TaskSteerPoll 取走
+    /// - **终态**：drop_pending_steering（SteeringDropped，不静默）
+    fn steering_prefix(&mut self, task: &TaskId) -> Option<String> {
+        let msgs = self.steering.drain(task);
+        if msgs.is_empty() {
+            return None;
+        }
+        let round = self.ctx.authority.get(task).map(|t| t.round).unwrap_or(0);
+        for m in &msgs {
+            self.ctx.publish(Event::SteeringDelivered {
+                task: task.clone(),
+                round,
+                message: m.message.clone(),
+            });
+        }
+        Some(
+            msgs.iter()
+                .map(|m| m.message.clone())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    }
+
+    /// 任务终态时清空未投递轻推：每条发 SteeringDropped（审计可见，不静默丢失）
+    fn drop_pending_steering(&mut self, task: &TaskId) {
+        for m in self.steering.drop_all(task) {
+            self.ctx.publish(Event::SteeringDropped {
+                task: task.clone(),
+                message: m.message,
+            });
+        }
+    }
+
+    /// 安排自动恢复：为 waiter 线程建立 WorkerExit→CoreMsg 转发通道。
+    /// `prefix`：respawn 时前置注入的轻推内容（投递语义 v0.15 —— 单发 worker
+    /// 经 prompt 真收到，rounder 在第 1 轮即见；None = 原始 prompt）。
+    fn spawn_worker_for(
+        &mut self,
+        task: &TaskId,
+        prefix: Option<String>,
+    ) -> Result<WorkerId, String> {
         let t = self
             .ctx
             .authority
@@ -1206,6 +1331,10 @@ impl Core {
         let snap = self.workdir_readback(&t.task.workdir);
         let worker_id = WorkerId::new(format!("w-{}", self.next_worker));
         self.next_worker += 1;
+        let prompt = match prefix {
+            Some(p) if !p.is_empty() => format!("{p}\n\n{}", t.prompt),
+            _ => t.prompt.clone(),
+        };
         let spec = SpawnSpec {
             worker: worker_id.clone(),
             task: task.clone(),
@@ -1214,6 +1343,7 @@ impl Core {
             workdir: PathBuf::from(&t.task.workdir),
             log_dir: self.cfg.data_dir.join("logs"),
             extra_env: vec![],
+            prompt,
         };
         // WorkerExit → CoreMsg 转发（waiter 线程只懂 WorkerExit）
         let (wx, wrx) = std::sync::mpsc::channel::<worker::WorkerExit>();

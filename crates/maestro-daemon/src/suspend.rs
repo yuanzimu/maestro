@@ -131,6 +131,7 @@ mod tests {
                 workdir: tmp.path().into(),
                 log_dir: tmp.path().join("logs"),
                 extra_env: vec![],
+                prompt: "p".into(),
             },
             "/tmp/x.sock",
             tx,

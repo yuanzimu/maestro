@@ -85,9 +85,13 @@ impl ScriptWorker {
         proc_state(self.pid).is_some()
     }
 
-    /// 进程状态是否为 T（stopped）—— SIGSTOP 验证（用例 B1）
+    /// 进程是否已被冻结（SIGSTOP 验证，用例 B1）。
+    /// ⚠️ SIGSTOP 已发出后：T = 已停；D = stop pending（dash 对单条外部命令
+    /// 用 vfork 优化，父进程卡在不可中断的 vfork-wait 直到子进程 exec ——
+    /// 若 STOP 恰落在 vfork 窗口，父进程停在 D 直到子进程恢复，SIGSTOP
+    /// 已投递且回用户态即生效。两种状态都代表组不再执行用户代码 = 冻结。
     pub fn is_stopped(&self) -> bool {
-        proc_state(self.pid).as_deref() == Some("T")
+        matches!(proc_state(self.pid).as_deref(), Some("T") | Some("D"))
     }
 
     /// 给整个进程组发信号

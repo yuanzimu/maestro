@@ -162,22 +162,16 @@ pub fn resume_all(
         if let Some(m) = metas.get(&id) {
             let _ = worker::unfreeze_group(m.pgid);
         }
-        for msg in steering.drain(&task) {
-            match mode {
-                SteeringMode::Flush => {
-                    ctx.publish(Event::SteeringDelivered {
-                        task: task.clone(),
-                        round: 0,
-                        message: msg.message,
-                    });
-                }
-                SteeringMode::Hold => {
-                    // 不静默：每条发 SteeringDropped（用例 B7 断言）
-                    ctx.publish(Event::SteeringDropped {
-                        task: task.clone(),
-                        message: msg.message,
-                    });
-                }
+        // 投递语义 v0.15：活 worker 解冻后续跑，轻推不在此 drain ——
+        // rounder 轮边界 TaskSteerPoll 取走（此处 drain 会抢走 poll 的消息）。
+        // - Flush：留队待 poll（真正投递给 worker）
+        // - Hold：丢弃但每条发 SteeringDropped（不静默，用例 B7 断言）
+        if mode == SteeringMode::Hold {
+            for msg in steering.drop_all(&task) {
+                ctx.publish(Event::SteeringDropped {
+                    task: task.clone(),
+                    message: msg.message,
+                });
             }
         }
         ctx.publish(Event::Resumed {

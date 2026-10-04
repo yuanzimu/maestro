@@ -35,6 +35,14 @@ impl MaestroClient {
         }
     }
 
+    /// 从显式 api socket 路径构造（多轮驱动 Worker 用：MAESTRO_SOCKET_PATH）
+    pub fn from_api_socket(api_sock: &Path) -> Self {
+        Self {
+            api_sock: api_sock.to_path_buf(),
+            events_sock: api_sock.with_file_name("maestro.events.sock"),
+        }
+    }
+
     pub fn connect_default() -> Self {
         Self::new(&default_data_dir())
     }

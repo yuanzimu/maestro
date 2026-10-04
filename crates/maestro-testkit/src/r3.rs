@@ -264,6 +264,7 @@ case "$PROMPT" in
      P=$(echo "$PROMPT" | grep -o '\[[A-Z]\]' | head -1)
      echo "{{\"prefix\":\"$P\"}}" >> "$CTX"
      ANSWER="已记录前缀 $P";;
+  *结束*) ANSWER="MAESTRO_DONE";;
   *SELF_DESTRUCT*)
      echo '{{"crashed":true}}' >> "$CTX"
      kill -9 $$
@@ -271,9 +272,12 @@ case "$PROMPT" in
   *) ANSWER="(generic echo) $PROMPT";;
 esac
 
-# 应用前缀（注入后持续生效 = S4 持久性语义）
+# 应用前缀（注入后持续生效 = S4 持久性语义；含 DONE 信号轮）
 P=$(prefix)
 if [ -n "$P" ] && [ "$ANSWER" != "已记录前缀 $P" ]; then ANSWER="$P $ANSWER"; fi
+
+# 产物落盘（daemon 验收门读回校验用；对 R3 harness 测试无影响）
+echo "$ANSWER" >> out.txt
 
 # usage：平台型（常量 in + cache 命中）；MOCK_REPLAY=1 时线性重放
 LINES=$(wc -l < "$CTX")

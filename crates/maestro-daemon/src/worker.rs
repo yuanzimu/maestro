@@ -29,6 +29,8 @@ pub struct SpawnSpec {
     pub log_dir: PathBuf,
     /// 环境变量三元组之外的额外环境
     pub extra_env: Vec<(String, String)>,
+    /// 任务 prompt（多轮驱动 Worker 用；ENV_PROMPT 注入）
+    pub prompt: String,
 }
 
 /// 运行中的 Worker 元数据（Core 独占；Child 在 waiter 线程里）
@@ -57,6 +59,8 @@ pub struct WorkerExit {
 pub const ENV_WORKER_ID: &str = "MAESTRO_WORKER_ID";
 pub const ENV_TASK_ID: &str = "MAESTRO_TASK_ID";
 pub const ENV_SOCKET_PATH: &str = "MAESTRO_SOCKET_PATH";
+/// 任务 prompt（多轮驱动 Worker 模式）
+pub const ENV_PROMPT: &str = "MAESTRO_PROMPT";
 
 /// 启动 Worker：独立进程组 + stdout/stderr 落文件 + waiter 线程防僵尸
 pub fn spawn_worker(
@@ -77,6 +81,7 @@ pub fn spawn_worker(
         .env(ENV_WORKER_ID, spec.worker.as_str())
         .env(ENV_TASK_ID, spec.task.as_str())
         .env(ENV_SOCKET_PATH, socket_path)
+        .env(ENV_PROMPT, &spec.prompt)
         .envs(spec.extra_env.iter().cloned())
         .stdin(Stdio::null())
         .stdout(Stdio::from(out_f))
@@ -285,6 +290,7 @@ mod tests {
             workdir: tmp.to_path_buf(),
             log_dir: tmp.join("logs"),
             extra_env: vec![],
+            prompt: "p".into(),
         }
     }
 

@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 maestro-protocol.workspace = true
+maestro-client.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -20,6 +21,10 @@ ureq.workspace = true
 [[bin]]
 name = "maestro-daemon"
 path = "src/main.rs"
+
+[[bin]]
+name = "maestro-rounder"
+path = "src/bin/rounder.rs"
 
 [dev-dependencies]
 maestro-testkit.workspace = true

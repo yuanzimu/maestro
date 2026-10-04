@@ -9,11 +9,14 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
-/// 测试用 daemon 实例（Core 在专属线程跑主循环）
+/// 测试用 daemon 实例（Core 在专属线程跑主循环 + 真实双 socket 服务）。
+/// socket 层必须真实存在：rounder 等 worker 子进程经 MAESTRO_SOCKET_PATH
+/// 连 daemon（TaskSteerPoll 等），进程内直调通道覆盖不到这条路径。
 pub struct TestDaemon {
     tx: Sender<CoreMsg>,
     pub clock: Arc<MockClock>,
     pub data_dir: PathBuf,
+    _guard: maestro_daemon::server::ServerGuard,
     _tmp: tempfile::TempDir,
 }
 
@@ -67,7 +70,18 @@ impl TestDaemon {
         let (core, _) = Core::recover(cfg, clock.clone());
         let core = Arc::new(Mutex::new(core));
         // ⚠️ 先取 sender 再起 run 线程（run 持锁到底，外部不得再 lock）
-        let tx = core.lock().unwrap().sender();
+        let (tx, hub, store) = {
+            let g = core.lock().unwrap();
+            (g.sender(), g.hub_handle(), g.event_store_handle())
+        };
+        // 真实双 socket（worker 子进程的 IPC 路径）
+        let guard = maestro_daemon::server::serve(
+            hub,
+            tx.clone(),
+            &maestro_daemon::server::IpcPaths::new(&dir),
+            store,
+        )
+        .expect("socket serve");
         {
             let core = core.clone();
             std::thread::spawn(move || {
@@ -78,6 +92,7 @@ impl TestDaemon {
             tx,
             clock,
             data_dir: dir,
+            _guard: guard,
             _tmp: tmp,
         }
     }
@@ -160,13 +175,15 @@ impl TestDaemon {
 impl Drop for TestDaemon {
     fn drop(&mut self) {
         // 测试卫生（R11 审计）：不留孤儿 worker、不漏 timer 线程。
-        // 1. 停 Core 循环
+        // 1. 停 socket accept 循环（释放路径给同 data_dir 的下一实例）
+        self._guard.stop();
+        // 2. 停 Core 循环
         let _ = self.tx.send(CoreMsg::Shutdown);
-        // 2. 杀光 data_dir 名下全部 worker 进程组（pidfile 是权威清单）
+        // 3. 杀光 data_dir 名下全部 worker 进程组（pidfile 是权威清单）
         for pf in maestro_daemon::worker::scan_pidfiles(&self.data_dir.join("workers")) {
             maestro_testkit::pgid_sandbox::kill_group(pf.pgid);
         }
-        // 3. 大幅推进虚拟时钟：唤醒卡在 sleep_until 的恢复 timer 线程
+        // 4. 大幅推进虚拟时钟：唤醒卡在 sleep_until 的恢复 timer 线程
         self.clock.advance_ms(1 << 40);
     }
 }
