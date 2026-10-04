@@ -296,7 +296,9 @@ fn run(client: &MaestroClient, data_dir: Option<&str>, cmd: Cmd) -> Result<(), S
                     } else {
                         println!("{}", serde_json::to_string(&env).unwrap());
                     }
-                    follow
+                    // 流的边界由 daemon 决定（非 follow 重放完即关连接），
+                    // 这里恒 true —— 客户端不提前断流
+                    true
                 })
                 .map_err(|e| e.to_string())?;
         }
@@ -361,6 +363,12 @@ fn fmt_event_human(env: &maestro_protocol::events::Envelope) -> String {
             format!("⚑ {task} 轮数预算耗尽（{rounds} 轮）——maestro task resume 续跑")
         }
         Event::Suspended { task, reason, .. } => format!("{task} 挂起（{}）", reason_str(reason)),
+        Event::AcceptanceGatePassed { task, round, output } => {
+            format!("✓ {task} 验收通过（轮 {round}）：{output}")
+        }
+        Event::AcceptanceGateFailed { task, failures, output, .. } => {
+            format!("⚑ {task} 验收失败（{failures}/3 次假完成）：{output}")
+        }
         Event::TaskCompleted { task, summary, .. } => format!("✓ {task} 完成：{summary}"),
         Event::TaskFailed { task, error, .. } => format!("✗ {task} 失败：{error}"),
         Event::SteeringQueued { task, .. } => format!("{task} 轻推入队（下一轮生效）"),

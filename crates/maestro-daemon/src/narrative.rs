@@ -60,6 +60,24 @@ pub fn progress_line(v: &TaskVitals) -> String {
     line
 }
 
+/// 带任务状态的进度叙事（R58）：单发 worker（无轮账）的任务终态后，
+/// 「尚未开始」语义错误 —— 按实际状态给终态叙事。
+pub fn progress_line_with_state(
+    v: &TaskVitals,
+    state: &maestro_protocol::types::WorkerState,
+) -> String {
+    if v.rounds == 0 {
+        use maestro_protocol::types::WorkerState;
+        return match state {
+            WorkerState::Done => "已完成（单发 worker，无轮账）".into(),
+            WorkerState::Failed | WorkerState::Cancelled => "已结束（无轮账）".into(),
+            WorkerState::Blocked => "阻塞中（无轮账）".into(),
+            _ => "尚未开始（无轮账）".into(),
+        };
+    }
+    progress_line(v)
+}
+
 fn fmt_duration(ms: u64) -> String {
     let secs = ms / 1000;
     if secs >= 60 {
@@ -76,6 +94,40 @@ mod tests {
     #[test]
     fn empty_vitals() {
         assert_eq!(progress_line(&TaskVitals::default()), "尚未开始（无轮账）");
+    }
+
+    /// R58：无轮账的终态任务不再误报「尚未开始」
+    #[test]
+    fn terminal_state_without_rounds() {
+        use maestro_protocol::types::WorkerState;
+        let v = TaskVitals::default();
+        assert_eq!(
+            progress_line_with_state(&v, &WorkerState::Done),
+            "已完成（单发 worker，无轮账）"
+        );
+        assert_eq!(
+            progress_line_with_state(&v, &WorkerState::Failed),
+            "已结束（无轮账）"
+        );
+        assert_eq!(
+            progress_line_with_state(&v, &WorkerState::Blocked),
+            "阻塞中（无轮账）"
+        );
+        // 非终态（排队/进行中）保持原叙事
+        assert_eq!(
+            progress_line_with_state(&v, &WorkerState::Queued),
+            "尚未开始（无轮账）"
+        );
+        // 有轮账时与 progress_line 一致
+        let full = TaskVitals {
+            rounds: 2,
+            wall_ms: 4_000,
+            ..Default::default()
+        };
+        assert_eq!(
+            progress_line_with_state(&full, &WorkerState::Done),
+            progress_line(&full)
+        );
     }
 
     #[test]

@@ -342,7 +342,7 @@ impl Core {
                             "title": t.task.title,
                             "state": t.state,
                             "round": t.round,
-                            "narrative": crate::narrative::progress_line(&vitals),
+                            "narrative": crate::narrative::progress_line_with_state(&vitals, &t.state),
                             "blocked_kind": t.blocked_kind,
                             "suspend_reason": t.suspend.as_ref().map(|s| s.reason),
                             "acceptance_failures": t.acceptance_failures,
@@ -370,7 +370,7 @@ impl Core {
                                 "suspend_reason": t.suspend.as_ref().map(|s| s.reason),
                                 "blocked_kind": t.blocked_kind,
                                 "acceptance_failures": t.acceptance_failures,
-                                "narrative": crate::narrative::progress_line(&vitals),
+                                "narrative": crate::narrative::progress_line_with_state(&vitals, &t.state),
                             }),
                         )
                     }

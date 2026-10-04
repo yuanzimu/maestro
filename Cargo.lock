@@ -541,7 +541,7 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "maestro-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -555,7 +555,7 @@ dependencies = [
 
 [[package]]
 name = "maestro-client"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "maestro-protocol",
  "serde",
@@ -565,7 +565,7 @@ dependencies = [
 
 [[package]]
 name = "maestro-daemon"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -585,7 +585,7 @@ dependencies = [
 
 [[package]]
 name = "maestro-e2e"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "maestro-client",
  "maestro-daemon",
@@ -598,7 +598,7 @@ dependencies = [
 
 [[package]]
 name = "maestro-protocol"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "schemars",
  "serde",
@@ -608,7 +608,7 @@ dependencies = [
 
 [[package]]
 name = "maestro-testkit"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "maestro-protocol",
  "nix",

@@ -147,16 +147,19 @@ impl Authority {
                 if let Some(t) = self.tasks.get_mut(task) {
                     t.state = WorkerState::Done;
                 }
+                self.finish_worker_of(task, WorkerState::Done);
             }
             TaskFailed { task, .. } => {
                 if let Some(t) = self.tasks.get_mut(task) {
                     t.state = WorkerState::Failed;
                 }
+                self.finish_worker_of(task, WorkerState::Failed);
             }
             TaskCancelled { task, .. } => {
                 if let Some(t) = self.tasks.get_mut(task) {
                     t.state = WorkerState::Cancelled;
                 }
+                self.finish_worker_of(task, WorkerState::Cancelled);
             }
             TaskRequeued { task, .. } => {
                 if let Some(t) = self.tasks.get_mut(task) {
@@ -221,12 +224,14 @@ impl Authority {
                     t.blocked_kind = Some(BlockedKind::Infra);
                     t.suspend = None;
                 }
+                self.finish_worker_of(task, WorkerState::Blocked);
             }
             RoundsExhausted { task, .. } => {
                 if let Some(t) = self.tasks.get_mut(task) {
                     t.state = WorkerState::Blocked;
                     t.blocked_kind = Some(BlockedKind::RoundsExhausted);
                 }
+                self.finish_worker_of(task, WorkerState::Blocked);
             }
             AcceptanceGateFailed { task, failures, .. } => {
                 if let Some(t) = self.tasks.get_mut(task) {
@@ -234,6 +239,7 @@ impl Authority {
                     if *failures >= 3 {
                         t.state = WorkerState::Blocked;
                         t.blocked_kind = Some(BlockedKind::AcceptanceFailed);
+                        self.finish_worker_of(task, WorkerState::Blocked);
                     }
                 }
             }
@@ -271,6 +277,17 @@ impl Authority {
 
     pub fn get(&self, id: &TaskId) -> Option<&TaskRecord> {
         self.tasks.get(id)
+    }
+
+    /// 任务进入终态/阻塞时，同步其 worker 记录状态（workers 视图与 tasks 一致）。
+    /// R58 修复：此前 exit-0 成功路径只更新 task，worker 永远停在 working。
+    fn finish_worker_of(&mut self, task: &TaskId, state: WorkerState) {
+        let wid = self.tasks.get(task).and_then(|t| t.worker.clone());
+        if let Some(wid) = wid {
+            if let Some(w) = self.workers.get_mut(&wid) {
+                w.state = state;
+            }
+        }
     }
 
     /// 挂起中的自动恢复任务清单（恢复调度器扫描用）
@@ -471,6 +488,67 @@ mod tests {
         let cands = a.auto_resume_candidates();
         assert_eq!(cands.len(), 1, "只有 NetworkLost 是 auto 候选");
         assert_eq!(cands[0].0, TaskId::new("t1"));
+    }
+
+    /// R58 回归：任务终态时 worker 记录状态同步（此前 exit-0 成功后 worker 永远 working）
+    #[test]
+    fn task_terminal_state_syncs_worker_record() {
+        let mk = |a: &mut Authority| {
+            a.apply(
+                &Event::TaskCreated {
+                    task: task("t1"),
+                    prompt: "p".into(),
+                },
+                0,
+            );
+            a.apply(
+                &Event::WorkerSpawned {
+                    worker: WorkerId::new("w1"),
+                    task: TaskId::new("t1"),
+                    pid: 4242,
+                    pgid: 4242,
+                },
+                0,
+            );
+        };
+        // 完成 → worker done
+        let mut a = Authority::new();
+        mk(&mut a);
+        a.apply(
+            &Event::TaskCompleted {
+                task: TaskId::new("t1"),
+                worker: WorkerId::new("w1"),
+                summary: "s".into(),
+            },
+            0,
+        );
+        assert_eq!(a.workers[&WorkerId::new("w1")].state, WorkerState::Done);
+        // 失败 → worker failed
+        let mut a = Authority::new();
+        mk(&mut a);
+        a.apply(
+            &Event::TaskFailed {
+                task: TaskId::new("t1"),
+                worker: WorkerId::new("w1"),
+                error: "e".into(),
+            },
+            0,
+        );
+        assert_eq!(a.workers[&WorkerId::new("w1")].state, WorkerState::Failed);
+        // 取消 → worker cancelled
+        let mut a = Authority::new();
+        mk(&mut a);
+        a.apply(
+            &Event::TaskCancelled {
+                task: TaskId::new("t1"),
+                worker: WorkerId::new("w1"),
+            },
+            0,
+        );
+        assert_eq!(
+            a.workers[&WorkerId::new("w1")].state,
+            WorkerState::Cancelled
+        );
     }
 
     /// 验收三次失败 → blocked(AcceptanceFailed)（Goal 3 轮语义的一部分）

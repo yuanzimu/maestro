@@ -1034,7 +1034,8 @@ fn task_get_narrative_line() {
     let d = TestDaemon::start(&rb, &["--", cli.to_str().unwrap()]);
 
     // 零轮任务（确定性）：坏schema 首轮即 exit 3 → TaskFailed，无任何
-    // RoundProgress → 降级模板空态分支。用独立 workdir 避开 R13 workdir 互斥
+    // RoundProgress → 降级模板空态分支（R58：终态给终态叙事，不再误报「尚未开始」）。
+    // 用独立 workdir 避开 R13 workdir 互斥
     let idle_work = tmp.path().join("idle-work");
     std::fs::create_dir_all(&idle_work).unwrap();
     let t0 = d.create_task_with_prompt("narrative-idle", "坏schema", &idle_work);
@@ -1047,7 +1048,7 @@ fn task_get_narrative_line() {
         Method::TaskGet,
         serde_json::json!({ "task": t0.as_str() }),
     );
-    assert_eq!(v0["narrative"].as_str().unwrap(), "尚未开始（无轮账）");
+    assert_eq!(v0["narrative"].as_str().unwrap(), "已结束（无轮账）");
 
     // 多轮任务：注入「结束」快速收敛 → narrative 聚合轮数/工具/成本/摘要
     let t = d.create_task("narrative", &work);

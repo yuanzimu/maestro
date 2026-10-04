@@ -241,7 +241,7 @@ fn events_replay_without_follow_returns() {
         })
         .expect("subscribe 应正常返回");
     assert!(start.elapsed() < std::time::Duration::from_secs(5), "非 follow 不应阻塞");
-    assert!(count >= 1, "重放应至少含 1 个事件（TaskCreated），实际 {count}");
+    assert!(count >= 2, "重放应完整（task_created + worker_spawned 至少 2 条），实际 {count}");
 }
 
 /// stale socket 清理：假 socket 文件不阻碍新 daemon 起服务
