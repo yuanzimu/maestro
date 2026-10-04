@@ -67,19 +67,19 @@ S7a [✓]  S7b [分叉/串行/报错]  S7c [✓/✗]
 
 S0→S1→S3→S7c 先跑（Block 项里最快证伪的组合，约 20 分钟）——任何一个 ✗ 就提前止损，不用跑完 S5/S6。
 
-## 七、实施状态（R23~R32 落地实况，2026-10-04）
+## 七、实施状态（R23~R37 落地实况，2026-10-04）
 
-多轮驱动已从「待验证命题」变为**已落地机制**。真实 CLI 的 S 场景验证仍待 API key，但机制层以 mock CLI 全量覆盖（e2e 51 项中的 15 项专测本协议）。
+多轮驱动已从「待验证命题」变为**已落地机制**。真实 CLI 的 S 场景验证仍待 API key，但机制层以 mock CLI 全量覆盖（e2e 57 项中 21 项专测本协议：r3_protocol 8 + multiround 13）。
 
 ### 7.1 机制层落地物
 
 | 落地物 | 位置 | 说明 |
 |---|---|---|
-| **maestro-rounder 二进制** | `crates/maestro-daemon/src/bin/rounder.rs` | 轮循环：每轮调底层 CLI 单轮 + `--resume` 续接；session 持久化于 `<cwd>/.maestro/<task_id>/session`（R36 按任务隔离——同 workdir 串行任务不共享会话）；轮账 `.maestro/<task_id>/rounds.jsonl`；完成信号 `MAESTRO_DONE`；`MAESTRO_MAX_ROUNDS`（默认 20）防失控；`MAESTRO_ROUND_GAP_MS`（默认 1000）防秒回型 CLI 热循环 |
-| **adapter 三件套** | `crates/maestro-daemon/src/adapter.rs` | `parse_stream_json` → RoundOutcome（session_id/usage 三桶/工具/结构化错误）；`classify_exit` → ExitClass（**Disconnect≠failed**，认证/配额 Fatal 优先，未知默认 Fatal）；`Dialect` trait（claude 默认，`MAESTRO_CLI_DIALECT` 可插拔，B7 Codex/Gemini 预留） |
-| **轮间投递 API** | `crates/maestro-protocol/src/api.rs` | `TaskSteerPoll`（活 worker 轮边界拉取，仅当前 worker）· `TaskSteerAck`（消费确认，R32）· `TaskRoundReport`（轮账上报：usage 三桶/model/工具/摘要）· `TaskLedger`（查询） |
+| **maestro-rounder 二进制** | `crates/maestro-daemon/src/bin/rounder.rs` | 轮循环：每轮调底层 CLI 单轮 + `--resume` 续接；session 持久化于 `<cwd>/.maestro/<task_id>/session`（R36 按任务隔离——同 workdir 串行任务不共享会话）；轮账 `.maestro/<task_id>/rounds.jsonl`；完成信号 `MAESTRO_DONE`；`MAESTRO_MAX_ROUNDS`（默认 20）防失控；`MAESTRO_ROUND_GAP_MS`（默认 1000）防秒回型 CLI 热循环；**上下文轮转（R37）**：占用 ≥ `MAESTRO_CONTEXT_LIMIT`（默认 200k）→ 注入 `/compact` 指令轮（§7.5），压缩轮防抖跳检，prompt 优先级轻推 > 压缩 > 继续 |
+| **adapter 三件套** | `crates/maestro-daemon/src/adapter.rs` | `parse_stream_json` → RoundOutcome（session_id/usage 三桶/工具/结构化错误/total_cost_usd/event_types 签名）；`classify_exit` → ExitClass（**Disconnect≠failed**，认证/配额 Fatal 优先，未知默认 Fatal）；`schema_drift`（R35：三要素 feature-detect）；`Dialect` trait（claude 默认，`MAESTRO_CLI_DIALECT` 可插拔，B7 Codex/Gemini 预留） |
+| **轮间投递 API** | `crates/maestro-protocol/src/api.rs` | `TaskSteerPoll`（活 worker 轮边界拉取，仅当前 worker）· `TaskSteerAck`（消费确认，R32）· `TaskRoundReport`（轮账上报：usage 三桶/model/工具/摘要/total_cost_usd/compacted）· `TaskLedger`（查询） |
 | **steering at-least-once** | `crates/maestro-daemon/src/steering.rs` | poll 取走进 inflight（未确认重投）、ack 消费确认、inflight 持久化跨重启、respawn 时 `take_all` 前置拼入 prompt、终态 `SteeringDropped` 不静默 |
-| **计价闭环** | `crates/maestro-daemon/src/llm.rs` | 三桶互斥计价（input/cache_read/cache_creation）；Anthropic 写 cache 1.25x、OpenAI = 输入价；counterfactual = 同内容冷跑全价（U8 省钱口径） |
+| **计价闭环** | `crates/maestro-daemon/src/llm.rs` | 三桶互斥计价（input/cache_read/cache_creation）；Anthropic 写 cache 1.25x、OpenAI = 输入价；counterfactual = 同内容冷跑全价（U8 省钱口径）；**费用对账（R34）**：CLI 自报 total_cost_usd vs 牌价计费，漂移 >25% → CostDrift(Warning) 事件，入账以 daemon 计费为准 |
 
 ### 7.2 场景矩阵 → e2e 映射
 
@@ -96,7 +96,7 @@ S0→S1→S3→S7c 先跑（Block 项里最快证伪的组合，约 20 分钟）
 
 ### 7.3 混沌补强（超出原协议的 e2e）
 
-multiround.rs 另有：断连自动恢复（MockClock 推退避）、双任务并发、假完成三振出局（acceptance）、结构化过载（api_error_status 529）→ Suspended、at-least-once 重投/过期 ack -403/清空收敛、终态轻推 Dropped 不静默。
+multiround.rs 混沌①~⑪：stale worker 双防护 -403、终态轻推 Dropped 不静默、断连自动恢复（MockClock 推退避）、双任务并发、假完成三振出局（acceptance）、结构化过载（api_error_status 529）→ Suspended、at-least-once 重投/过期 ack -403/清空收敛、费用对账（自洽静默/虚报 CostDrift 98% 漂移/入账不受影响）、坏 schema → exit 3 带人话诊断 → Failed、**同 workdir 跨任务会话隔离**（R36：B 不得召回 A 的上下文）、**上下文轮转全链**（R37：膨胀→600 阈触发压缩→回落→同 session 继续→ContextCompacted 事件）。
 
 ### 7.4 待真实 CLI 验证清单（拿到 API key 后）
 
