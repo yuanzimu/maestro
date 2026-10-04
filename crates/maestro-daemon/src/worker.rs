@@ -473,9 +473,12 @@ pub fn scan_pidfiles(dir: &Path) -> Vec<PidFile> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::sync::mpsc;
+    #[cfg(unix)]
     use std::time::Duration;
 
+    #[cfg(unix)]
     fn spec(program: &str, args: &[&str], tmp: &Path) -> SpawnSpec {
         SpawnSpec {
             worker: WorkerId::new("w-test"),

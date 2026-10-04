@@ -92,7 +92,9 @@ pub fn reap_orphans(workers_dir: &Path) -> ReapReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::worker::{spawn_worker, PidFile, SpawnSpec};
+    use crate::worker::PidFile;
+    #[cfg(unix)]
+    use crate::worker::{spawn_worker, SpawnSpec};
     use maestro_protocol::types::{TaskId, WorkerId};
 
     fn reap_dir() -> tempfile::TempDir {

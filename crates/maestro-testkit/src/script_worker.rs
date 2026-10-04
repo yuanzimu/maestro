@@ -243,10 +243,12 @@ mod tests {
     fn proc_state_parses() {
         let me = std::process::id();
         let st = proc_state(me).expect("读自己");
-        // 首字母匹配：macOS BSD ps 的 stat 带后缀（"S+"/"R+" 等）
+        // 首字母匹配：macOS BSD ps 的 stat 带后缀（"S+"/"U<" 等）。
+        // CI 实测：macOS runner 上测试进程可瞬时处于 U（不可中断等待）——
+        // 断言"活着可读"而非具体状态
         assert!(
-            st.starts_with('R') || st.starts_with('S'),
-            "状态应为 R/S，实际 {st}"
+            st.starts_with('R') || st.starts_with('S') || st.starts_with('U'),
+            "状态应为 R/S/U，实际 {st}"
         );
     }
 
