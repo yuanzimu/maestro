@@ -265,6 +265,7 @@ case "$PROMPT" in
      echo "{{\"prefix\":\"$P\"}}" >> "$CTX"
      ANSWER="已记录前缀 $P";;
   *网络故障*) echo "Error: connection reset by peer" >&2; exit 1;;
+  *无产物模拟*) ANSWER="MAESTRO_DONE"; SKIP_ARTIFACT=1;;
   *结束*) ANSWER="MAESTRO_DONE";;
   *SELF_DESTRUCT*)
      echo '{{"crashed":true}}' >> "$CTX"
@@ -277,8 +278,9 @@ esac
 P=$(prefix)
 if [ -n "$P" ] && [ "$ANSWER" != "已记录前缀 $P" ]; then ANSWER="$P $ANSWER"; fi
 
-# 产物落盘（daemon 验收门读回校验用；对 R3 harness 测试无影响）
-echo "$ANSWER" >> out.txt
+# 产物落盘（daemon 验收门读回校验用；对 R3 harness 测试无影响；
+# 无产物模拟模式跳过 —— 验收门 3 振出局测试用）
+if [ -z "${{SKIP_ARTIFACT:-}}" ]; then echo "$ANSWER" >> out.txt; fi
 
 # usage：平台型（常量 in + cache 命中）；MOCK_REPLAY=1 时线性重放
 LINES=$(wc -l < "$CTX")

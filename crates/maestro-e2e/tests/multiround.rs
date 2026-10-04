@@ -380,3 +380,49 @@ fn two_concurrent_multiround_tasks() {
         assert!(v["rounds"].as_u64().unwrap() >= 1, "ledger: {v}");
     }
 }
+
+/// 混沌⑤：多轮任务的验收门 3 振出局 —— DONE 信号但无产物 → 反思回喂 →
+/// respawn 续跑仍假完成 → blocked(AcceptanceFailed)。验证多轮模式的
+/// 假完成检测闭环（.maestro/ 状态目录不算产物，门不误判）
+#[test]
+#[serial]
+fn multiround_fake_completion_three_strikes() {
+    let (_repo, work) = git_repo();
+    let mock_tmp = tempfile::tempdir().unwrap();
+    let cli = mock_tmp.path().join("mock-claude");
+    write_mock_cli(&cli, &mock_tmp.path().join("state"));
+    let d = TestDaemon::start(&rounder_bin(), &["--", cli.to_str().unwrap()]);
+    // prompt 含「无产物模拟」→ 每次 respawn 的第 1 轮即 DONE 且跳过产物落盘
+    let v = d.api(
+        Method::TaskCreate,
+        serde_json::json!({
+            "title": "mr-fake",
+            "prompt": "无产物模拟：完成但无产物",
+            "workdir": work.display().to_string()
+        }),
+    );
+    let t = TaskId::new(v["task"]["id"].as_str().unwrap().to_string());
+    assert!(
+        d.wait_state(&t, WorkerState::Blocked, 15000),
+        "3 次假完成应 blocked，实际: {:?}",
+        d.task_state(&t)
+    );
+    let g = d.api(Method::TaskGet, serde_json::json!({ "task": t.as_str() }));
+    assert_eq!(g["blocked_kind"], "acceptance_failed", "{g}");
+    assert_eq!(g["acceptance_failures"], 3, "{g}");
+
+    // .maestro 状态目录不算产物：session/轮账存在但门不误判
+    assert!(work.join(".maestro/session").exists());
+    assert!(work.join(".maestro/rounds.jsonl").exists());
+
+    // 轮账：3 次 respawn 各 1 轮（假完成轮也计量 token —— 钱真花了）
+    let l = d.api(
+        Method::TaskLedger,
+        serde_json::json!({ "task": t.as_str() }),
+    );
+    assert_eq!(
+        l["ledger_entries"].as_u64().unwrap(),
+        3,
+        "3 次假完成各应入账一轮: {l}"
+    );
+}
