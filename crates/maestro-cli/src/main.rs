@@ -37,7 +37,7 @@ enum Cmd {
         #[arg(long, default_value = "flush")]
         steering: String,
     },
-    /// 事件流（--follow 持续）
+    /// 事件流（--follow 持续；--human 可读渲染）
     Events {
         /// 从哪个 seq 开始
         #[arg(long, default_value_t = 0)]
@@ -45,6 +45,9 @@ enum Cmd {
         /// 持续跟随
         #[arg(short, long)]
         follow: bool,
+        /// 人类可读渲染（默认输出原始 JSON，面向管道/jq）
+        #[arg(long)]
+        human: bool,
     },
     /// 自检：daemon/socket/版本/环境
     Doctor,
@@ -258,10 +261,18 @@ fn run(client: &MaestroClient, cmd: Cmd) -> Result<(), String> {
                 .map_err(fmt_err)?;
             println!("{}", serde_json::to_string_pretty(&v).unwrap());
         }
-        Cmd::Events { from, follow } => {
+        Cmd::Events {
+            from,
+            follow,
+            human,
+        } => {
             client
                 .subscribe(from, |env| {
-                    println!("{}", serde_json::to_string(&env).unwrap());
+                    if human {
+                        println!("{}", fmt_event_human(&env));
+                    } else {
+                        println!("{}", serde_json::to_string(&env).unwrap());
+                    }
                     follow
                 })
                 .map_err(|e| e.to_string())?;
@@ -278,6 +289,58 @@ fn run(client: &MaestroClient, cmd: Cmd) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 // 展示层（纯函数，可单测）
 // ---------------------------------------------------------------------------
+
+/// 事件 → 人类可读一行（`maestro events --human`；B1 叙事的 CLI 前菜）。
+/// 未知事件 fallback 原始 JSON（前向兼容：daemon 新增事件不破渲染）
+fn fmt_event_human(env: &maestro_protocol::events::Envelope) -> String {
+    use maestro_protocol::events::Event;
+    let ts = env.ts / 1000; // 秒
+    let reason_str = |r: &maestro_protocol::types::SuspendReason| {
+        serde_json::to_value(r)
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_else(|| format!("{r:?}"))
+    };
+    let body = match &env.event {
+        Event::TaskCreated { task, .. } => format!("{} 「{}」 建立", task.id, task.title),
+        Event::WorkerSpawned { task, worker, .. } => format!("{task} → worker {worker}"),
+        Event::RoundProgress {
+            task,
+            round,
+            tools_used,
+            summary,
+            ..
+        } => format!("{task} 轮 {round} · [{}] {summary}", tools_used.join(",")),
+        Event::LedgerEntry { task, usage, .. } => format!(
+            "{task} 入账 {} in / {} out",
+            usage.input_tokens, usage.output_tokens
+        ),
+        Event::CostDrift {
+            task,
+            ledger_cents,
+            cli_cents,
+            ..
+        } => format!("⚠ {task} 费用对账漂移：账本 {ledger_cents}¢ vs CLI 自报 {cli_cents}¢"),
+        Event::ContextCompacted { task, round } => {
+            format!("{task} 上下文已压缩（轮 {round}），任务继续")
+        }
+        Event::RoundsExhausted { task, rounds, .. } => {
+            format!("⚑ {task} 轮数预算耗尽（{rounds} 轮）——maestro task resume 续跑")
+        }
+        Event::Suspended { task, reason, .. } => format!("{task} 挂起（{}）", reason_str(reason)),
+        Event::TaskCompleted { task, summary, .. } => format!("✓ {task} 完成：{summary}"),
+        Event::TaskFailed { task, error, .. } => format!("✗ {task} 失败：{error}"),
+        Event::SteeringQueued { task, .. } => format!("{task} 轻推入队（下一轮生效）"),
+        Event::SteeringDropped { task, .. } => format!("{task} 轻推丢弃（任务已终态，不静默）"),
+        _ => {
+            return format!(
+                "[{ts}] {}",
+                serde_json::to_string(&env.event).unwrap_or_default()
+            )
+        }
+    };
+    format!("[{ts}] {body}")
+}
 
 /// task.create 响应 → 友好输出
 fn fmt_create(v: &Value) -> String {
@@ -505,6 +568,58 @@ mod tests {
         assert!(s.contains("maestro task resume t-10"), "{s}");
         assert!(s.contains("maestro task cancel t-10"), "{s}");
         assert!(fmt_inbox(&serde_json::json!({ "items": [] })).contains("空的"));
+    }
+
+    /// events --human：核心事件渲染 + 未知事件前向兼容（R45）
+    #[test]
+    fn event_human_rendering() {
+        use maestro_protocol::events::{Envelope, Event};
+        use maestro_protocol::types::*;
+        let mk = |event: Event| Envelope {
+            seq: 1,
+            ts: 1_700_000_000,
+            priority: Priority::Info,
+            event,
+        };
+        let s = fmt_event_human(&mk(Event::RoundProgress {
+            task: TaskId::new("t-1"),
+            round: 3,
+            tools_used: vec!["Read".into(), "Bash".into()],
+            summary: "读文件".into(),
+            tokens_in: 100,
+            tokens_out: 20,
+        }));
+        assert!(s.contains("t-1 轮 3"), "{s}");
+        assert!(s.contains("[Read,Bash]"), "{s}");
+        let s = fmt_event_human(&mk(Event::CostDrift {
+            task: TaskId::new("t-1"),
+            round: 3,
+            model: "m".into(),
+            ledger_cents: 1,
+            cli_cents: 50,
+        }));
+        assert!(s.contains("账本 1¢ vs CLI 自报 50¢"), "{s}");
+        let s = fmt_event_human(&mk(Event::RoundsExhausted {
+            task: TaskId::new("t-1"),
+            worker: WorkerId::new("w-1"),
+            rounds: 20,
+        }));
+        assert!(s.contains("⚑ t-1 轮数预算耗尽（20 轮）"), "{s}");
+        let s = fmt_event_human(&mk(Event::Suspended {
+            task: TaskId::new("t-1"),
+            worker: WorkerId::new("w-1"),
+            reason: SuspendReason::NetworkLost,
+            session_ref: SessionRef::new(""),
+            checkpoint_ref: CheckpointRef::new(""),
+            round: 1,
+        }));
+        assert!(s.contains("挂起（network_lost）"), "{s}");
+        // 未知事件：fallback 原始 JSON（daemon 新事件不破渲染）
+        let s = fmt_event_human(&mk(Event::TaskStarted {
+            task: TaskId::new("t-1"),
+            worker: WorkerId::new("w-1"),
+        }));
+        assert!(s.contains("task_started"), "{s}");
     }
 
     #[test]
