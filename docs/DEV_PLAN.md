@@ -290,7 +290,7 @@ P2：U4 完整版（需内置 Executor D2）· U6 v2 检讨（需失败事件库
 | ✅ | 0.10 验收门 v0 | 读回校验（SipHash 内容指纹，修同长碰撞）+ 3 振出局 blocked(AcceptanceFailed) + TaskRequeued 重试路径 + **失败差异反思回喂**（aider 模式，steering 注入） |
 | ✅ | 0.12 持久化 | SQLite WAL 事件溯源 + kill -9 重放恢复 + 恢复时自动重排退避调度（R11 审计补的缺口） |
 | ✅ | 0.13 CLI | status/task/worker/inbox/stop/resume/events/doctor/shutdown + 表格化列表 + 收件箱行动建议（R19） |
-| 🔶 | 0.14 LLM client | 骨架完成：OpenAI 兼容（ureq 阻塞式）+ 牌价表 + 微美分计价 + UsageEntry 口径；T1/U3/U8 消费方在 P1 接入 |
+| ✅ | 0.14 LLM client | OpenAI 兼容（ureq 阻塞式）+ 牌价表（含 cache 读价，R24 修 haiku 输出价 40→400）+ **cache 感知计价闭环**（rounder 轮账 → priced_usage_entry → actual/counterfactual cents）；T1/U3/U8 消费方在 P1 接入 |
 | ✅ | 0.15 多轮驱动 | **R23 机制层完成**：maestro-rounder 二进制（轮循环 + `--resume` 续接 + session 持久化 + DONE 信号 + 轮间隔防热循环）+ TaskSteerPoll 轮间投递（仅当前 worker 可拉）+ **TaskRoundReport 轮账入账**（usage→LedgerEntry，token 计量闭环）+ 2 e2e（U4 轻推改下一轮输出 / kill -9 跨实例续接 session）；**真实 claude CLI 验证待 API key** |
 | ✅ | 0.16 steering 队列 | jsonl 持久化 + flush/hold + kill -9 不丢 + 重试轮回喂投递；**R23 投递语义修正**：活 worker 留队轮边界 poll 取走、respawn 路径前置注入 prompt（真投递）、终态 SteeringDropped 不静默 |
 | ✅ | 0.17 suspended 状态机 | 七值枚举 + 自动恢复矩阵（30s→5m 退避，10 次升 blocked）+ 孤儿清理（绝不收养） |

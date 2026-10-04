@@ -50,6 +50,9 @@ pub struct CoreConfig {
     /// 最大并行 worker 数（槽位上限；超出入队）。
     /// 槽位语义：活 worker（含 SIGSTOP 挂起中的）各占 1。
     pub max_parallel_workers: usize,
+    /// 计价默认模型（轮账上报未带 model 时用；MAESTRO_MODEL 可覆盖。
+    /// 0.6 适配器 / 0.8 路由接管前的占位）
+    pub default_model: String,
 }
 
 /// 默认槽位数：本地守护进程的保守起点（调研 R12 校准项）
@@ -57,6 +60,9 @@ pub const DEFAULT_MAX_PARALLEL_WORKERS: usize = 4;
 
 /// 排队深度上限（R12 调研：溢出全排队不拒绝，但要有防风暴闸）
 pub const MAX_QUEUE_DEPTH: usize = 100;
+
+/// 默认计价模型（与真实 claude CLI 默认档对齐）
+pub const DEFAULT_MODEL: &str = "claude-sonnet-4";
 
 impl Default for CoreConfig {
     fn default() -> Self {
@@ -67,6 +73,7 @@ impl Default for CoreConfig {
             worker_args: vec!["-c".into(), "echo '(maestro placeholder worker)'".into()],
             socket_path: "/tmp/maestro.sock".into(),
             max_parallel_workers: DEFAULT_MAX_PARALLEL_WORKERS,
+            default_model: std::env::var("MAESTRO_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into()),
         }
     }
 }
@@ -663,8 +670,9 @@ impl Core {
         self.ok(req, serde_json::json!({ "messages": out }))
     }
 
-    /// 轮账上报（rounder 每轮）：usage → LedgerEntry 事件（token 计量闭环）。
-    /// 仅当前 worker 可报（防过期驱动进程灌账）。
+    /// 轮账上报（rounder 每轮）：usage → 牌价计价 → LedgerEntry 事件
+    /// （token 计量 + 成本闭环，R24）。仅当前 worker 可报（防过期驱动进程灌账）。
+    /// 模型不在牌价表 → 条目仍入账但 cents 留空（不阻塞计量）。
     fn api_round_report(&mut self, req: &Request, params: &TaskRoundReportParams) -> Response {
         let Some(t) = self.ctx.authority.get(&params.task).cloned() else {
             return self.err(req, -404, "task not found");
@@ -672,18 +680,30 @@ impl Core {
         if t.worker.as_ref() != Some(&params.worker) {
             return self.err(req, -403, "not the current worker");
         }
+        let model = params
+            .model
+            .clone()
+            .unwrap_or_else(|| self.cfg.default_model.clone());
+        let usage = crate::llm::priced_usage_entry(
+            &model,
+            params.input_tokens,
+            params.output_tokens,
+            params.cache_read_tokens,
+            "round",
+        )
+        .unwrap_or(UsageEntry {
+            input_tokens: params.input_tokens,
+            output_tokens: params.output_tokens,
+            cache_read_tokens: params.cache_read_tokens,
+            path: Some("round".into()),
+            discount: None,
+            counterfactual_cost_cents: None,
+            actual_cost_cents: None,
+        });
         self.ctx.publish(Event::LedgerEntry {
             task: params.task.clone(),
             worker: Some(params.worker.clone()),
-            usage: UsageEntry {
-                input_tokens: params.input_tokens,
-                output_tokens: params.output_tokens,
-                cache_read_tokens: params.cache_read_tokens,
-                path: None,
-                discount: None,
-                counterfactual_cost_cents: None,
-                actual_cost_cents: None,
-            },
+            usage,
         });
         self.ok(
             req,

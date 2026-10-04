@@ -106,7 +106,7 @@ fn main() {
             eprint!("{}", String::from_utf8_lossy(&out.stderr));
             std::process::exit(out.status.code().unwrap_or(1));
         }
-        let (sid, answer, usage_in, usage_out, cache_read) = parse_stream(&out.stdout);
+        let (sid, answer, usage_in, usage_out, cache_read, model) = parse_stream(&out.stdout);
         let Some(sid) = sid else {
             eprintln!("maestro-rounder: stream-json 缺 session_id");
             std::process::exit(3);
@@ -145,6 +145,7 @@ fn main() {
                 "task": task, "worker": worker, "round": round,
                 "input_tokens": usage_in, "output_tokens": usage_out,
                 "cache_read_tokens": cache_read,
+                "model": model,
             }),
         );
 
@@ -187,10 +188,20 @@ fn poll_steering(client: &MaestroClient, task: &str, worker: &str) -> Vec<String
     }
 }
 
-/// stream-json 解析（system.session_id + result.result + usage）
-fn parse_stream(stdout: &[u8]) -> (Option<String>, String, u64, u64, Option<u64>) {
+/// stream-json 解析（system.session_id + result.result + usage + model）
+fn parse_stream(
+    stdout: &[u8],
+) -> (
+    Option<String>,
+    String,
+    u64,
+    u64,
+    Option<u64>,
+    Option<String>,
+) {
     let mut sid = None;
     let mut answer = String::new();
+    let mut model = None;
     let (mut usage_in, mut usage_out, mut cache_read) = (0, 0, None);
     for line in stdout.lines().map_while(Result::ok) {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
@@ -209,9 +220,12 @@ fn parse_stream(stdout: &[u8]) -> (Option<String>, String, u64, u64, Option<u64>
                 usage_in = v["usage"]["input_tokens"].as_u64().unwrap_or(0);
                 usage_out = v["usage"]["output_tokens"].as_u64().unwrap_or(0);
                 cache_read = v["usage"]["cache_read_input_tokens"].as_u64();
+                if let Some(m) = v["model"].as_str() {
+                    model = Some(m.to_string());
+                }
             }
             _ => {}
         }
     }
-    (sid, answer, usage_in, usage_out, cache_read)
+    (sid, answer, usage_in, usage_out, cache_read, model)
 }

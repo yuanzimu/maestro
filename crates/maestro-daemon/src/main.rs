@@ -31,6 +31,8 @@ fn main() -> anyhow::Result<()> {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(maestro_daemon::core::DEFAULT_MAX_PARALLEL_WORKERS),
+        default_model: std::env::var("MAESTRO_MODEL")
+            .unwrap_or_else(|_| maestro_daemon::core::DEFAULT_MODEL.into()),
     };
 
     let clock = Arc::new(maestro_protocol::SystemClock);

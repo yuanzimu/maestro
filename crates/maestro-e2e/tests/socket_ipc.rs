@@ -16,6 +16,7 @@ fn spawn_socket_daemon(data_dir: &std::path::Path) -> (Arc<Mutex<Core>>, IpcPath
         worker_args: vec!["-c".into(), "sleep 300".into()],
         socket_path: data_dir.join("maestro.api.sock").display().to_string(),
         max_parallel_workers: 4,
+        default_model: "claude-sonnet-4".into(),
     };
     let (core, _) = Core::recover(cfg, Arc::new(maestro_protocol::SystemClock));
     let core = Arc::new(Mutex::new(core));

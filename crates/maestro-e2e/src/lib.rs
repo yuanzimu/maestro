@@ -65,6 +65,7 @@ impl TestDaemon {
             worker_args: worker_args.iter().map(|s| s.to_string()).collect(),
             socket_path: dir.join("maestro.api.sock").display().to_string(),
             max_parallel_workers: max_parallel,
+            default_model: "claude-sonnet-4".into(),
         };
         let clock = Arc::new(MockClock::new());
         let (core, _) = Core::recover(cfg, clock.clone());

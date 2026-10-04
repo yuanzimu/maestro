@@ -89,12 +89,34 @@ fn steering_injected_mid_task_changes_next_round() {
         sids.windows(2).all(|w| w[0] == w[1]),
         "多轮应共用同一 session: {sids:?}"
     );
-    // 账本：轮数 > 1（真正多轮）
+    // 账本：轮数 > 1（真正多轮）+ token 计量闭环（每轮 mock IN=200 OUT=40）
     let v = d.api(
         Method::TaskLedger,
         serde_json::json!({ "task": t.as_str() }),
     );
     assert!(v["rounds"].as_u64().unwrap() >= 2, "多轮任务轮数应 ≥2: {v}");
+    let n_rounds = recs.len() as u64;
+    assert_eq!(
+        v["input_tokens"].as_u64().unwrap(),
+        200 * n_rounds,
+        "input_tokens 应按轮汇总（R24 计量闭环）: {v}"
+    );
+    assert_eq!(
+        v["output_tokens"].as_u64().unwrap(),
+        40 * n_rounds,
+        "output_tokens 应按轮汇总: {v}"
+    );
+    // 计价闭环（R24）：默认模型 claude-sonnet-4 在牌价表 → cents 必有值；
+    // actual ≤ counterfactual（cache 只省不亏）
+    assert!(
+        v["actual_cost_cents"].as_u64().unwrap_or(0)
+            <= v["counterfactual_cost_cents"].as_u64().unwrap_or(0),
+        "actual ≤ counterfactual（cache 计价）: {v}"
+    );
+    assert!(
+        v["counterfactual_cost_cents"].as_u64().unwrap_or(0) > 0,
+        "已知模型应完成计价（cents > 0）: {v}"
+    );
 }
 
 /// kill -9 daemon 后恢复：rounder 读 .maestro/session 续接同一会话完成
