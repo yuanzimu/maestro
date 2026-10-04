@@ -1,4 +1,6 @@
-//! Maestro Rust 客户端库：连接 API socket 的 JSON-RPC + 事件流订阅。
+//! Maestro Rust 客户端库：连接 API socket 的 JSON-RPC + 事件流订阅 + Web UI。
+
+pub mod ui;
 
 use maestro_protocol::api::{Method, Request, Response};
 use std::io::{BufRead, BufReader, Write};
@@ -15,6 +17,7 @@ pub enum ClientError {
     Rpc { code: i32, message: String },
 }
 
+#[derive(Clone)]
 pub struct MaestroClient {
     api_sock: PathBuf,
     events_sock: PathBuf,

@@ -51,6 +51,12 @@ enum Cmd {
     },
     /// 自检：daemon/socket/版本/环境
     Doctor,
+    /// 启动 Web 指挥台（浏览器打开 http://localhost:7331）
+    Ui {
+        /// 监听端口（默认 7331）
+        #[arg(long, default_value_t = 7331)]
+        port: u16,
+    },
     /// 关停 daemon
     Shutdown,
 }
@@ -120,7 +126,7 @@ fn run(client: &MaestroClient, cmd: Cmd) -> Result<(), String> {
             let v = client
                 .call("status", Method::ServerStatus, serde_json::json!({}))
                 .map_err(fmt_err)?;
-            println!("{}", serde_json::to_string_pretty(&v).unwrap());
+            print!("{}", fmt_status(&v));
         }
         Cmd::Task { action } => match action {
             TaskAction::Create {
@@ -169,7 +175,11 @@ fn run(client: &MaestroClient, cmd: Cmd) -> Result<(), String> {
                         serde_json::json!({ "task": id }),
                     )
                     .map_err(fmt_err)?;
-                println!("{}", serde_json::to_string_pretty(&v).unwrap());
+                if v.get("paused").and_then(|x| x.as_bool()).unwrap_or(false) {
+                    println!("已暂停：{id}（进程冻结、现场保留）—— maestro task resume {id} 恢复");
+                } else {
+                    println!("{}", serde_json::to_string_pretty(&v).unwrap());
+                }
             }
             TaskAction::Resume { id } => {
                 let v = client
@@ -186,14 +196,14 @@ fn run(client: &MaestroClient, cmd: Cmd) -> Result<(), String> {
                 }
             }
             TaskAction::Cancel { id } => {
-                let v = client
+                let _ = client
                     .call(
                         "task-cancel",
                         Method::TaskCancel,
                         serde_json::json!({ "task": id }),
                     )
                     .map_err(fmt_err)?;
-                println!("{}", serde_json::to_string_pretty(&v).unwrap());
+                println!("已取消：{id}");
             }
             TaskAction::Steer { id, message } => {
                 let v = client
@@ -203,7 +213,11 @@ fn run(client: &MaestroClient, cmd: Cmd) -> Result<(), String> {
                         serde_json::json!({ "task": id, "message": message }),
                     )
                     .map_err(fmt_err)?;
-                println!("{}", serde_json::to_string_pretty(&v).unwrap());
+                if v.get("queued").and_then(|x| x.as_bool()).unwrap_or(false) {
+                    println!("已送达：{id} 将在下一轮读到你的指示 —— maestro events --human --follow 看它执行");
+                } else {
+                    println!("{}", serde_json::to_string_pretty(&v).unwrap());
+                }
             }
             TaskAction::Ledger { id } => {
                 let v = client
@@ -287,6 +301,12 @@ fn run(client: &MaestroClient, cmd: Cmd) -> Result<(), String> {
                 .map_err(|e| e.to_string())?;
         }
         Cmd::Doctor => doctor(client),
+        Cmd::Ui { port } => {
+            println!("Maestro 指挥台启动中… 浏览器打开: http://localhost:{port}");
+            println!("（Ctrl+C 停止；daemon 不在也没关系，起好后界面自动连上）");
+            maestro_client::ui::serve_forever(client.clone(), port)
+                .map_err(|e| format!("UI 服务启动失败: {e}"))?;
+        }
         Cmd::Shutdown => {
             let _ = client.call("shutdown", Method::ServerShutdown, serde_json::json!({}));
             println!("已请求关停");
@@ -351,7 +371,25 @@ fn fmt_event_human(env: &maestro_protocol::events::Envelope) -> String {
     format!("[{ts}] {body}")
 }
 
-/// task.create 响应 → 友好输出
+/// status 响应 → 人话（R53：此前输出原始 JSON）
+fn fmt_status(v: &Value) -> String {
+    let up = v["uptime_secs"].as_u64().unwrap_or(0);
+    let dur = if up >= 3600 {
+        format!("{}h{}m", up / 3600, (up % 3600) / 60)
+    } else if up >= 60 {
+        format!("{}m{}s", up / 60, up % 60)
+    } else {
+        format!("{up}s")
+    };
+    format!(
+        "daemon v{} · 运行 {} · 任务 {} 个（worker 进行中 {}）\n下一步：maestro task list 看任务 · maestro inbox 看需要你处理的 · maestro ui 网页指挥台",
+        v["version"].as_str().unwrap_or("?"),
+        dur,
+        v["tasks_total"].as_u64().unwrap_or(0),
+        v["workers_active"].as_u64().unwrap_or(0),
+    )
+}
+
 fn fmt_create(v: &Value) -> String {
     let id = v["task"]["id"].as_str().unwrap_or("?");
     let title = v["task"]["title"].as_str().unwrap_or("");
@@ -583,6 +621,19 @@ fn fmt_err(e: maestro_client::ClientError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R53 可用性：status/steer 的人话输出（新用户不猜 JSON 字段）
+    #[test]
+    fn status_and_steer_friendly_output() {
+        let s = fmt_status(&serde_json::json!({
+            "version": "0.1.0", "uptime_secs": 3665,
+            "tasks_total": 3, "workers_active": 1
+        }));
+        assert!(s.contains("daemon v0.1.0"), "{s}");
+        assert!(s.contains("1h1m"), "{s}");
+        assert!(s.contains("任务 3 个（worker 进行中 1）"), "{s}");
+        assert!(s.contains("maestro ui"), "应指路下一步: {s}");
+    }
 
     #[test]
     fn create_friendly_output() {

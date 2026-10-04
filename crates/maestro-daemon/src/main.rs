@@ -1,9 +1,29 @@
-//! maestro-daemon 入口：setsid 脱离终端 + 双 socket 服务 + Core 主循环。
+//! maestro-daemon 入口：双 socket 服务 + Core 主循环。
+//!
+//! worker 配置（R54 可用性修复）：`--worker <prog> [-- <args...>]` 命令行
+//! 形态（优先）或 MAESTRO_WORKER_PROGRAM/MAESTRO_WORKER_ARGS 环境变量。
+//! 此前只认环境变量，命令行传入被静默忽略 → 回退 /bin/sh echo →
+//! 假完成 3 振出局（真用户首跑即踩，浏览器验证时发现）。
 
+use clap::Parser;
 use maestro_daemon::core::{Core, CoreConfig};
 use maestro_daemon::server::{self, IpcPaths};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+
+#[derive(Parser)]
+#[command(name = "maestro-daemon", about = "Maestro 任务守护进程")]
+struct Args {
+    /// Worker 程序（多轮驱动用 maestro-rounder）
+    #[arg(long)]
+    worker: Option<String>,
+    /// 数据目录（默认 /tmp/maestro 或 $MAESTRO_DATA_DIR）
+    #[arg(long)]
+    data_dir: Option<String>,
+    /// `--` 之后是 worker 参数（透传，如 `-- /path/to/inner-cli`）
+    #[arg(last = true)]
+    worker_args: Vec<String>,
+}
 
 fn main() -> anyhow::Result<()> {
     // 日志
@@ -13,19 +33,37 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let data_dir = std::env::var("MAESTRO_DATA_DIR")
+    let cli = Args::parse();
+    let data_dir = cli
+        .data_dir
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/tmp/maestro"));
+        .or_else(|| std::env::var("MAESTRO_DATA_DIR").ok().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("/tmp/maestro"));
+
+    // worker 配置：命令行优先（--worker X -- Y Z），其次环境变量，
+    // 默认占位（v0 echo worker）。⚠️ rounder 约定 argv 含 "--" 分隔
+    // （-- 之后的才是内层 CLI）—— clap 的 last 参数吃掉了 "--"，这里回补
+    let (worker_program, worker_args) = match (&cli.worker, cli.worker_args.split_first()) {
+        (Some(prog), Some((_, rest))) => {
+            let mut args = vec!["--".to_string()];
+            args.extend(rest.iter().cloned());
+            (prog.clone(), args)
+        }
+        (Some(prog), None) => (prog.clone(), vec![]),
+        (None, _) => (
+            std::env::var("MAESTRO_WORKER_PROGRAM").unwrap_or_else(|_| "/bin/sh".into()),
+            std::env::var("MAESTRO_WORKER_ARGS")
+                .map(|s| s.split_whitespace().map(String::from).collect())
+                .unwrap_or_else(|_| vec!["-c".into(), "echo maestro-worker-v0".into()]),
+        ),
+    };
 
     // 恢复 or 全新启动：数据目录有事件库则恢复
     let cfg = CoreConfig {
         data_dir: data_dir.clone(),
         workdir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/tmp")),
-        worker_program: std::env::var("MAESTRO_WORKER_PROGRAM")
-            .unwrap_or_else(|_| "/bin/sh".into()),
-        worker_args: std::env::var("MAESTRO_WORKER_ARGS")
-            .map(|s| s.split_whitespace().map(String::from).collect())
-            .unwrap_or_else(|_| vec!["-c".into(), "echo maestro-worker-v0".into()]),
+        worker_program,
+        worker_args,
         socket_path: data_dir.join("maestro.api.sock").display().to_string(),
         max_parallel_workers: std::env::var("MAESTRO_MAX_WORKERS")
             .ok()

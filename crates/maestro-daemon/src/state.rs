@@ -184,7 +184,8 @@ impl Authority {
                     });
                     t.session_ref = Some(session_ref.clone());
                     t.checkpoint_ref = Some(checkpoint_ref.clone());
-                    t.round = *round;
+                    // 显示口径单调（R56）：不回退累计轮数
+                    t.round = t.round.max(*round);
                     // 换挂起原因时重置退避计数
                     t.resume_attempts = 0;
                 }
@@ -245,19 +246,22 @@ impl Authority {
             CheckpointCreated { task, cp, meta } => {
                 if let Some(t) = self.tasks.get_mut(task) {
                     t.checkpoint_ref = Some(cp.clone());
-                    t.round = meta.round;
+                    // 显示口径单调（R56）：respawn 后 rounder 从 1 重计、cp 轮号
+                    // 随之变小 —— 不得回退累计轮数
+                    t.round = t.round.max(meta.round);
                 }
             }
             SteeringDelivered { task, round, .. } => {
                 if let Some(t) = self.tasks.get_mut(task) {
-                    t.round = *round;
+                    t.round = t.round.max(*round);
                 }
             }
-            // 轮进度推进 round（R48）：多轮驱动的主路径 —— 无轻推/检查点的任务
-            // 也得有轮次显示。max() 单调：respawn 后 rounder 从 1 重计不回退
-            RoundProgress { task, round, .. } => {
+            // 轮进度推进 round（R48/R56）：**累计轮数**显示口径 —— 每条
+            // RoundProgress +1（respawn 重计的轮号不回退累计值，与 narrative
+            // 的轮账计数一致；世代内轮号仍保留在事件字段里供审计）
+            RoundProgress { task, .. } => {
                 if let Some(t) = self.tasks.get_mut(task) {
-                    t.round = t.round.max(*round);
+                    t.round = t.round.saturating_add(1);
                 }
             }
             // 与状态无关的事件（叙事/反馈/账本/急停快照…）—— 未来 UI 消费
@@ -348,9 +352,9 @@ mod tests {
         assert_eq!(a.resume_attempts, 0);
     }
 
-    /// RoundProgress 推进 TaskRecord.round（R48 审计缺陷）：无轻推/检查点的
-    /// 多轮任务，task list ROUND 列与 task get round 不得恒为 0；
-    /// respawn 后 rounder 从 1 重计 → max() 单调不回退
+    /// RoundProgress 推进 TaskRecord.round（R48 引入，R56 改累计口径）：
+    /// 显示 = 累计轮数（与 narrative 轮账计数一致）。respawn 后 rounder
+    /// 从 1 重计不回退累计；世代内轮号保留在事件字段供审计
     #[test]
     fn round_progress_advances_task_round() {
         let mut a = Authority::new();
@@ -374,8 +378,8 @@ mod tests {
                 r as u64,
             );
         }
-        assert_eq!(a.get(&TaskId::new("t1")).unwrap().round, 3, "轮进度应推进 round");
-        // respawn 续接：rounder 重启从 1 重计 → 不回退（显示口径单调）
+        assert_eq!(a.get(&TaskId::new("t1")).unwrap().round, 3, "3 条轮进度 = 累计 3");
+        // respawn 续接：rounder 重启从 1 重计 —— 累计值继续增长（4）
         a.apply(
             &Event::RoundProgress {
                 task: TaskId::new("t1"),
@@ -389,13 +393,14 @@ mod tests {
         );
         assert_eq!(
             a.get(&TaskId::new("t1")).unwrap().round,
-            3,
-            "respawn 重计不得回退 round"
+            4,
+            "respawn 重计不回退累计轮数（R56 口径）"
         );
+        // 世代内后续轮：累计 5（世代内 round=2）
         a.apply(
             &Event::RoundProgress {
                 task: TaskId::new("t1"),
-                round: 4,
+                round: 2,
                 tools_used: vec![],
                 summary: "s".into(),
                 tokens_in: 1,
@@ -403,7 +408,24 @@ mod tests {
             },
             5,
         );
-        assert_eq!(a.get(&TaskId::new("t1")).unwrap().round, 4, "超越旧值后推进");
+        assert_eq!(a.get(&TaskId::new("t1")).unwrap().round, 5, "累计继续推进");
+        // 挂起事件带小轮号（世代内）→ 不回退
+        a.apply(
+            &Event::Suspended {
+                task: TaskId::new("t1"),
+                worker: maestro_protocol::WorkerId::new("w1"),
+                reason: SuspendReason::NetworkLost,
+                session_ref: SessionRef::new("s"),
+                checkpoint_ref: CheckpointRef::new("c"),
+                round: 2,
+            },
+            6,
+        );
+        assert_eq!(
+            a.get(&TaskId::new("t1")).unwrap().round,
+            5,
+            "挂起的世代内轮号不得回退累计"
+        );
     }
 
     /// 自动恢复候选只含 auto 策略的挂起任务（A1 联动）

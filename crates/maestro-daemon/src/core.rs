@@ -327,17 +327,24 @@ impl Core {
             }
             Method::TaskCreate => self.api_task_create(&req),
             Method::TaskList => {
+                // B1 叙事（R54）：列表项也带一句话进度 —— UI 任务卡的主数据源。
+                // 每任务一次事件重放开销在 P0 规模（任务数×事件量小）可接受；
+                // 大规模时改增量缓存
                 let tasks: Vec<serde_json::Value> = self
                     .ctx
                     .authority
                     .tasks
                     .values()
                     .map(|t| {
+                        let vitals = self.task_vitals(&t.task.id);
                         serde_json::json!({
                             "id": t.task.id,
                             "title": t.task.title,
                             "state": t.state,
                             "round": t.round,
+                            "narrative": crate::narrative::progress_line(&vitals),
+                            "blocked_kind": t.blocked_kind,
+                            "suspend_reason": t.suspend.as_ref().map(|s| s.reason),
                             "acceptance_failures": t.acceptance_failures,
                         })
                     })
