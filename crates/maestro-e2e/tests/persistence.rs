@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! 持久化恢复：kill -9 后事件重放 + steering 队列不丢（P0 验收）
 
 use maestro_e2e::*;

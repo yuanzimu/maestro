@@ -15,9 +15,12 @@ thiserror.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-nix.workspace = true
 rusqlite.workspace = true
 ureq.workspace = true
+
+# Unix 进程组信号/进程管理（Windows 走 worker.rs 的 Child 注册表降级路径）
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true
 
 [[bin]]
 name = "maestro-daemon"
@@ -28,6 +31,5 @@ name = "maestro-rounder"
 path = "src/bin/rounder.rs"
 
 [dev-dependencies]
-maestro-testkit.workspace = true
 tempfile = "3"
 serial_test = "3"

@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! R14 竞态回归：WorkerExit 消息晚于 TaskPause/EmergencyStop 到达时，
 //! 任务停在 Suspended 但 worker 已死 —— resume 不得产生「无进程的 Working」。
 //!

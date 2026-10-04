@@ -568,9 +568,9 @@ name = "maestro-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "clap",
  "maestro-client",
  "maestro-protocol",
- "maestro-testkit",
  "nix",
  "rusqlite",
  "serde",

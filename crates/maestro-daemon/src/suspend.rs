@@ -69,11 +69,12 @@ pub fn reap_orphans(workers_dir: &Path) -> ReapReport {
             // 我们的进程还活着（stopped 或 running）：杀（不收养）
             worker::graceful_kill_group(pf.pgid);
             if worker::group_alive(pf.pgid) {
-                let _ = nix_kill_hard(pf.pgid);
+                let _ = worker::hard_kill_group(pf.pgid);
             }
             report.killed.push(pf.worker.clone());
         } else if worker::proc_stat(pf.pid).is_some() {
             // PID 存在但 start_time 不匹配 → 被外来进程复用，不碰
+            // （/proc 是 Linux 专属；其他平台该分支恒 false —— 见 worker::proc_stat）
             report.pid_reused.push(pf.worker.clone());
         } else {
             // 进程已死：仅清文件（状态以事件重放为准）
@@ -82,12 +83,6 @@ pub fn reap_orphans(workers_dir: &Path) -> ReapReport {
         worker::remove_pidfile(workers_dir, &pf.worker);
     }
     report
-}
-
-fn nix_kill_hard(pgid: u32) -> bool {
-    use nix::sys::signal::{kill as nix_kill, Signal};
-    use nix::unistd::Pid;
-    nix_kill(Pid::from_raw(-(pgid as i32)), Signal::SIGKILL).is_ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -117,6 +112,7 @@ mod tests {
     }
 
     /// 用例 A8 象限②③：我们的进程还活着（stopped 或 running）→ 杀 + 报告
+    #[cfg(unix)]
     #[test]
     fn reap_live_our_process_kills() {
         let tmp = reap_dir();
@@ -143,7 +139,9 @@ mod tests {
         assert!(!worker::group_alive(meta.pgid), "组应被杀干净");
     }
 
-    /// 用例 A8 象限④：PID 被外来进程复用（start_time 不匹配）→ 不碰进程只清文件
+    /// 用例 A8 象限④：PID 被外来进程复用（start_time 不匹配）→ 不碰进程只清文件。
+    /// 依赖 /proc 双因子判定 → Linux 专属
+    #[cfg(target_os = "linux")]
     #[test]
     fn reap_pid_reuse_touches_nothing() {
         let tmp = reap_dir();

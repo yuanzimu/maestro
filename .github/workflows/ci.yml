@@ -1,0 +1,70 @@
+# CI 矩阵（R57）：三平台「更容易测试发现问题」的基础设施。
+#
+# 设计：
+# - build+clippy：三平台全阻塞 —— Windows/macOS 的编译兼容问题在 PR 就暴露
+# - test (linux)：全量 188 测试，阻塞（锚点平台）
+# - test (cross)：试验性（continue-on-error）——
+#   * macos：全量跑（Unix 语义一致，仅 /proc 差异已做降级），目标转正
+#   * windows：平台无关层（protocol/client/cli）+ daemon/testkit 单测面
+#     （e2e 与进程组语义门控在 cfg(unix)；Windows 完整语义待 Job Objects）
+
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build+clippy (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Build (all targets)
+        run: cargo build --workspace --all-targets
+      - name: Clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test-linux:
+    name: test (ubuntu-latest, full)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test (full suite)
+        run: cargo test --workspace
+
+  test-cross:
+    name: test (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-latest, full
+            os: macos-latest
+            args: --workspace
+          - name: windows-latest, platform-neutral
+            os: windows-latest
+            # 平台无关层 + daemon/testkit 单测面（cfg 门控后自动跳过 Unix 专属用例）
+            args: --workspace
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true # 试验性：跨平台差距先可见，转正后移除
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test
+        run: cargo test ${{ matrix.args }}

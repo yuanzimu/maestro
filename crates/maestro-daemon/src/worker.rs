@@ -3,14 +3,18 @@
 //! 三个来自调研/同类项目的关键决策：
 //! 1. **stdout/stderr 重定向到文件**（不接管道）：SIGSTOP 后子进程停止读管道，
 //!    管道满会让父进程的读端永久阻塞、wait() 死锁 —— 落文件 + 按需读无此问题
-//! 2. **spawn 即专属线程 wait**：防僵尸（herdr 决策）；Child 所有权归 waiter 线程，
-//!    kill/cancel 路径全部走 killpg（进程组信号），不需要 Child
-//! 3. **PID 文件带 /proc start_time**：防 PID 复用误杀（oxo-flow/phasesweep 的双因子法）
+//! 2. **spawn 即专属线程 wait**：防僵尸（herdr 决策）；kill/cancel 路径不依赖 Child
+//! 3. **PID 文件带 start_time**（Linux /proc）：防 PID 复用误杀（oxo-flow 的双因子法）
+//!
+//! 平台矩阵（R57）：
+//! - Linux：完整语义 —— 独立进程组（killpg 三级升级/SIGSTOP 急停）+ /proc 双因子
+//! - macOS：进程组信号同 Linux；无 /proc → start_time 恒 0、组探活/身份用 kill 探测
+//! - Windows：降级语义 —— 无进程组/SIGSTOP（占位 no-op），kill 走 Child 注册表，
+//!   完整语义待 Job Objects（后续迭代）
+//!
+//! 对外门面函数签名跨平台一致（`imp` 模块按 cfg 提供实现）。
 
 use maestro_protocol::types::*;
-use nix::sys::signal::{kill as nix_kill, Signal};
-use nix::unistd::Pid;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::Sender;
@@ -33,14 +37,15 @@ pub struct SpawnSpec {
     pub prompt: String,
 }
 
-/// 运行中的 Worker 元数据（Core 独占；Child 在 waiter 线程里）
+/// 运行中的 Worker 元数据（Core 独占；Child 在 waiter 线程/注册表里）
 #[derive(Debug, Clone)]
 pub struct WorkerMeta {
     pub id: WorkerId,
     pub task: TaskId,
     pub pid: u32,
+    /// 进程组 id。Unix：process_group(0) ⇒ pgid == pid；Windows：pid 占位
     pub pgid: u32,
-    /// 进程 start_time（/proc/<pid>/stat 字段 22，防 PID 复用）
+    /// 进程 start_time（Linux /proc 字段 22，防 PID 复用；其他平台恒 0）
     pub start_time: u64,
     pub stdout_path: PathBuf,
     pub stderr_path: PathBuf,
@@ -62,7 +67,7 @@ pub const ENV_SOCKET_PATH: &str = "MAESTRO_SOCKET_PATH";
 /// 任务 prompt（多轮驱动 Worker 模式）
 pub const ENV_PROMPT: &str = "MAESTRO_PROMPT";
 
-/// 启动 Worker：独立进程组 + stdout/stderr 落文件 + waiter 线程防僵尸
+/// 启动 Worker：独立进程组（Unix）+ stdout/stderr 落文件 + waiter 线程防僵尸
 pub fn spawn_worker(
     spec: SpawnSpec,
     socket_path: &str,
@@ -85,14 +90,13 @@ pub fn spawn_worker(
         .envs(spec.extra_env.iter().cloned())
         .stdin(Stdio::null())
         .stdout(Stdio::from(out_f))
-        .stderr(Stdio::from(err_f))
-        // 独立进程组：killpg 语义的基石
-        .process_group(0);
+        .stderr(Stdio::from(err_f));
+    imp::decorate(&mut cmd); // Unix：独立进程组（killpg 语义的基石）
 
     let child = cmd.spawn()?;
     let pid = child.id();
-    let pgid = pid; // process_group(0) ⇒ pgid == pid
-    let start_time = proc_start_time(pid).unwrap_or(0);
+    let pgid = pid; // Unix：process_group(0) ⇒ pgid == pid；Windows：占位
+    let start_time = imp::proc_start_time(pid);
 
     let meta = WorkerMeta {
         id: spec.worker.clone(),
@@ -104,108 +108,294 @@ pub fn spawn_worker(
         stderr_path,
     };
 
-    // spawn 即 wait（防僵尸）：waiter 线程独占 Child，退出即回报 Core
+    // spawn 即 wait（防僵尸）：waiter 线程独占 Child（Windows：注册表交接），退出即回报 Core
     let waiter_meta = meta.clone();
-    std::thread::Builder::new()
-        .name(format!("waiter-{}", spec.worker))
-        .spawn(move || {
-            let mut child = child;
-            let exit_code = child.wait().ok().and_then(|s| s.code());
-            let stderr_tail = read_tail(&waiter_meta.stderr_path, 2048);
-            let _ = on_exit.send(WorkerExit {
-                worker: waiter_meta.id.clone(),
-                task: waiter_meta.task.clone(),
-                exit_code,
-                stderr_tail,
-            });
-        })?;
+    imp::spawn_waiter(waiter_meta, on_exit, child)?;
 
     Ok(meta)
 }
 
-/// 关闭信号三级升级（herdr 决策）：HUP(250ms)→TERM(250ms)→KILL(250ms)
-/// 对整个进程组。
+/// waiter 线程公共收尾：读 stderr 尾部 → 回报 Core
+fn finish_exit(meta: WorkerMeta, on_exit: Sender<WorkerExit>, exit_code: Option<i32>) {
+    let stderr_tail = read_tail(&meta.stderr_path, 2048);
+    let _ = on_exit.send(WorkerExit {
+        worker: meta.id.clone(),
+        task: meta.task.clone(),
+        exit_code,
+        stderr_tail,
+    });
+}
+
+// ---------------------------------------------------------------------------
+// 平台门面（签名跨平台一致）
+// ---------------------------------------------------------------------------
+
+/// 关闭信号三级升级（herdr 决策）：HUP(250ms)→TERM(250ms)→KILL(250ms)。
+/// Unix 对整个进程组；Windows 降级为单进程 Terminate。
 pub fn graceful_kill_group(pgid: u32) {
-    let g = Pid::from_raw(-(pgid as i32));
-    let _ = nix_kill(g, Signal::SIGHUP);
-    if wait_group_gone(pgid, Duration::from_millis(250)) {
-        return;
-    }
-    let _ = nix_kill(g, Signal::SIGTERM);
-    if wait_group_gone(pgid, Duration::from_millis(250)) {
-        return;
-    }
-    let _ = nix_kill(g, Signal::SIGKILL);
-    let _ = wait_group_gone(pgid, Duration::from_millis(250));
+    imp::graceful_kill_group(pgid)
 }
 
-/// SIGSTOP 整组（急停 FREEZE）
-pub fn freeze_group(pgid: u32) -> nix::Result<()> {
-    nix_kill(Pid::from_raw(-(pgid as i32)), Signal::SIGSTOP)
+/// SIGSTOP 整组（急停 FREEZE）。Windows：no-op（降级，待 Job Objects）
+pub fn freeze_group(pgid: u32) -> std::io::Result<()> {
+    imp::freeze_group(pgid)
 }
 
-/// SIGCONT 整组（恢复）
-pub fn unfreeze_group(pgid: u32) -> nix::Result<()> {
-    nix_kill(Pid::from_raw(-(pgid as i32)), Signal::SIGCONT)
+/// SIGCONT 整组（恢复）。Windows：no-op（降级）
+pub fn unfreeze_group(pgid: u32) -> std::io::Result<()> {
+    imp::unfreeze_group(pgid)
 }
 
-/// 组内是否还有非僵尸进程
+/// 组内是否还有存活进程
 pub fn group_alive(pgid: u32) -> bool {
-    !pids_in_group_alive(pgid).is_empty()
+    imp::group_alive(pgid)
 }
 
-fn pids_in_group_alive(pgid: u32) -> Vec<u32> {
-    let mut found = vec![];
-    let Ok(entries) = std::fs::read_dir("/proc") else {
-        return found;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
-        let Ok(pid) = name.parse::<u32>() else {
-            continue;
+/// SIGKILL 硬杀（graceful 后仍存活的兜底）。Windows：TerminateProcess
+pub fn hard_kill_group(pgid: u32) -> bool {
+    imp::hard_kill_group(pgid)
+}
+
+/// PID 是否仍是我们启动的那个进程（Linux：pid + start_time 双因子防复用；
+/// macOS：kill 探活；Windows：注册表查 Child 状态）
+pub fn is_our_process(pid: u32, start_time: u64) -> bool {
+    imp::is_our_process(pid, start_time)
+}
+
+/// 读 /proc/<pid>/stat → (state, pgrp, start_time)。
+/// Linux 专属（无 /proc 的平台返回 None；调用方见 suspend.rs 孤儿清理四象限）
+pub fn proc_stat(pid: u32) -> Option<(String, u32, u64)> {
+    imp::proc_stat(pid)
+}
+
+// ---------------------------------------------------------------------------
+// Unix 实现：进程组信号 + /proc（Linux）
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+mod imp {
+    use super::{finish_exit, WorkerExit, WorkerMeta};
+    use nix::sys::signal::{kill as nix_kill, Signal};
+    use nix::unistd::Pid;
+    use std::os::unix::process::CommandExt;
+    use std::process::{Child, Command};
+    use std::sync::mpsc::Sender;
+    use std::time::Duration;
+
+    pub fn decorate(cmd: &mut Command) {
+        cmd.process_group(0);
+    }
+
+    pub fn spawn_waiter(
+        meta: WorkerMeta,
+        on_exit: Sender<WorkerExit>,
+        child: Child,
+    ) -> std::io::Result<()> {
+        std::thread::Builder::new()
+            .name(format!("waiter-{}", meta.id))
+            .spawn(move || {
+                let mut child = child;
+                let exit_code = child.wait().ok().and_then(|s| s.code());
+                finish_exit(meta, on_exit, exit_code);
+            })?;
+        Ok(())
+    }
+
+    pub fn graceful_kill_group(pgid: u32) {
+        let g = Pid::from_raw(-(pgid as i32));
+        let _ = nix_kill(g, Signal::SIGHUP);
+        if wait_group_gone(pgid, Duration::from_millis(250)) {
+            return;
+        }
+        let _ = nix_kill(g, Signal::SIGTERM);
+        if wait_group_gone(pgid, Duration::from_millis(250)) {
+            return;
+        }
+        let _ = nix_kill(g, Signal::SIGKILL);
+        let _ = wait_group_gone(pgid, Duration::from_millis(250));
+    }
+
+    pub fn freeze_group(pgid: u32) -> std::io::Result<()> {
+        nix_kill(Pid::from_raw(-(pgid as i32)), Signal::SIGSTOP)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+    }
+
+    pub fn unfreeze_group(pgid: u32) -> std::io::Result<()> {
+        nix_kill(Pid::from_raw(-(pgid as i32)), Signal::SIGCONT)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+    }
+
+    pub fn hard_kill_group(pgid: u32) -> bool {
+        nix_kill(Pid::from_raw(-(pgid as i32)), Signal::SIGKILL).is_ok()
+    }
+
+    pub fn group_alive(pgid: u32) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            !pids_in_group_alive(pgid).is_empty()
+        }
+        // macOS 无 /proc：kill(-pgid, 0) 探测（ESRCH = 组空）
+        #[cfg(not(target_os = "linux"))]
+        {
+            nix_kill(Pid::from_raw(-(pgid as i32)), None).is_ok()
+        }
+    }
+
+    pub fn is_our_process(pid: u32, start_time: u64) -> bool {
+        // Linux：/proc start_time 双因子（防 PID 复用误杀）
+        #[cfg(target_os = "linux")]
+        {
+            matches!(proc_stat(pid), Some((_, _, st)) if st == start_time)
+        }
+        // macOS：无 /proc —— kill 探活（start_time 恒 0，退化为单因子）
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = start_time;
+            nix_kill(Pid::from_raw(pid as i32), None).is_ok()
+        }
+    }
+
+    /// 轮询等待组清空（带超时）
+    fn wait_group_gone(pgid: u32, timeout: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        while std::time::Instant::now() < deadline {
+            if !group_alive(pgid) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        !group_alive(pgid)
+    }
+
+    /// Linux：扫 /proc 列组内非僵尸 PID
+    #[cfg(target_os = "linux")]
+    fn pids_in_group_alive(pgid: u32) -> Vec<u32> {
+        let mut found = vec![];
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return found;
         };
-        if let Some((state, pgrp, _st)) = proc_stat(pid) {
-            if pgrp == pgid && state != "Z" && state != "X" {
-                found.push(pid);
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            let Ok(pid) = name.parse::<u32>() else {
+                continue;
+            };
+            if let Some((state, pgrp, _st)) = proc_stat(pid) {
+                if pgrp == pgid && state != "Z" && state != "X" {
+                    found.push(pid);
+                }
             }
         }
+        found
     }
-    found
+
+    /// 读 /proc/<pid>/stat → (state, pgrp, start_time)
+    /// stat 格式：pid (comm) state ppid pgrp session tty_nr tpgid flags minflt ... starttime(22)
+    #[cfg(target_os = "linux")]
+    pub fn proc_stat(pid: u32) -> Option<(String, u32, u64)> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let after = stat.rsplit(')').next()?;
+        let f: Vec<&str> = after.split_whitespace().collect();
+        // f[0]=state f[1]=ppid f[2]=pgrp ... f[19]=starttime（comm 后第 22 字段整体）
+        let state = f.first()?.to_string();
+        let pgrp = f.get(2)?.parse().ok()?;
+        let start_time = f.get(19)?.parse().ok()?;
+        Some((state, pgrp, start_time))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn proc_stat(_pid: u32) -> Option<(String, u32, u64)> {
+        None
+    }
+
+    pub fn proc_start_time(pid: u32) -> u64 {
+        proc_stat(pid).map(|(_, _, st)| st).unwrap_or(0)
+    }
 }
 
-/// 轮询等待组清空（带超时）
-fn wait_group_gone(pgid: u32, timeout: Duration) -> bool {
-    let deadline = std::time::Instant::now() + timeout;
-    while std::time::Instant::now() < deadline {
-        if !group_alive(pgid) {
-            return true;
+// ---------------------------------------------------------------------------
+// Windows 实现：Child 注册表（降级语义，待 Job Objects）
+// ---------------------------------------------------------------------------
+
+#[cfg(windows)]
+mod imp {
+    use super::{finish_exit, WorkerExit, WorkerMeta};
+    use std::collections::HashMap;
+    use std::process::{Child, Command};
+    use std::sync::mpsc::Sender;
+    use std::sync::{Mutex, OnceLock};
+
+    /// Child 注册表：Windows 无进程组信号 —— kill/alive 经 Child 句柄操作。
+    /// waiter 线程 take 走所有权；kill 路径 get_mut。
+    fn registry() -> &'static Mutex<HashMap<u32, Child>> {
+        static REG: OnceLock<Mutex<HashMap<u32, Child>>> = OnceLock::new();
+        REG.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    pub fn decorate(_cmd: &mut Command) {
+        // Windows 无 process_group —— 完整组语义待 Job Objects
+    }
+
+    pub fn spawn_waiter(
+        meta: WorkerMeta,
+        on_exit: Sender<WorkerExit>,
+        child: Child,
+    ) -> std::io::Result<()> {
+        let pid = child.id();
+        registry().lock().unwrap().insert(pid, child);
+        std::thread::Builder::new()
+            .name(format!("waiter-{}", meta.id))
+            .spawn(move || {
+                // 从注册表取回：kill 可能已先一步操作过（已退出 → None → exit_code None）
+                let exit_code = registry()
+                    .lock()
+                    .unwrap()
+                    .remove(&pid)
+                    .and_then(|mut c| c.wait().ok().and_then(|s| s.code()));
+                finish_exit(meta, on_exit, exit_code);
+            })
+    }
+
+    pub fn graceful_kill_group(pgid: u32) {
+        // 降级：单进程 Terminate（无三级升级 —— Windows 无信号语义）
+        let _ = kill_pid(pgid);
+    }
+
+    pub fn freeze_group(_pgid: u32) -> std::io::Result<()> {
+        // 降级 no-op：Windows 挂起需 NtSuspendProcess/Job Objects（后续迭代）
+        Ok(())
+    }
+
+    pub fn unfreeze_group(_pgid: u32) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    pub fn hard_kill_group(pgid: u32) -> bool {
+        kill_pid(pgid)
+    }
+
+    pub fn group_alive(pgid: u32) -> bool {
+        let mut reg = registry().lock().unwrap();
+        reg.get_mut(&pgid)
+            .map(|c| c.try_wait().map(|s| s.is_none()).unwrap_or(false))
+            .unwrap_or(false)
+    }
+
+    pub fn is_our_process(pid: u32, _start_time: u64) -> bool {
+        group_alive(pid)
+    }
+
+    pub fn proc_stat(_pid: u32) -> Option<(String, u32, u64)> {
+        None // 无 /proc
+    }
+
+    fn kill_pid(pid: u32) -> bool {
+        let mut reg = registry().lock().unwrap();
+        match reg.get_mut(&pid) {
+            Some(c) => c.kill().is_ok(),
+            None => false,
         }
-        std::thread::sleep(Duration::from_millis(10));
     }
-    !group_alive(pgid)
-}
-
-/// 读 /proc/<pid>/stat → (state, pgrp, start_time)
-/// stat 格式：pid (comm) state ppid pgrp session tty_nr tpgid flags minflt ... starttime(22)
-pub fn proc_stat(pid: u32) -> Option<(String, u32, u64)> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let after = stat.rsplit(')').next()?;
-    let f: Vec<&str> = after.split_whitespace().collect();
-    // f[0]=state f[1]=ppid f[2]=pgrp ... f[19]=starttime（comm 后第 22 字段整体）
-    let state = f.first()?.to_string();
-    let pgrp = f.get(2)?.parse().ok()?;
-    let start_time = f.get(19)?.parse().ok()?;
-    Some((state, pgrp, start_time))
-}
-
-/// PID 是否仍是我们启动的那个进程（pid + start_time 双因子，防复用）
-pub fn is_our_process(pid: u32, start_time: u64) -> bool {
-    matches!(proc_stat(pid), Some((_, _, st)) if st == start_time)
-}
-
-fn proc_start_time(pid: u32) -> Option<u64> {
-    proc_stat(pid).map(|(_, _, st)| st)
 }
 
 fn read_tail(path: &Path, max: usize) -> String {
@@ -239,7 +429,7 @@ pub struct PidFile {
     pub task: TaskId,
     pub pid: u32,
     pub pgid: u32,
-    /// /proc start_time（双因子防 PID 复用）
+    /// start_time（Linux /proc 双因子；其他平台 0）
     pub start_time: u64,
     pub round: u32,
     pub started_at: u64,
@@ -295,6 +485,7 @@ mod tests {
     }
 
     /// 基本生命周期：spawn → 元数据 → 退出回报 → 无僵尸
+    #[cfg(unix)]
     #[test]
     fn spawn_exit_report() {
         let tmp = tempfile::tempdir().unwrap();
@@ -306,6 +497,7 @@ mod tests {
         )
         .unwrap();
         assert!(meta.pgid == meta.pid);
+        #[cfg(target_os = "linux")] // macOS 无 /proc → start_time 恒 0
         assert!(meta.start_time > 0, "应记录 start_time");
         let exit = rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(exit.exit_code, Some(0));
@@ -315,6 +507,7 @@ mod tests {
     }
 
     /// 三级升级：对不响应 TERM 的进程最终 KILL 干净
+    #[cfg(unix)]
     #[test]
     fn graceful_kill_escalates() {
         let tmp = tempfile::tempdir().unwrap();
@@ -335,7 +528,8 @@ mod tests {
         assert!(!group_alive(meta.pgid), "三级升级后组应清空");
     }
 
-    /// PID 复用防护：start_time 不匹配即非我们的进程
+    /// PID 复用防护：start_time 不匹配即非我们的进程（Linux /proc 双因子）
+    #[cfg(target_os = "linux")]
     #[test]
     fn pid_reuse_protection() {
         let tmp = tempfile::tempdir().unwrap();
@@ -353,7 +547,7 @@ mod tests {
         graceful_kill_group(meta.pgid);
     }
 
-    /// pidfile 往返 + 扫描
+    /// pidfile 往返 + 扫描（平台无关）
     #[test]
     fn pidfile_roundtrip() {
         let tmp = tempfile::tempdir().unwrap();
@@ -375,6 +569,7 @@ mod tests {
     }
 
     /// 环境三元组注入验证
+    #[cfg(unix)]
     #[test]
     fn env_triple_injected() {
         let tmp = tempfile::tempdir().unwrap();
@@ -398,6 +593,7 @@ mod tests {
     }
 
     /// stderr 尾部读取（错误分类用）
+    #[cfg(unix)]
     #[test]
     fn stderr_tail_captured() {
         let tmp = tempfile::tempdir().unwrap();

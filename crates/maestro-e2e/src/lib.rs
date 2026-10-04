@@ -1,5 +1,10 @@
 //! e2e 测试基建：进程内拉起 Core（带 MockClock + 真实子进程），API 直调。
 //! 比走 socket 快且确定；socket 层有独立冒烟。
+//!
+//! 平台（R57）：e2e 依赖 Unix 进程组语义 + bash mock CLI → cfg(unix)。
+//! Windows 的测试面 = 平台无关层单测（protocol/client/cli），见 CI 矩阵。
+
+#![cfg(unix)]
 
 use maestro_daemon::core::{Core, CoreConfig, CoreMsg, DEFAULT_MAX_PARALLEL_WORKERS};
 use maestro_protocol::api::{Method, Request, Response};
@@ -104,14 +109,11 @@ impl TestDaemon {
             let g = core.lock().unwrap();
             (g.sender(), g.hub_handle(), g.event_store_handle())
         };
-        // 真实双 socket（worker 子进程的 IPC 路径）
-        let guard = maestro_daemon::server::serve(
-            hub,
-            tx.clone(),
-            &maestro_daemon::server::IpcPaths::new(&dir),
-            store,
-        )
-        .expect("socket serve");
+        // 真实双 socket（worker 子进程的 IPC 路径）。socket_path 由 serve
+        // bind 后回填 —— 与生产 main.rs 相同的时序（Windows TCP 端口 bind 才确定）
+        let (guard, api_addr) =
+            maestro_daemon::server::serve(hub, tx.clone(), &dir, store).expect("socket serve");
+        core.lock().unwrap().cfg.socket_path = api_addr.to_env_value();
         {
             let core = core.clone();
             std::thread::spawn(move || {

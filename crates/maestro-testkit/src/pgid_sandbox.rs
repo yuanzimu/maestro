@@ -18,38 +18,52 @@ pub fn assert_pgid_empty(pgid: u32) {
     panic!("pgid {pgid} 仍有存活进程: {pids:?}");
 }
 
-/// 列出 pgid 内的存活 PID（扫 /proc/<pid>/stat 的 pgrp 字段）
+/// 列出 pgid 内的存活 PID。
+/// Linux：扫 /proc/<pid>/stat 的 pgrp 字段（精确枚举）。
+/// macOS：无 /proc —— kill(-pgid, 0) 探测（存活 → 返回组代表 [pgid]，
+/// 语义上只服务 assert_pgid_empty / 非空判断）。
 pub fn pids_in_group(pgid: u32) -> Vec<u32> {
-    let mut found = vec![];
-    let Ok(entries) = std::fs::read_dir("/proc") else {
-        return found;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
-        let Ok(pid) = name.parse::<u32>() else {
-            continue;
+    #[cfg(target_os = "linux")]
+    {
+        let mut found = vec![];
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return found;
         };
-        if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-            if let Some(after) = stat.rsplit(')').next() {
-                let mut fields = after.split_whitespace();
-                let (Some(state), Some(pgrp)) = (fields.next(), fields.nth(1)) else {
-                    continue;
-                };
-                // 僵尸（Z）与已死（X）不算存活：SIGKILL 后未 wait 的进程仍在 /proc
-                if state == "Z" || state == "X" {
-                    continue;
-                }
-                if let Ok(g) = pgrp.parse::<u32>() {
-                    if g == pgid {
-                        found.push(pid);
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            let Ok(pid) = name.parse::<u32>() else {
+                continue;
+            };
+            if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+                if let Some(after) = stat.rsplit(')').next() {
+                    let mut fields = after.split_whitespace();
+                    let (Some(state), Some(pgrp)) = (fields.next(), fields.nth(1)) else {
+                        continue;
+                    };
+                    // 僵尸（Z）与已死（X）不算存活：SIGKILL 后未 wait 的进程仍在 /proc
+                    if state == "Z" || state == "X" {
+                        continue;
+                    }
+                    if let Ok(g) = pgrp.parse::<u32>() {
+                        if g == pgid {
+                            found.push(pid);
+                        }
                     }
                 }
             }
         }
+        found.sort_unstable();
+        found
     }
-    found.sort_unstable();
-    found
+    #[cfg(not(target_os = "linux"))]
+    {
+        if nix_kill(Pid::from_raw(-(pgid as i32)), None).is_ok() {
+            vec![pgid]
+        } else {
+            vec![]
+        }
+    }
 }
 
 /// 杀掉整个进程组（兜底清理）

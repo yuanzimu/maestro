@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! 0.15 多轮驱动 Worker 模式 e2e（rounder + mock CLI）：
 //! - U4 验收：任务运行中注入轻推 → 影响下一轮输出（P0 验收项）
 //! - 会话续接：daemon kill -9 恢复后 rounder 从上一完成轮续跑

@@ -10,6 +10,9 @@ publish = false
 maestro-protocol.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+# Unix 专属测试基建（脚本 Worker/pgid 沙箱/mock CLI）所依赖
+[target.'cfg(unix)'.dependencies]
 nix.workspace = true
 
 [dev-dependencies]

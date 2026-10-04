@@ -79,7 +79,7 @@ fn main() {
         std::process::exit(2);
     }
 
-    let client = MaestroClient::from_api_socket(std::path::Path::new(&socket));
+    let client = MaestroClient::from_api_socket(&socket);
     // 状态按任务隔离（R36）：session/轮账放 .maestro/<task_id>/ ——
     // 同 workdir 串行任务不得共享会话（跨任务上下文泄漏，混沌⑩证伪后修复）；
     // 同任务 respawn/崩溃恢复读同一路径，续接语义不变。

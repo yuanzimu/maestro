@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! 应用测试场景矩阵（R55）：以「用户旅程」组织的全链验收 —— 每个场景
 //! 模拟一类真实使用方式，断言用户可见的行为（而不是内部状态）。
 //!
@@ -417,4 +419,3 @@ fn s7_ui_page_and_daemon_down_graceful() {
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
 }
-

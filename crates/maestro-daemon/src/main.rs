@@ -6,8 +6,8 @@
 //! 假完成 3 振出局（真用户首跑即踩，浏览器验证时发现）。
 
 use clap::Parser;
+use maestro_client::transport;
 use maestro_daemon::core::{Core, CoreConfig};
-use maestro_daemon::server::{self, IpcPaths};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -17,7 +17,7 @@ struct Args {
     /// Worker 程序（多轮驱动用 maestro-rounder）
     #[arg(long)]
     worker: Option<String>,
-    /// 数据目录（默认 /tmp/maestro 或 $MAESTRO_DATA_DIR）
+    /// 数据目录（默认 <系统临时目录>/maestro 或 $MAESTRO_DATA_DIR）
     #[arg(long)]
     data_dir: Option<String>,
     /// `--` 之后是 worker 参数（透传，如 `-- /path/to/inner-cli`）
@@ -38,7 +38,7 @@ fn main() -> anyhow::Result<()> {
         .data_dir
         .map(PathBuf::from)
         .or_else(|| std::env::var("MAESTRO_DATA_DIR").ok().map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("/tmp/maestro"));
+        .unwrap_or_else(transport::default_data_dir);
 
     // worker 配置：命令行优先（--worker X -- Y Z），其次环境变量，
     // 默认占位（v0 echo worker）。⚠️ rounder 约定 argv 含 "--" 分隔
@@ -50,21 +50,29 @@ fn main() -> anyhow::Result<()> {
             (prog.clone(), args)
         }
         (Some(prog), None) => (prog.clone(), vec![]),
-        (None, _) => (
-            std::env::var("MAESTRO_WORKER_PROGRAM").unwrap_or_else(|_| "/bin/sh".into()),
-            std::env::var("MAESTRO_WORKER_ARGS")
-                .map(|s| s.split_whitespace().map(String::from).collect())
-                .unwrap_or_else(|_| vec!["-c".into(), "echo maestro-worker-v0".into()]),
-        ),
+        (None, _) => {
+            // 默认 echo worker（占位演示用）：平台各自的 shell
+            #[cfg(unix)]
+            let (dprog, dargs): (&str, Vec<&str>) = ("/bin/sh", vec!["-c", "echo maestro-worker-v0"]);
+            #[cfg(windows)]
+            let (dprog, dargs): (&str, Vec<&str>) = ("cmd", vec!["/C", "echo maestro-worker-v0"]);
+            (
+                std::env::var("MAESTRO_WORKER_PROGRAM").unwrap_or_else(|_| dprog.into()),
+                std::env::var("MAESTRO_WORKER_ARGS")
+                    .map(|s| s.split_whitespace().map(String::from).collect())
+                    .unwrap_or_else(|_| dargs.into_iter().map(String::from).collect()),
+            )
+        }
     };
 
-    // 恢复 or 全新启动：数据目录有事件库则恢复
+    // 恢复 or 全新启动：数据目录有事件库则恢复。
+    // socket_path 先占位 —— 真实端点 bind 后才确定（Windows TCP 端口），见下方回填
     let cfg = CoreConfig {
         data_dir: data_dir.clone(),
-        workdir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/tmp")),
+        workdir: std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir()),
         worker_program,
         worker_args,
-        socket_path: data_dir.join("maestro.api.sock").display().to_string(),
+        socket_path: String::new(),
         max_parallel_workers: std::env::var("MAESTRO_MAX_WORKERS")
             .ok()
             .and_then(|s| s.parse().ok())
@@ -98,15 +106,16 @@ fn main() -> anyhow::Result<()> {
     }
 
     let core = Arc::new(Mutex::new(core));
-    let paths = IpcPaths::new(&data_dir);
     // ⚠️ run() 持锁到底：sender/hub/store 必须在起 run 线程前全部取出
     let (core_tx, hub, store) = {
         let g = core.lock().unwrap();
         (g.sender(), g.hub_handle(), g.event_store_handle())
     };
-    let _guard = server::serve(hub, core_tx, &paths, store)?;
+    let (_guard, api_addr) = maestro_daemon::server::serve(hub, core_tx, &data_dir, store)?;
+    // 回填真实端点（Windows TCP 端口 bind 后才确定；Unix 下即 socket 路径）
+    core.lock().unwrap().cfg.socket_path = api_addr.to_env_value();
 
-    tracing::info!("maestro daemon 就绪: {}", paths.api_sock.display());
+    tracing::info!("maestro daemon 就绪: {}", api_addr.to_env_value());
 
     // 主循环（Core 线程内联在主线程 —— 单线程权威）
     core.lock().unwrap().run();

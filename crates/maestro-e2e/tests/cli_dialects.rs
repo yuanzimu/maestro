@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! R2/R51 方言矩阵 e2e：codex / gemini 方言全链（参数构造 → 事件解析 →
 //! session 续接 → 轮账计量 → 收敛）。mock CLI 按参数形态自动切换输出格式
 //! （exec → codex；-p 且无 --max-turns → gemini），usage 数值三方言同源 ——

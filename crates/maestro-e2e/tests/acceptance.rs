@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! 验收门 v0 e2e（DEV_PLAN 0.10 / U10 设计「Goal 3 轮」）：
 //! - 有真实产物 → AcceptanceGatePassed → Done + 永久 checkpoint
 //! - 假完成（exit 0 无产物）→ 3 振出局 blocked(AcceptanceFailed)

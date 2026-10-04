@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! R11 审计回归：崩溃重启后，自动恢复退避中的任务必须继续调度。
 //! 之前：recover() 不重排 auto_resume_candidates → NetworkLost 挂起任务
 //! 在 daemon 重启后永久滞留 Suspended。

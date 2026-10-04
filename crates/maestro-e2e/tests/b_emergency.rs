@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! 用例组 B：emergency_stop 三阶段 e2e（U10_T6_DESIGN.md §11）
 
 use maestro_e2e::*;

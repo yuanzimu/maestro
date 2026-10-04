@@ -1,32 +1,35 @@
 //! server 层集成测试：双 socket（API + 事件流）真实 IPC 路径。
 //! 这是 server.rs 唯一的测试覆盖 —— 之前完全没测。
 
+#![cfg(unix)]
+
 use maestro_client::MaestroClient;
 use maestro_daemon::core::{Core, CoreConfig};
-use maestro_daemon::server::{self, IpcPaths};
+use maestro_daemon::server;
 use maestro_protocol::api::Method;
 use std::sync::{Arc, Mutex};
 
-/// 拉起带真实 socket 的 daemon
-fn spawn_socket_daemon(data_dir: &std::path::Path) -> (Arc<Mutex<Core>>, IpcPaths) {
+/// 拉起带真实 socket 的 daemon（返回 core + data_dir）
+fn spawn_socket_daemon(data_dir: &std::path::Path) -> (Arc<Mutex<Core>>, std::path::PathBuf) {
     let cfg = CoreConfig {
         data_dir: data_dir.to_path_buf(),
         workdir: data_dir.to_path_buf(),
         worker_program: "/bin/sh".into(),
         worker_args: vec!["-c".into(), "sleep 300".into()],
-        socket_path: data_dir.join("maestro.api.sock").display().to_string(),
+        socket_path: String::new(), // serve bind 后回填
         max_parallel_workers: 4,
         default_model: "claude-sonnet-4".into(),
         worker_env: vec![],
     };
     let (core, _) = Core::recover(cfg, Arc::new(maestro_protocol::SystemClock));
     let core = Arc::new(Mutex::new(core));
-    let paths = IpcPaths::new(data_dir);
     let (core_tx, hub, store) = {
         let g = core.lock().unwrap();
         (g.sender(), g.hub_handle(), g.event_store_handle())
     };
-    server::serve(hub, core_tx, &paths, store).expect("serve");
+    let (guard, api_addr) = server::serve(hub, core_tx, data_dir, store).expect("serve");
+    core.lock().unwrap().cfg.socket_path = api_addr.to_env_value();
+    let _ = guard; // 停机句柄随测试进程生命周期（同生产 daemon）
     // Core 主循环线程
     {
         let c = core.clone();
@@ -34,7 +37,7 @@ fn spawn_socket_daemon(data_dir: &std::path::Path) -> (Arc<Mutex<Core>>, IpcPath
             c.lock().unwrap().run();
         });
     }
-    (core, paths)
+    (core, data_dir.to_path_buf())
 }
 
 /// API socket 全链路：status → task create → workers → stop → resume
@@ -209,7 +212,7 @@ fn stale_socket_removed() {
 
     let (_core, paths) = spawn_socket_daemon(&dir);
     // 起服务成功 = stale 被清掉了
-    assert!(paths.api_sock.exists());
+    assert!(paths.join("maestro.api.sock").exists());
     let client = MaestroClient::new(&dir);
     assert!(client.is_daemon_alive(), "新 daemon 应能监听（stale 已清）");
 }

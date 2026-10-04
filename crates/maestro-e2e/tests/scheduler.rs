@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! R13 队列调度器 e2e：并发上限 + FIFO 补位 + 取消释放槽位。
 
 use maestro_e2e::*;

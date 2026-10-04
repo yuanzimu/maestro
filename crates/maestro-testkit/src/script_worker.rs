@@ -100,12 +100,33 @@ impl ScriptWorker {
     }
 }
 
-/// 读 /proc/<pid>/stat 的 state 字段
+/// 读进程 state 字段（R/S/T/D/Z...）。
+/// Linux：/proc/<pid>/stat 解析；macOS：无 /proc —— 经 `ps -o stat=` 查询
+///（字母语义兼容：T=stopped、Z=zombie）。
 pub fn proc_state(pid: u32) -> Option<String> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    // 形如 "1234 (bash) S 1 ..."，comm 里可能含空格/括号——取最后一个 ')' 之后
-    let after = stat.rsplit(')').next()?;
-    after.split_whitespace().next().map(|s| s.to_string())
+    #[cfg(target_os = "linux")]
+    {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        // 形如 "1234 (bash) S 1 ..."，comm 里可能含空格/括号——取最后一个 ')' 之后
+        let after = stat.rsplit(')').next()?;
+        after.split_whitespace().next().map(|s| s.to_string())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None; // 进程不存在
+        }
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
+    }
 }
 
 /// 把脚本内容写入 tempdir 下的可执行文件（P0_SETUP 决策 2：不落仓库路径）
@@ -219,12 +240,8 @@ mod tests {
         assert!(matches!(st.as_str(), "R" | "S"), "状态应为 R/S，实际 {st}");
     }
 
-    /// 读 /proc/self/stat 的 pgrp 字段：`pid (comm) state ppid pgrp ...`
-    /// comm 可能含空格/括号，因此取最后一个 ')' 之后。
+    /// 读自己的 pgid（Linux 经 /proc/self/stat；跨平台直接 getpgrp —— macOS 无 /proc）
     fn our_pgid() -> i32 {
-        let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
-        let after = stat.rsplit(')').next().unwrap();
-        // [0]=state [1]=ppid [2]=pgrp
-        after.split_whitespace().nth(2).unwrap().parse().unwrap()
+        nix::unistd::getpgrp().as_raw()
     }
 }

@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! 用例组 A：suspended 状态机 e2e（U10_T6_DESIGN.md §10）
 //! 运行环境：真实子进程 + MockClock 虚拟推进退避
 

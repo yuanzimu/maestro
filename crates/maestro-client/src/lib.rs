@@ -1,11 +1,14 @@
 //! Maestro Rust 客户端库：连接 API socket 的 JSON-RPC + 事件流订阅 + Web UI。
 
+pub mod transport;
 pub mod ui;
+
+pub use transport::default_data_dir;
 
 use maestro_protocol::api::{Method, Request, Response};
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use transport::Addr;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
@@ -19,31 +22,22 @@ pub enum ClientError {
 
 #[derive(Clone)]
 pub struct MaestroClient {
-    api_sock: PathBuf,
-    events_sock: PathBuf,
-}
-
-/// 默认 socket 位置
-pub fn default_data_dir() -> PathBuf {
-    std::env::var("MAESTRO_DATA_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/tmp/maestro"))
+    api: Addr,
+    events: Addr,
 }
 
 impl MaestroClient {
     pub fn new(data_dir: &Path) -> Self {
-        Self {
-            api_sock: data_dir.join("maestro.api.sock"),
-            events_sock: data_dir.join("maestro.events.sock"),
-        }
+        let (api, events) = Addr::endpoints(data_dir);
+        Self { api, events }
     }
 
-    /// 从显式 api socket 路径构造（多轮驱动 Worker 用：MAESTRO_SOCKET_PATH）
-    pub fn from_api_socket(api_sock: &Path) -> Self {
-        Self {
-            api_sock: api_sock.to_path_buf(),
-            events_sock: api_sock.with_file_name("maestro.events.sock"),
-        }
+    /// 从 ENV_SOCKET_PATH 值构造（多轮驱动 Worker 回连用）。
+    /// Unix = socket 路径；Windows = "127.0.0.1:PORT"（见 transport）
+    pub fn from_api_socket(api_env: &str) -> Self {
+        let api = Addr::from_env_value(api_env);
+        let events = api.sibling_events();
+        Self { api, events }
     }
 
     pub fn connect_default() -> Self {
@@ -52,7 +46,7 @@ impl MaestroClient {
 
     /// daemon 是否在监听
     pub fn is_daemon_alive(&self) -> bool {
-        UnixStream::connect(&self.api_sock).is_ok()
+        self.api.connect().is_ok()
     }
 
     /// 发送一个请求（每次新建连接：简单可靠，CLI 场景足够）
@@ -62,8 +56,10 @@ impl MaestroClient {
         method: Method,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, ClientError> {
-        let mut stream =
-            UnixStream::connect(&self.api_sock).map_err(|e| ClientError::Connect(e.to_string()))?;
+        let mut stream = self
+            .api
+            .connect()
+            .map_err(|e| ClientError::Connect(e.to_string()))?;
         let req = Request {
             id: id.into(),
             method,
@@ -97,7 +93,9 @@ impl MaestroClient {
         from_seq: u64,
         mut on_event: F,
     ) -> Result<(), ClientError> {
-        let mut stream = UnixStream::connect(&self.events_sock)
+        let mut stream = self
+            .events
+            .connect()
             .map_err(|e| ClientError::Connect(e.to_string()))?;
         let hello = serde_json::json!({ "from_seq": from_seq });
         stream
@@ -130,7 +128,8 @@ mod tests {
 
     #[test]
     fn connect_refused_when_no_daemon() {
-        let c = MaestroClient::new(Path::new("/tmp/maestro-nonexistent-test"));
+        let dir = std::env::temp_dir().join("maestro-nonexistent-test");
+        let c = MaestroClient::new(&dir);
         assert!(!c.is_daemon_alive());
         let err = c
             .call("r1", Method::ServerStatus, serde_json::json!({}))

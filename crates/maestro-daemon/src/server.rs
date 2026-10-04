@@ -1,36 +1,24 @@
 //! IPC server：双 socket（JSON API + 事件流）。
 //!
-//! - API socket：UnixStream，每连接一线程，请求→CoreMsg::Api→响应
-//! - 事件 socket：UnixStream，每连接一线程，订阅后持续推送 Envelope JSONL
+//! - API socket：每连接一线程，请求→CoreMsg::Api→响应
+//! - 事件 socket：每连接一线程，订阅后持续推送 Envelope JSONL
+//!
+//! 传输层跨平台（R57）：Unix domain socket（Linux/macOS）↔ TCP 回环（Windows），
+//! 统一抽象在 maestro_client::transport —— 线协议（JSONL）不变。
 //!
 //! 慢客户端由 EventHub 的有界队列兜底（满即断开，客户端凭 seq 重连重放）
 
 use crate::core::CoreMsg;
 use crate::eventhub::EventHub;
+use maestro_client::transport::{self, Addr, Listener, Stream};
 use maestro_protocol::api::{Method, Request, Response};
 use maestro_protocol::events::Envelope;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::time::Duration;
-
-/// IPC 路径约定
-pub struct IpcPaths {
-    pub api_sock: PathBuf,
-    pub events_sock: PathBuf,
-}
-
-impl IpcPaths {
-    pub fn new(data_dir: &Path) -> Self {
-        Self {
-            api_sock: data_dir.join("maestro.api.sock"),
-            events_sock: data_dir.join("maestro.events.sock"),
-        }
-    }
-}
 
 /// socket 服务的停机句柄：stop() 退出 accept 循环并回收线程。
 /// 用途：e2e 同 data_dir 起第二实例前释放 socket 路径
@@ -51,33 +39,16 @@ impl ServerGuard {
     }
 }
 
-/// stale socket 探活（herdr 决策 A9）：只删自己的 socket。
-/// 通过尝试连接：连得上=有 daemon 在用（绝不删）；连不上=stale。
-fn remove_stale_socket(path: &Path) {
-    if !path.exists() {
-        return;
-    }
-    match UnixStream::connect(path) {
-        Ok(_) => {
-            // 有活的 listener —— 不碰
-        }
-        Err(_) => {
-            // 没人听：stale，清理
-            let _ = std::fs::remove_file(path);
-        }
-    }
-}
-
 /// accept 循环：非阻塞 + 停机标志轮询（20ms 粒度）。
 /// 已接受的连接流是阻塞模式（Linux accept 不继承 O_NONBLOCK）。
 fn accept_loop(
-    listener: UnixListener,
+    listener: Listener,
     stop: Arc<AtomicBool>,
-    on_conn: impl Fn(UnixStream) + Send + Sync + 'static,
+    on_conn: impl Fn(Stream) + Send + Sync + 'static,
 ) {
     while !stop.load(Ordering::SeqCst) {
         match listener.accept() {
-            Ok((stream, _)) => on_conn(stream),
+            Ok(stream) => on_conn(stream),
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 std::thread::sleep(Duration::from_millis(20));
             }
@@ -86,27 +57,18 @@ fn accept_loop(
     }
 }
 
-/// 启动双 socket 服务（返回停机句柄）
+/// 启动双 socket 服务（绑定端点 + 返回停机句柄与 api 端点）。
+/// api 端点用于回填 ENV_SOCKET_PATH —— Windows 下 TCP 端口 bind 后才确定。
 pub fn serve(
     hub: Arc<EventHub>,
     core_tx: Sender<CoreMsg>,
-    paths: &IpcPaths,
+    data_dir: &Path,
     store: Option<Arc<std::sync::Mutex<crate::persist::EventStore>>>,
-) -> std::io::Result<ServerGuard> {
-    std::fs::create_dir_all(paths.api_sock.parent().unwrap())?;
-    remove_stale_socket(&paths.api_sock);
-    remove_stale_socket(&paths.events_sock);
-
-    let api_listener = UnixListener::bind(&paths.api_sock)?;
-    let events_listener = UnixListener::bind(&paths.events_sock)?;
+) -> std::io::Result<(ServerGuard, Addr)> {
+    let (api_listener, events_listener, api_addr) = transport::bind_endpoints(data_dir)?;
     // 非阻塞 accept（停机靠标志轮询）
     api_listener.set_nonblocking(true)?;
     events_listener.set_nonblocking(true)?;
-    // 0600：仅属主可访问
-    for p in [&paths.api_sock, &paths.events_sock] {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600));
-    }
 
     let stop = Arc::new(AtomicBool::new(false));
     let mut handles = vec![];
@@ -116,7 +78,7 @@ pub fn serve(
         let tx = core_tx.clone();
         let stop = stop.clone();
         handles.push(std::thread::spawn(move || {
-            let on_conn = move |stream: UnixStream| {
+            let on_conn = move |stream: Stream| {
                 let tx = tx.clone();
                 std::thread::spawn(move || {
                     if let Err(e) = handle_api_conn(stream, &tx) {
@@ -134,7 +96,7 @@ pub fn serve(
         let store = store.clone();
         let stop = stop.clone();
         handles.push(std::thread::spawn(move || {
-            let on_conn = move |stream: UnixStream| {
+            let on_conn = move |stream: Stream| {
                 let hub = hub.clone();
                 let store = store.clone();
                 std::thread::spawn(move || {
@@ -147,11 +109,11 @@ pub fn serve(
         }));
     }
 
-    Ok(ServerGuard { stop, handles })
+    Ok((ServerGuard { stop, handles }, api_addr))
 }
 
 /// API 连接：逐行读 JSON-RPC 请求 → Core → 回响应
-fn handle_api_conn(stream: UnixStream, tx: &Sender<CoreMsg>) -> std::io::Result<()> {
+fn handle_api_conn(stream: Stream, tx: &Sender<CoreMsg>) -> std::io::Result<()> {
     let reader = BufReader::new(stream.try_clone()?);
     let mut writer = stream;
     for line in reader.lines() {
@@ -208,7 +170,7 @@ fn handle_api_conn(stream: UnixStream, tx: &Sender<CoreMsg>) -> std::io::Result<
 
 /// 事件连接：首行可选 {"from_seq":N} 订阅，之后持续推送
 fn handle_events_conn(
-    stream: UnixStream,
+    stream: Stream,
     hub: &EventHub,
     store: Option<&Arc<std::sync::Mutex<crate::persist::EventStore>>>,
 ) -> std::io::Result<()> {

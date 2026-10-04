@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! 0.11 安全基线 e2e：敏感 workdir / 任意 ref 回滚 / 超长输入在 API 层被拒。
 
 use maestro_e2e::*;

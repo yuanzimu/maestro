@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! R3 多轮驱动验证（机制层，R3_PROTOCOL.md）。
 //! 真实 claude CLI 缺席时用 mock CLI 验证驱动机制：session 续接、
 //! 轻推注入持久性、坏 sid 容错、kill -9 崩溃恢复、JSONL 成本账。
