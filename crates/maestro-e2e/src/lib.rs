@@ -67,6 +67,16 @@ impl TestDaemon {
         )
     }
 
+    /// 并发上限 + Worker 环境同时指定（负载混沌用，R44）
+    pub fn start_limited_with_env(
+        worker_program: &str,
+        worker_args: &[&str],
+        max_parallel: usize,
+        worker_env: Vec<(String, String)>,
+    ) -> Self {
+        Self::build(worker_program, worker_args, None, max_parallel, worker_env)
+    }
+
     fn build(
         worker_program: &str,
         worker_args: &[&str],
