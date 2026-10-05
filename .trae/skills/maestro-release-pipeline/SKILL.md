@@ -51,6 +51,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "C:\dev\maestro\desktop\scri
 ## 步骤 4：测试
 
 - **Rust 全量**：`. build-env.ps1; $env:CARGO_TARGET_DIR='C:\cargo-target\maestro'; cargo test`（日志 Tee 到文件，检查 `CARGO_EXIT_CODE=0`、无 `FAILED`）。
+- ⚠️ **e2e 盲区（2026-10-05 实证教训）**：e2e 全部 `#![cfg(unix)]`，Windows 本地**编译都不覆盖**其内容 —— daemon 行为改动本地全绿 ≠ e2e 绿。改了 daemon/协议就必须**推送后盯 CI 的 ubuntu/macOS job 结果**再收尾（例：急停持久化修复曾因 persistence 用例依赖旧 bug 在 CI 双平台挂）。
 - **GUI 回归**（需要时）：先结束 maestro-desktop/daemon，静默安装 `setup.exe /S`；带 CDP 启动：
   `$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS='--remote-debugging-port=9222'`
   playwright-core 已装在 `C:\dev\maestro\desktop`；回归脚本 `scripts\uitest-regress.cjs`（4 项：事件重放/任务详情/急停恢复/轮数轻推）。
