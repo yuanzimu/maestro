@@ -6,6 +6,25 @@
 use maestro_protocol::types::*;
 use std::path::Path;
 use std::process::Command;
+use std::thread;
+use std::time::Duration;
+
+/// git 锁冲突重试次数（指数退避：50/100/200/400/800ms，累计约 1.55s）。
+/// 背景：急停已 SIGSTOP 本 worktree 的 worker，但共享同一 .git 的**外部**
+/// git 进程（用户手动操作 / 并行 worktree 的 gc / 杀毒扫描持锁）仍可能短
+/// 暂持有 index.lock / ref 锁，导致急停快照偶发失败。锁等待是瞬时的，
+/// 短退避重试即可消除绝大多数偶发失败；真正的硬错误仍立即上抛。
+const LOCK_RETRIES: u32 = 5;
+
+/// 判断 stderr 是否为 git 锁冲突（index.lock / ref lock / 无法立即锁定）。
+fn is_lock_conflict(stderr: &str) -> bool {
+    stderr.contains("Unable to create") && stderr.contains(".lock")
+        || stderr.contains("File exists") && stderr.contains(".lock")
+        || stderr.contains("could not lock")
+        || stderr.contains("cannot lock ref")
+        || stderr.contains("unable to lock")
+        || stderr.contains("is locked but not by us")
+}
 
 /// checkpoint 引用命名空间：refs/maestro/cp/<task>/<seq>-<label>
 pub fn cp_ref(task: &TaskId, seq: u32, reason: CpReason) -> CheckpointRef {
@@ -56,6 +75,26 @@ fn git(worktree: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// 带锁冲突退避重试的 git 调用。仅在识别为锁冲突时重试；
+/// spawn 失败与其他硬错误立即返回。用于 capture/restore 等写路径。
+fn git_retry(worktree: &Path, args: &[&str]) -> Result<String, String> {
+    let mut attempt = 0;
+    loop {
+        match git(worktree, args) {
+            Ok(out) => return Ok(out),
+            Err(e) => {
+                if attempt < LOCK_RETRIES && is_lock_conflict(&e) {
+                    // 指数退避：50ms 起，每轮翻倍
+                    thread::sleep(Duration::from_millis(50 * 2u64.pow(attempt)));
+                    attempt += 1;
+                } else {
+                    return Err(e);
+                }
+            }
+        }
+    }
+}
+
 /// 单个 checkpoint 的展开信息
 #[derive(Debug, Clone)]
 pub struct CheckpointInfo {
@@ -81,13 +120,13 @@ pub fn capture(
     clock: &dyn maestro_protocol::Clock,
 ) -> Result<CheckpointRef, String> {
     // 1. 暂存全部（含 untracked；.gitignore 的构建产物天然排除）
-    git(worktree, &["add", "-A"])?;
+    git_retry(worktree, &["add", "-A"])?;
     // add 之后的主体包进闭包：任一步失败都在传播错误前尽力 reset，
     // 否则改动会以 staged 状态留在 index，违背「工作区零扰动」契约
     // （外部 git 并发持锁/磁盘满时 write-tree、update-ref 等可能失败）。
     let result = (|| -> Result<CheckpointRef, String> {
         // 2. 树对象
-        let tree = git(worktree, &["write-tree"])?;
+        let tree = git_retry(worktree, &["write-tree"])?;
         // 3. 父 commit：最近 checkpoint（无则用 HEAD，允许空仓 --allow-empty）
         let seq = next_seq(worktree, task)?;
         let parent = latest_commit(worktree, task).or_else(|| head_commit(worktree));
@@ -105,14 +144,14 @@ pub fn capture(
             args.push("-p");
             args.push(p.as_str());
         }
-        let commit = git(worktree, &args)?;
+        let commit = git_retry(worktree, &args)?;
         // 5. update-ref
         let r = cp_ref(task, seq, reason);
-        git(worktree, &["update-ref", r.as_str(), commit.as_str()])?;
+        git_retry(worktree, &["update-ref", r.as_str(), commit.as_str()])?;
         Ok(r)
     })();
     // 无论成败都还原 index（reset 本身失败不覆盖原始错误）
-    let reset_err = git(worktree, &["reset"]).err();
+    let reset_err = git_retry(worktree, &["reset"]).err();
     match result {
         Ok(r) if reset_err.is_none() => Ok(r),
         Ok(_r) => Err(reset_err.unwrap_or_default()),
@@ -130,8 +169,8 @@ pub fn restore(
 ) -> Result<CheckpointRef, String> {
     // I4：回滚本身可撤销 —— 先快照当前状态
     let pre = capture(worktree, task, 0, CpReason::PreRollback, clock)?;
-    let _ = git(worktree, &["reset", "--hard", to.as_str()])?;
-    git(worktree, &["clean", "-fd"])?;
+    let _ = git_retry(worktree, &["reset", "--hard", to.as_str()])?;
+    git_retry(worktree, &["clean", "-fd"])?;
     Ok(pre)
 }
 
@@ -329,5 +368,45 @@ mod tests {
             after.contains("?? dirty.txt"),
             "untracked 应保持 untracked: {after}"
         );
+    }
+
+    /// 锁冲突分类器：锁类错误识别为可重试，其他错误不重试。
+    #[test]
+    fn lock_conflict_classifier() {
+        assert!(is_lock_conflict(
+            "fatal: Unable to create '.git/index.lock': File exists."
+        ));
+        assert!(is_lock_conflict(
+            "error: cannot lock ref 'refs/maestro/cp/t1/1-emergency'"
+        ));
+        assert!(is_lock_conflict("fatal: could not lock config file"));
+        assert!(!is_lock_conflict("fatal: not a git repository"));
+        assert!(!is_lock_conflict("error: pathspec did not match"));
+    }
+
+    /// 急停快照遇瞬时持锁：锁在退避窗口内释放后应成功（偶发失败主场景）。
+    /// 先同步建锁保证首次必撞锁，后台线程 150ms 后释放；重试预算远大于此。
+    #[test]
+    fn capture_survives_transient_lock() {
+        let tmp = init_repo();
+        let p = tmp.path();
+        write(p, "dirty.txt", "d");
+        let lock = p.join(".git").join("index.lock");
+        std::fs::write(&lock, b"").unwrap();
+        let lock_for_thread = lock.clone();
+        let h = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(150));
+            let _ = std::fs::remove_file(&lock_for_thread);
+        });
+
+        let t = TaskId::new("t1");
+        let cp = capture(p, &t, 1, CpReason::Emergency, &SystemClock);
+        h.join().unwrap();
+        assert!(cp.is_ok(), "瞬时锁释放后应急快照应成功: {cp:?}");
+        assert!(
+            git(p, &["status", "--porcelain"]).unwrap().contains("?? dirty.txt"),
+            "成功后工作区应保持原状"
+        );
+        assert!(!lock.exists(), "成功后不应残留 index.lock");
     }
 }

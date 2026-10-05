@@ -1,12 +1,14 @@
 // Create a GitHub release for a given tag and upload the NSIS installer.
-// Usage: node gh-release.cjs <version> <notes.md>
+// Usage: node gh-release.cjs <version> <notes.md> [--prerelease]
 // Example: node gh-release.cjs 0.2.3 C:\\dev\\release-v023.md
+//          node gh-release.cjs 0.2.4 C:\\dev\\release-v024.md --prerelease
 // Token from GH_TOKEN env only; never logged.
 const fs = require('fs');
 const https = require('https');
 
 const VERSION = process.argv[2];
 const NOTES = process.argv[3];
+const PRERELEASE = process.argv.includes('--prerelease');
 const TOKEN = process.env.GH_TOKEN;
 const REPO = 'yuanzimu/maestro';
 const TAG = 'v' + VERSION;
@@ -15,7 +17,7 @@ const ASSET = BUNDLE_DIR + '\\Maestro_' + VERSION + '_arm64-setup.exe';
 const ASSET_NAME = 'Maestro_' + VERSION + '_arm64-setup.exe';
 
 if (!VERSION || !NOTES || !TOKEN) {
-  console.error('usage: node gh-release.cjs <version> <notes.md>  (GH_TOKEN env required)');
+  console.error('usage: node gh-release.cjs <version> <notes.md> [--prerelease]  (GH_TOKEN env required)');
   process.exit(1);
 }
 
@@ -51,12 +53,13 @@ function api(host, method, path, body, headers) {
 
 (async () => {
   const notes = fs.readFileSync(NOTES, 'utf8');
+  console.log('releasing', TAG, PRERELEASE ? '(prerelease)' : '(stable)');
   const body = JSON.stringify({
     tag_name: TAG,
-    name: 'Maestro v' + VERSION + ' - Windows desktop client',
+    name: 'Maestro v' + VERSION + (PRERELEASE ? ' (pre-release)' : ' - Windows desktop client'),
     body: notes,
     draft: false,
-    prerelease: false,
+    prerelease: PRERELEASE,
   });
 
   // If a release already exists for the tag, update it instead of failing.
