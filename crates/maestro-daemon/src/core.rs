@@ -205,12 +205,20 @@ impl Core {
         }
         let started_at = clock.now_ms();
         let steering = SteeringQueue::open(&cfg.data_dir);
+        // 急停相位由事件流派生（EmergencyStopped/EmergencyResumed 都已入库）：
+        // 此前硬编码 None —— 急停后 daemon 重启即「忘记」急停，冻结期入队的
+        // 新任务被 try_start_queued 错误启动（B12 Frozen 拦截失效）
+        let emergency = if authority.emergency_frozen {
+            EmergencyPhase::Frozen
+        } else {
+            EmergencyPhase::None
+        };
         let mut core = Self {
             ctx: Ctx::new(hub, authority, clock),
             cfg,
             metas: HashMap::new(),
             steering,
-            emergency: EmergencyPhase::None,
+            emergency,
             store,
             tx,
             rx,
@@ -588,13 +596,13 @@ impl Core {
             emergency::resume_all(&mut self.ctx, &self.metas, &mut self.steering, mode);
         self.emergency = EmergencyPhase::None;
         // 竞态修复：急停挂起但 worker 已死的任务 —— 重拉进程而非假恢复
-        for task in dead_suspended {
+        for task in &dead_suspended {
             if !self.slots_free() {
                 break;
             }
             // 急停期间积压的轻推随 respawn 注入（投递语义 v0.15）
-            let prefix = self.steering_prefix(&task);
-            if let Ok(w) = self.spawn_worker_for(&task, prefix) {
+            let prefix = self.steering_prefix(task);
+            if let Ok(w) = self.spawn_worker_for(task, prefix) {
                 self.ctx.publish(Event::Resumed {
                     task: task.clone(),
                     worker: w,
@@ -604,6 +612,14 @@ impl Core {
                 });
             }
         }
+        // 全局解除标记：急停时若无任务被冻结，上面一条 Resumed 都不会有 ——
+        // 只有本事件能让 recover() 派生出「急停已解除」（否则空冻结场景
+        // 重启后永远卡 Frozen，新任务全被 B12 拦截）
+        let mut all_resumed = resumed.clone();
+        all_resumed.extend(dead_suspended.iter().cloned());
+        self.ctx.publish(Event::EmergencyResumed {
+            resumed: all_resumed,
+        });
         // B12：调度器解冻 —— 补位启动冻结期入队/被搁置的任务（受槽位约束）
         self.try_start_queued();
         Response::Ok {
@@ -1664,5 +1680,59 @@ impl Core {
                 message: msg.into(),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use maestro_protocol::SystemClock;
+    use std::sync::Arc;
+
+    fn cfg_for(dir: &std::path::Path) -> CoreConfig {
+        CoreConfig {
+            data_dir: dir.to_path_buf(),
+            ..CoreConfig::default()
+        }
+    }
+
+    /// 急停相位重启持久化（不持久化修复的回归）：
+    /// 空冻结场景（急停时无运行任务 → 无任何 Resumed 事件可派）下，
+    /// EmergencyStopped 入库 → recover 派生 Frozen（此前硬编码 None，
+    /// 重启后 B12 冻结拦截失效）；EmergencyResumed 入库 → recover 派生 None。
+    #[test]
+    fn emergency_phase_survives_recover() {
+        let tmp = tempfile::tempdir().unwrap();
+        let clock = Arc::new(SystemClock);
+
+        // 第一代：急停（空冻结 —— 恰是无 Resumed 可派的盲区）
+        {
+            let mut c = Core::new(cfg_for(tmp.path()), clock.clone());
+            c.ctx.publish(Event::EmergencyStopped {
+                workers: vec![],
+                reason: "test-panic".into(),
+            });
+        }
+        // daemon 重启：recover 应派生 Frozen
+        {
+            let (c, _) = Core::recover(cfg_for(tmp.path()), clock.clone());
+            assert_eq!(
+                c.emergency,
+                EmergencyPhase::Frozen,
+                "急停后重启，emergency 应派生为 Frozen"
+            );
+        }
+        // 第二代：解除急停（直接 publish EmergencyResumed —— api 层同款路径）
+        {
+            let mut c = Core::new(cfg_for(tmp.path()), clock.clone());
+            c.ctx.publish(Event::EmergencyResumed { resumed: vec![] });
+        }
+        // 再重启：应派生 None
+        let (c, _) = Core::recover(cfg_for(tmp.path()), clock);
+        assert_eq!(
+            c.emergency,
+            EmergencyPhase::None,
+            "resume_all 后重启，emergency 应派生为 None"
+        );
     }
 }

@@ -140,6 +140,11 @@ function reducer(state: AppState, a: Action): AppState {
           emergency: { active: true, reason: String(env.event.reason ?? "") },
         };
       }
+      // 急停解除（守护事件）：空冻结场景 resume_all 无任何 Resumed，
+      // 只有本事件能清横幅；历史事件库里无此类型 → 对旧数据无害
+      if (env.event.type === "emergency_resumed") {
+        next = { ...next, emergency: null };
+      }
       if (env.event.type === "resumed") {
         // 只认 resume_all（via=resume_all）：自动恢复/单任务恢复的
         // resumed 事件不得清全局急停横幅（否则无关任务的网络自动恢复

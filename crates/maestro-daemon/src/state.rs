@@ -63,6 +63,11 @@ pub struct Authority {
     pub workers: HashMap<WorkerId, WorkerRecord>,
     /// 任务入队计数（queue_seq 分配器；重放自动重建）
     task_counter: u64,
+    /// 全局急停态（派生：EmergencyStopped 置位 / EmergencyResumed 清零）。
+    /// Core::recover 据此重建 emergency 相位 —— 不持久化的缺口在
+    /// 「急停后 daemon 重启即忘记急停」，重启后新任务会被错误启动
+    /// （用例 B12 的 Frozen 拦截失效）。
+    pub emergency_frozen: bool,
 }
 
 impl Authority {
@@ -269,6 +274,13 @@ impl Authority {
                 if let Some(t) = self.tasks.get_mut(task) {
                     t.round = t.round.saturating_add(1);
                 }
+            }
+            // ---- 全局急停派生（emergency_frozen，recover 重建依据）----
+            EmergencyStopped { .. } => {
+                self.emergency_frozen = true;
+            }
+            EmergencyResumed { .. } => {
+                self.emergency_frozen = false;
             }
             // 与状态无关的事件（叙事/反馈/账本/急停快照…）—— 未来 UI 消费
             _ => {}
@@ -616,6 +628,35 @@ mod tests {
         assert_eq!(t.state, WorkerState::Queued);
         assert_eq!(t.blocked_kind, None);
         assert_eq!(t.acceptance_failures, 0, "重试后连败计数应清零");
+    }
+
+    /// 急停派生字段（不持久化修复）：apply 与 replay 同源；只停不恢复 = Frozen
+    #[test]
+    fn emergency_frozen_derived_from_events() {
+        let stopped = Event::EmergencyStopped {
+            workers: vec![],
+            reason: "r".into(),
+        };
+        let resumed = Event::EmergencyResumed { resumed: vec![] };
+        // 在线 apply：置位 → 清零
+        let mut live = Authority::new();
+        live.apply(&stopped, 0);
+        assert!(live.emergency_frozen, "急停后应为 Frozen");
+        live.apply(&resumed, 1);
+        assert!(!live.emergency_frozen, "resume_all 后应为 None");
+        // 重放一致（A9 口径）
+        let envs: Vec<Envelope> = [stopped.clone(), resumed]
+            .iter()
+            .enumerate()
+            .map(|(i, e)| Envelope::new(i as u64 + 1, e.clone()))
+            .collect();
+        assert!(!Authority::replay(&envs).emergency_frozen);
+        // 只停不恢复（重启场景）：Frozen 存活
+        let only_stop = Authority::replay(&[Envelope::new(1, stopped)]);
+        assert!(
+            only_stop.emergency_frozen,
+            "急停后未恢复，重放应派生 Frozen"
+        );
     }
 
     /// 验收通过后连败计数清零（两次失败 → 通过 → 再失败：计数从 1 重新算）

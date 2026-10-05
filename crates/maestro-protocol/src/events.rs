@@ -126,6 +126,16 @@ pub enum Event {
         workers: Vec<WorkerId>,
         reason: String,
     },
+    /// 全局急停解除（resume_all 完成）。
+    /// 与逐任务的 Resumed(via=ResumeAll) 互补：急停时若无任务被冻结，
+    /// resume_all 不会产生任何 Resumed 事件 —— 只有本事件能可靠标记
+    /// 「急停已解除」，daemon 重启后据此派生 emergency 相位（不持久化
+    /// 修复：否则空冻结场景永远卡在 Frozen）。macOS 侧 switch 容错未知
+    /// 类型，旧客户端安全忽略。
+    EmergencyResumed {
+        /// 本次恢复的任务数（供 UI 提示；0 = 急停时本就无冻结任务）
+        resumed: Vec<TaskId>,
+    },
     EmergencySnapshotted {
         per_task: Vec<EmergencySnapshot>,
     },
@@ -299,6 +309,7 @@ impl Event {
             | ResumeAttempt { .. }
             | AcceptanceGatePassed { .. }
             | CostDrift { .. }
+            | EmergencyResumed { .. }
             | Suspended { .. } => Priority::Warning,
 
             // done 结果卡也弹通知（U9 三类之一）
@@ -333,6 +344,24 @@ mod tests {
         assert_eq!(json["event"]["reason"], "network_lost");
         assert_eq!(json["priority"], "warning");
         assert_eq!(json["seq"], 1);
+    }
+
+    /// EmergencyResumed（不持久化修复引入）：tag/priority/负载 wire 形状
+    #[test]
+    fn emergency_resumed_wire_format() {
+        let env = Envelope::new(
+            2,
+            Event::EmergencyResumed {
+                resumed: vec![TaskId::new("t-1")],
+            },
+        );
+        let json = serde_json::to_value(&env).unwrap();
+        assert_eq!(json["event"]["type"], "emergency_resumed");
+        assert_eq!(json["priority"], "warning");
+        assert_eq!(json["event"]["resumed"][0], "t-1");
+        // 往返（daemon 重放路径同一 serde 配置）
+        let back: Envelope = serde_json::from_value(json).unwrap();
+        assert!(matches!(back.event, Event::EmergencyResumed { .. }));
     }
 
     /// 优先级分级规则（U9）
