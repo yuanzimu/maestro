@@ -9,10 +9,12 @@
 
 pub mod acceptance;
 pub mod adapter;
+pub mod budget;
 pub mod checkpoints;
 pub mod core;
 pub mod emergency;
 pub mod eventhub;
+pub mod gateway;
 pub mod llm;
 pub mod narrative;
 pub mod persist;

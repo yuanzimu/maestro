@@ -101,6 +101,63 @@ impl TestDaemon {
         Self::build(worker_program, worker_args, None, max_parallel, worker_env)
     }
 
+    /// 网关（CCR）+ 硬预算可指定（v2.5 Sprint A 预算强制 e2e 用）。
+    /// gateway=None 保持默认禁用；budget=None 保持默认禁用。
+    pub fn start_with_gateway_budget(
+        worker_program: &str,
+        worker_args: &[&str],
+        gateway: maestro_daemon::gateway::GatewayConfig,
+        budget: maestro_daemon::budget::TaskBudget,
+    ) -> Self {
+        Self::build_gb(worker_program, worker_args, None, gateway, budget)
+    }
+
+    fn build_gb(
+        worker_program: &str,
+        worker_args: &[&str],
+        data_dir: Option<PathBuf>,
+        gateway: maestro_daemon::gateway::GatewayConfig,
+        budget: maestro_daemon::budget::TaskBudget,
+    ) -> Self {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = data_dir.unwrap_or_else(|| tmp.path().to_path_buf());
+        let cfg = CoreConfig {
+            data_dir: dir.clone(),
+            workdir: dir.clone(),
+            worker_program: worker_program.to_string(),
+            worker_args: worker_args.iter().map(|s| s.to_string()).collect(),
+            socket_path: dir.join("maestro.api.sock").display().to_string(),
+            max_parallel_workers: DEFAULT_MAX_PARALLEL_WORKERS,
+            default_model: "claude-sonnet-4".into(),
+            worker_env: vec![],
+            gateway,
+            budget,
+        };
+        let clock = Arc::new(MockClock::new());
+        let (core, _) = Core::recover(cfg, clock.clone());
+        let core = Arc::new(Mutex::new(core));
+        let (tx, hub, store) = {
+            let g = core.lock().unwrap();
+            (g.sender(), g.hub_handle(), g.event_store_handle())
+        };
+        let (guard, api_addr) =
+            maestro_daemon::server::serve(hub, tx.clone(), &dir, store).expect("socket serve");
+        core.lock().unwrap().cfg.socket_path = api_addr.to_env_value();
+        {
+            let core = core.clone();
+            std::thread::spawn(move || {
+                core.lock().unwrap().run();
+            });
+        }
+        Self {
+            tx,
+            clock,
+            data_dir: dir,
+            _guard: guard,
+            _tmp: tmp,
+        }
+    }
+
     fn build(
         worker_program: &str,
         worker_args: &[&str],
@@ -119,6 +176,15 @@ impl TestDaemon {
             max_parallel_workers: max_parallel,
             default_model: "claude-sonnet-4".into(),
             worker_env,
+            // 测试不接网关、不设硬预算（避免向测试 worker 注入意外环境/挂起）
+            gateway: maestro_daemon::gateway::GatewayConfig {
+                url: String::new(),
+                token: String::new(),
+            },
+            budget: maestro_daemon::budget::TaskBudget {
+                max_cost_cents: None,
+                max_wall_ms: None,
+            },
         };
         let clock = Arc::new(MockClock::new());
         let (core, _) = Core::recover(cfg, clock.clone());

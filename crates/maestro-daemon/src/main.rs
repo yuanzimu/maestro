@@ -20,6 +20,12 @@ struct Args {
     /// 数据目录（默认 <系统临时目录>/maestro 或 $MAESTRO_DATA_DIR）
     #[arg(long)]
     data_dir: Option<String>,
+    /// 上游模型网关（CCR）地址；传空串 "" 关闭网关（默认 http://127.0.0.1:3456）
+    #[arg(long)]
+    ccr_url: Option<String>,
+    /// 与本地网关通话的鉴权令牌（默认 dummy，真 key 在 CCR Providers 内）
+    #[arg(long)]
+    ccr_token: Option<String>,
     /// `--` 之后是 worker 参数（透传，如 `-- /path/to/inner-cli`）
     #[arg(last = true)]
     worker_args: Vec<String>,
@@ -65,6 +71,21 @@ fn main() -> anyhow::Result<()> {
         }
     };
 
+    // 网关（CCR）配置：命令行优先（--ccr-url / --ccr-token），其次环境，缺省默认
+    let mut gateway = maestro_daemon::gateway::GatewayConfig::from_env();
+    if let Some(u) = cli.ccr_url {
+        gateway.url = u.trim_end_matches('/').to_string();
+    }
+    if let Some(t) = cli.ccr_token {
+        gateway.token = t;
+    }
+    // 硬预算：从环境读取（MAESTRO_BUDGET_CENTS / MAESTRO_BUDGET_WALL_MS）
+    let budget = maestro_daemon::budget::TaskBudget::from_env();
+    tracing::info!(
+        "model gateway: {}",
+        if gateway.enabled() { &gateway.url } else { "disabled (direct)" }
+    );
+
     // 恢复 or 全新启动：数据目录有事件库则恢复。
     // socket_path 先占位 —— 真实端点 bind 后才确定（Windows TCP 端口），见下方回填
     let cfg = CoreConfig {
@@ -89,6 +110,8 @@ fn main() -> anyhow::Result<()> {
         .iter()
         .filter_map(|k| std::env::var(k).ok().map(|v| ((*k).to_string(), v)))
         .collect(),
+        gateway,
+        budget,
     };
 
     let clock = Arc::new(maestro_protocol::SystemClock);

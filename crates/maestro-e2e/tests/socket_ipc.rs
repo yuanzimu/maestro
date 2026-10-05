@@ -20,6 +20,15 @@ fn spawn_socket_daemon(data_dir: &std::path::Path) -> (Arc<Mutex<Core>>, std::pa
         max_parallel_workers: 4,
         default_model: "claude-sonnet-4".into(),
         worker_env: vec![],
+        // 测试不接网关、不设硬预算
+        gateway: maestro_daemon::gateway::GatewayConfig {
+            url: String::new(),
+            token: String::new(),
+        },
+        budget: maestro_daemon::budget::TaskBudget {
+            max_cost_cents: None,
+            max_wall_ms: None,
+        },
     };
     let (core, _) = Core::recover(cfg, Arc::new(maestro_protocol::SystemClock));
     let core = Arc::new(Mutex::new(core));

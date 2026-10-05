@@ -1,11 +1,12 @@
 # Maestro 开发计划
 
-> 版本 v2.4 · 2026-10-01
+> 版本 v2.5 · 2026-10-05
 > v2.0：双产品矩阵 + Token 经济第一等公民 + 轻量硬约束
 > v2.1：新增 U 组体验层重大改进（8 项，源自 [UX_DEEP_DIVE.md](./UX_DEEP_DIVE.md) 第一部分）
 > v2.2：以 U 组信任旅程为主线重排 P0/P1/P2——P0 三个 UX 地基（LLM client / 多轮驱动 / 事件埋点），P1 三个 Sprint（入口信心→过程掌控→回顾成长）
 > v2.3：实际使用视角增补 U9~U14（第二部分）——P0 新增 suspended 语义、急停 API、doctor 命令；新增 T6 错峰执行
 > v2.4：**U9~U14 细化为可执行任务**合并进各阶段；U10/T6 完成详细设计（见 [U10_T6_DESIGN.md](./U10_T6_DESIGN.md)：三阶段急停 / git ref 快照原语 / T6 双路径调度与 Batch Manager）
+> v2.5：**互补项目 + nginx + 三端 GUI 调研落地**——省钱引擎对接 CCR（不自研路由）、Linux GUI 复用 Tauri/React、Server 放弃 nginx 补丁走 Rust 独立实现；新增第十~十二章与决策 23~27
 >
 > 依据：[HERDR_ANALYSIS.md](./HERDR_ANALYSIS.md) + [TRAE_SOLO_ANALYSIS.md](./TRAE_SOLO_ANALYSIS.md) + [UX_DEEP_DIVE.md](./UX_DEEP_DIVE.md) + [U10_T6_DESIGN.md](./U10_T6_DESIGN.md)
 > 战略文档：[PROJECT_PLAN.md](./PROJECT_PLAN.md)
@@ -414,7 +415,86 @@ P2：U4 完整版（需内置 Executor D2）· U6 v2 检讨（需失败事件库
 
 Worker 市场（G7）/ 插件系统（H1）/ Web 客户端（H2，含移动端查看+审批，经 Server）/ MCP（H3）/ live handoff（A11）/ 多会话（A10）/ 出站脱敏（S7）/ 容器沙箱（S8）/ 浏览器技能（D6）/ **Desktop 连远程 Server 引擎**（B13 语义升级）/ PTY 兼容层（B8-B10，按社区需求决定是否做）/ 三视图评估（对话/看板/CLI 同源呈现）/ **跨项目批量任务**（U14，「在所有 service 仓库跑安全扫描」）。
 
-## 八、决策记录（v1→v2，含 v2.2 重排与 v2.3 增补）
+## 八、v2.5 互补项目调研与引擎增强（Sprint A 依据）
+
+> 调研 30+ 项目（2026-10-05，GitHub 一手数据）。结论：**能复用的不造轮子，能借协议的不追版本**。
+
+### 8.1 采纳清单
+
+| 项目 | License | 采纳方式 | 阶段 |
+|---|---|---|---|
+| **Claude Code Router (CCR, 37.6k★)** | MIT | 本地网关直连：daemon 把 worker 与自身 LLM 调用统一指向 `http://127.0.0.1:3456`，路由/key 池/fallback/成本核算交给 CCR | **Sprint A** |
+| **Foreman** | 自定义（只借设计不抄码） | turn/cost/time 硬预算闸门 + `touches` 文件足迹 + hash-sealed 审批 | **Sprint A**（预算）/ P2（足迹、封签） |
+| **AgentSmith (MIT)** | MIT | evidence bundle：验收必须留证据（失败测试→修复→通过→回执），根治谎报 done | Sprint A 轻量 / P1 完整 |
+| **OpenLLMetry + Langfuse (MIT)** | Apache / MIT | OTel Rust SDK 导出，观测 UI 不自建 | P2 |
+| **ACP（Agent Client Protocol，官方 Rust crate）** | Apache | adapter 双轨：stream-json 拿细粒度 + ACP 扩 agent 生态 | P1 立项 |
+| **goose（Rust, 55k★）** | Apache | 作为可指挥的 Rust agent 后端候选 | P2+ |
+
+### 8.2 CCR 对接技术事实（已核实）
+
+- CCR 是本地 HTTP 网关，默认 `HOST=127.0.0.1`、`PORT=3456`；同端口提供 Anthropic `/v1/messages`、OpenAI `/v1/chat/completions`、OpenAI Responses、FIM 端点。
+- Claude Code 接入：`ANTHROPIC_BASE_URL=http://127.0.0.1:3456` + `ANTHROPIC_AUTH_TOKEN=dummy`（CCR 自鉴权，真 key 在 CCR Providers 内）。
+- 模型名用 `provider,model` 语法；`/model` 可会话内热切。
+- Maestro 侧链路已验证可行：daemon 经 `worker_env` 注入环境 → rounder 用 `Command::new` 不清环境 → 内层 claude CLI 继承生效。
+
+### 8.3 风险与纪律
+
+- **供应链**：gpt-pilot 2025-08 投毒事件 → 第三方 agent 拉起必须完整性校验 + 路径白名单（已有 security 基线，CI 脚本纳入校验）。
+- **License 雷区**：Claude Squad（AGPL）、Phoenix（ELv2）、gpt-pilot/Crush（FSL）只看不抄；可复用限 MIT/Apache。
+- 退潮项目（gpt-engineer、Devina、Swarm、Crystal）不投入。
+
+## 九、Server 版技术路线：不打 nginx 补丁
+
+调研 nginx 源码（`src/core|event|http|os`、master-worker、11 phase、`ngx_module_t`、`--add-module`/`--add-dynamic-module`、njs/OpenResty）后的决策：
+
+1. **放弃真打补丁 / 写 C 模块**：任务/agent 生命周期编排（fork 子进程、多轮、验收、急停）触碰 worker「单线程非阻塞」红线；且 nginx 构建链/ABI 与「<30MB 单二进制 + install.sh」承诺冲突；mainline 无稳定 ABI、补丁需长期追版。
+2. **主线 = 借鉴架构、Rust 独立实现**：移植 master/worker（SIGHUP 热加载、graceful drain）、phase 管线（auth→quota→classify→route→upstream→audit）、upstream 抽象（健康检查/failover/SSE 透传）、token 维度 limit_req。
+3. **共存契约**：Maestro 对外标准 HTTP + `/health` + `/metrics`，企业现有 nginx/OpenResty 直接 `proxy_pass`，零 nginx 代码。三档部署：纯单二进制（默认）/ nginx+N Maestro / K8s ingress。
+4. 对标 F5 AI Gateway（2026-08：模型目录/预算实时扣减/MCP 工具授权/Guardrails fail-closed），以「托管整个 agent 任务生命周期」区别于 LiteLLM/Portkey 的请求代理。
+
+## 十、三端 GUI 优化计划（参照 Trae IDE）
+
+### 10.1 Trae IDE 对标要素
+
+左活动栏 + 可折叠侧边栏；顶部模式切换（Code/SOLO）；对话流 + inline diff + 审批门一体；命令面板（`Ctrl/Cmd+K`、`⇧⌘P`）；深浅主题 + 平台原生窗口控件；全局进度 + 通知中心；空状态引导。
+
+### 10.2 三端共性任务（一次投入三端受益）
+
+| # | 任务 | Sprint |
+|---|---|---|
+| C-1 | 统一设计语言：spacing/色板/状态色/字体阶梯（对齐现有 [styles.css](../desktop/src/styles.css)，macOS 硬编码改 system colors） | B |
+| C-2 | 布局改 Trae 式：左活动栏（任务/收件箱/事件/设置）+ 主区 + 右可折叠详情 | B |
+| C-3 | 命令面板 `Ctrl/Cmd+K` + 全局快捷输入 `Alt+M`（U1） | B |
+| C-4 | 计划审批门卡片：步骤 + 成本预估（U8）+ 批准/编辑/拒绝 | B |
+| C-5 | 结果卡 v2：摘要 + 验收状态 + 花费 + 节省比例 + inline diff（U5） | B |
+| C-6 | 通知中心：非打扰事件统一收纳，仅 blocked/done/异常系统通知（U9） | B |
+| C-7 | 空状态/断连态/首跑引导（U2）+ doctor 入口前置 | A/B |
+
+### 10.3 平台专项
+
+- **Windows（Tauri，最完整）**：sidecar 状态可视化；Win11 Mica/深浅色；`Alt+M` 注册 + 剪贴板识别；包体 <20MB（发布剔除 mock-cli）；急停用 Job Objects 补 freeze（现为 no-op）；IME composition 验证。
+- **macOS（AppKit 原生）**：SF Symbols 活动栏 + NSToolbar；深浅色自动；NSStatusItem 菜单栏 + 全局菜单 + `⌘N/⌘K`；**notarytool 公证 + Developer ID 签名**（现仅 ad-hoc）；Combine 推送替代 1.5s Timer；universal 二进制。
+- **Linux（方案 A，复用 Tauri/React）**：同一 Tauri 工程产出 Linux 包；**AppImage（主推）+ .deb + .rpm**；`.desktop` + 托盘（SNI）+ 跟随 GNOME/KDE 深浅色；全局快捷键走 XDG portals（X11/Wayland）；fcitx5 输入法验证（含 xrdp 场景）。
+
+### 10.4 Sprint 排期
+
+| Sprint | 周期 | 出口断言 |
+|---|---|---|
+| **A 省钱落地** | 2 周 | 真实任务经 CCR 路由，成本可量化；硬预算超限即挂起 |
+| **B 三端体验对齐** | 2~3 周 | 三端同一套界面语言；Linux GUI 可安装 |
+| **C 平台打磨** | 2 周 | Win Job Objects / mac 公证+菜单栏 / Linux AppImage+托盘；三端可分发 |
+
+#### Sprint A 实施进度（2026-10-05，机制层已完成）
+
+| 状态 | 交付 | 说明 |
+|---|---|---|
+| ✅ | [gateway.rs](../crates/maestro-daemon/src/gateway.rs) | CCR 配置/环境注入（Anthropic+OpenAI 四变量）/ daemon LLM client 指向网关 / 探活；命令行 `--ccr-url` `--ccr-token` + 环境 `MAESTRO_CCR_URL` `MAESTRO_CCR_TOKEN`（空串关闭） |
+| ✅ | [budget.rs](../crates/maestro-daemon/src/budget.rs) | Foreman 式 cost/wall 硬预算；环境 `MAESTRO_BUDGET_CENTS` `MAESTRO_BUDGET_WALL_MS`（0=不限） |
+| ✅ | Core 接线 | worker spawn 注入网关环境（同名键覆盖）；轮账入账后强制预算 → SIGSTOP + Suspended(BudgetExceeded) + 叙事快照 |
+| ✅ | 测试 | 新增 2 个预算 e2e（[budget_enforcement.rs](../crates/maestro-e2e/tests/budget_enforcement.rs)）；全 workspace **205 项全绿**；clippy `-D warnings` 零告警；生产 daemon 冒烟通过（默认网关 / `--ccr-url ""` 直连 / status / shutdown） |
+| ⬜ | 真实链路联调 | 需本机安装并配置 CCR（`npm i -g @musistudio/claude-code-router`）+ 真实 provider key，验证真实 claude CLI 经 CCR 路由与成本量化；机制层已用 mock 全量验证 |
+
+## 十一、决策记录（v1→v2，含 v2.2 重排与 v2.3 增补）
 
 | # | 决策 | 理由 |
 |---|---|---|
@@ -440,8 +520,13 @@ Worker 市场（G7）/ 插件系统（H1）/ Web 客户端（H2，含移动端�
 | 20 | **【v2.4】daemon 重启绝不收养 Worker，一律杀 + suspended(DaemonCrash)** | session ref + checkpoint 已保证可恢复，收养的复杂度（重建流/PTY）不值；孤儿清理是 I3 不变量（设计 §2.5） |
 | 21 | **【v2.4】T6 双路径按「交互性」分流：非交互 fan-out 走 Batch，可延迟交互任务走 off-peak** | Batch 的 24h SLA 只适合可并行独立请求；off-peak 保持交互性只是挪时间——eligibility 判断错会让 deadline 全违约（设计 §5） |
 | 22 | **【v2.4】T6 的省 token 报告只对比「同模型同路径牌价」，升级多花的钱如实计入** | 防「错峰报告」夸大——成本报告的诚实性是 T4 账本的信用底线（设计 §8-9） |
+| 23 | **【v2.5】省钱引擎对接 CCR，不自研模型路由** | CCR（MIT）已有路由/key 池/fallback/成本核算且保持更新；自研重复造轮子且需长期追 provider 协议；以 sidecar/网关复用，daemon 专注编排与预算 |
+| 24 | **【v2.5】Linux GUI 选方案 A：复用 Tauri/React 工程** | 三端共用一套前端，避免维护第三套原生 UI；最快补齐 Linux 桌面空白并保证界面统一 |
+| 25 | **【v2.5】Server 放弃 nginx 补丁，Rust 借鉴架构独立实现** | 子进程编排触碰 nginx worker 非阻塞红线；构建链/ABI 与单二进制承诺冲突；以标准 HTTP `/health`/`/metrics` 作为与 nginx 共存契约 |
+| 26 | **【v2.5】新增 Foreman 式 cost/time/turn 硬预算闸门** | 软预算只报告不阻止，失控时仍烧钱；硬闸门超限即挂起（复用 `SuspendReason::BudgetExceeded`，仅手动恢复），是「敢放手」的硬保障 |
+| 27 | **【v2.5】观测走 OpenTelemetry + Langfuse，不自建观测 UI；agent 生态走 ACP** | 标准协议不锁定厂商；ACP 一次接入整个 agent 生态，避免逐 CLI 写方言 |
 
-## 九、下一步
+## 十二、下一步
 
 ### 9.1 开工序列
 

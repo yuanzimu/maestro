@@ -56,6 +56,10 @@ pub struct CoreConfig {
     /// 透传给 Worker 的额外环境（白名单式；如 MAESTRO_CONTEXT_LIMIT
     /// —— 上下文轮转阈值，R37）
     pub worker_env: Vec<(String, String)>,
+    /// 上游模型网关（CCR）配置：worker 与 daemon 自身 LLM 调用统一指向网关
+    pub gateway: crate::gateway::GatewayConfig,
+    /// 硬预算闸门：每轮轮账后强制执行，超限即挂起
+    pub budget: crate::budget::TaskBudget,
 }
 
 /// 默认槽位数：本地守护进程的保守起点（调研 R12 校准项）
@@ -78,6 +82,8 @@ impl Default for CoreConfig {
             max_parallel_workers: DEFAULT_MAX_PARALLEL_WORKERS,
             default_model: std::env::var("MAESTRO_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into()),
             worker_env: vec![],
+            gateway: crate::gateway::GatewayConfig::default(),
+            budget: crate::budget::TaskBudget::default(),
         }
     }
 }
@@ -811,10 +817,53 @@ impl Core {
             worker: Some(params.worker.clone()),
             usage,
         });
+        // 硬预算闸门（v2.5）：本轮入账后聚合花费/耗时，超限即冻结 + 挂起。
+        // 挂起后直接返回，worker 已被 SIGSTOP 静止（现场完整，仅手动恢复）。
+        if let Some(limit) = self.budget_violation(&params.task) {
+            self.enforce_budget(&params.task, limit);
+            return self.ok(
+                req,
+                serde_json::json!({ "recorded": true, "round": params.round, "budget_exceeded": true }),
+            );
+        }
         self.ok(
             req,
             serde_json::json!({ "recorded": true, "round": params.round }),
         )
+    }
+
+    /// 计算任务当前的预算命中（花费/耗时），无命中返回 None。
+    fn budget_violation(&self, task: &TaskId) -> Option<crate::budget::BudgetLimit> {
+        let v = self.task_vitals(task);
+        self.cfg.budget.check(v.cost_cents, v.wall_ms)
+    }
+
+    /// 执行预算超限：SIGSTOP 冻结当前 worker → Suspended(BudgetExceeded)
+    /// （仅手动恢复）+ 叙事快照记录原因。
+    fn enforce_budget(&mut self, task: &TaskId, limit: crate::budget::BudgetLimit) {
+        let Some(t) = self.ctx.authority.get(task).cloned() else {
+            return;
+        };
+        if let Some(w) = &t.worker {
+            if let Some(m) = self.metas.get(w) {
+                let _ = worker::freeze_group(m.pgid);
+            }
+        }
+        let worker = t.worker.clone().unwrap_or_else(|| WorkerId::new("none"));
+        let why = limit.describe();
+        self.ctx.publish(Event::NarrativeSnapshot {
+            task: task.clone(),
+            round: t.round,
+            milestone: format!("预算超限已挂起：{why}"),
+        });
+        self.ctx.publish(Event::Suspended {
+            task: task.clone(),
+            worker,
+            reason: SuspendReason::BudgetExceeded,
+            session_ref: t.session_ref.clone().unwrap_or_else(|| SessionRef::new("")),
+            checkpoint_ref: t.checkpoint_ref.clone().unwrap_or_else(|| CheckpointRef::new("")),
+            round: t.round,
+        });
     }
 
     /// 账本（0.9）：轮数/耗时/成本汇总 —— 「这个任务花了多少」一句话回答。
@@ -1542,6 +1591,11 @@ impl Core {
             Some(p) if !p.is_empty() => format!("{p}\n\n{}", t.prompt),
             _ => t.prompt.clone(),
         };
+        // 网关（CCR）环境优先：剔除 worker_env 中的同名键后追加，保证指向网关
+        let mut extra_env = self.cfg.worker_env.clone();
+        let gw_env = self.cfg.gateway.worker_env();
+        extra_env.retain(|(k, _)| !gw_env.iter().any(|(gk, _)| gk == k));
+        extra_env.extend(gw_env);
         let spec = SpawnSpec {
             worker: worker_id.clone(),
             task: task.clone(),
@@ -1549,7 +1603,7 @@ impl Core {
             args: self.cfg.worker_args.clone(),
             workdir: PathBuf::from(&t.task.workdir),
             log_dir: self.cfg.data_dir.join("logs"),
-            extra_env: self.cfg.worker_env.clone(),
+            extra_env,
             prompt,
         };
         // WorkerExit → CoreMsg 转发（waiter 线程只懂 WorkerExit）
