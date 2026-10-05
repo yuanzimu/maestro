@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "bundle:linux": "bash scripts/build-linux.sh"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.1.1",

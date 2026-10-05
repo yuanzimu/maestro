@@ -1012,7 +1012,10 @@ impl Core {
         if t.state.is_terminal() {
             return self.err(req, -409, "task already finished");
         }
-        let msg = self.steering.push(&params.task, params.message.clone());
+        let msg = match self.steering.push(&params.task, params.message.clone()) {
+            Ok(m) => m,
+            Err(e) => return self.err(req, -400, &e),
+        };
         self.ctx.publish(Event::SteeringQueued {
             task: params.task.clone(),
             message: msg.message,
@@ -1411,13 +1414,16 @@ impl Core {
         }
         // 反思回喂（aider 模式，R16）：失败差异进 steering，下一轮 worker
         // 开工即见 —— 不静默重试同样的假完成
-        let m = self.steering.push(
+        let m = match self.steering.push(
             task,
             format!(
                 "验收门第 {failures}/3 次失败：worker 退出码 0 但 worktree 无实际产物（读回校验）。\
                  请实际产出文件后再次报告完成，不要只输出完成声明。"
             ),
-        );
+        ) {
+            Ok(m) => m,
+            Err(_) => return, // 反思入队失败不阻断验收流程
+        };
         self.ctx.publish(Event::SteeringQueued {
             task: task.clone(),
             message: m.message,

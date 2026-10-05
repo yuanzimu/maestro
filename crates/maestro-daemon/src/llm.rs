@@ -189,7 +189,7 @@ pub fn cost_micro_cents(model: &str, input_tokens: u64, output_tokens: u64) -> O
     let in_mc = p.input_per_m.checked_mul(input_tokens)?;
     let out_mc = p.output_per_m.checked_mul(output_tokens)?;
     // 同样用 checked_add：溢出按「无法计价」返回 None，而非 panic/wrap 假低价
-    Some(in_mc.checked_add(out_mc)?)
+    in_mc.checked_add(out_mc)
 }
 
 /// 成本（整美分，向上取整 —— 账本条目精度）

@@ -206,10 +206,11 @@ mod imp {
             });
         match h {
             Ok(_) => {
-                if let Err(mut child) = tx.send(child) {
-                    // 线程在 recv 前死亡（极端）：兜底回收
-                    let _ = child.kill();
-                    let _ = child.wait();
+                if let Err(mut send_err) = tx.send(child) {
+                    // 线程在 recv 前死亡（极端）：兜底回收。
+                    // SendError<T> 把未送达的值放在 .0
+                    let _ = send_err.0.kill();
+                    let _ = send_err.0.wait();
                 }
                 Ok(())
             }
