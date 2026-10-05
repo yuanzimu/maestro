@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "默认能力：核心事件与 invoke（无 shell 插件需求，sidecar 由 Rust 侧 std::process 拉起）",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

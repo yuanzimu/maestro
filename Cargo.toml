@@ -8,7 +8,7 @@ members = [
     "crates/maestro-testkit",
     "crates/maestro-e2e",
 ]
-exclude = ["reference/herdr"]
+exclude = ["reference/herdr", "desktop/src-tauri"]
 
 [workspace.package]
 version = "0.1.1"

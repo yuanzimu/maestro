@@ -11,3 +11,10 @@ reference/herdr
 dist/*
 !dist/linux/
 dist/linux/out/
+
+# 桌面客户端（Tauri）构建产物
+desktop/node_modules/
+desktop/dist/
+desktop/src-tauri/target/
+desktop/src-tauri/bin/
+desktop/src-tauri/gen/
