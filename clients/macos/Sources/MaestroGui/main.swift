@@ -39,9 +39,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var selectedInboxID: String?
     private var uiTimer: Timer?
 
+    // 菜单栏常驻（B3-3）
+    private var statusItem: NSStatusItem?
+    private var miNewTask: NSMenuItem!
+    private var miEmergency: NSMenuItem!
+    private var miInbox: NSMenuItem!
+    private var miShowWindow: NSMenuItem!
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildWindow()
         buildMenu()
+        buildStatusItem()
         state.onUpdate = { [weak self] in self?.reloadUI() }
         state.start()
 
@@ -61,7 +69,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        true // 关窗即退出 GUI；daemon 独立后台常驻，任务不受影响
+        false // 关窗后经菜单栏 status item 常驻、可重开；daemon 也独立后台常驻
     }
 
     // MARK: - 窗口与布局
@@ -72,6 +80,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                           backing: .buffered, defer: false)
         window?.title = "Maestro — AI 任务指挥台"
         window?.minSize = NSSize(width: 860, height: 520)
+        window?.isReleasedWhenClosed = false // 关窗保留对象，经 status item 重开（防野指针）
         guard let content = window?.contentView else { return }
 
         let topBar = NSStackView()
@@ -158,7 +167,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         topBar.addArrangedSubview(btnNew)
 
         gearMenu = NSPopUpButton()
-        gearMenu.addItems(withTitles: ["⚙", "启动 Daemon", "演示模式启动（无 AI CLI）", "关停 Daemon",
+        gearMenu.addItems(withTitles: ["⚙", "引擎设置…", "启动 Daemon", "演示模式启动（无 AI CLI）", "关停 Daemon",
                                        "打开数据目录", "打开 daemon 日志"])
         gearMenu.selectItem(at: 0)
         gearMenu.item(at: 0)?.isEnabled = false
@@ -381,9 +390,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.mainMenu = mainMenu
     }
 
+    // MARK: - 菜单栏 status item
+
+    private func buildStatusItem() {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        item.button?.title = "M"
+        let menu = NSMenu()
+
+        miShowWindow = NSMenuItem(title: "显示 Maestro 窗口", action: #selector(showMainWindow), keyEquivalent: "")
+        menu.addItem(miShowWindow)
+        menu.addItem(.separator())
+        miNewTask = NSMenuItem(title: "新任务…", action: #selector(newTaskClicked), keyEquivalent: "n")
+        menu.addItem(miNewTask)
+        miInbox = NSMenuItem(title: "收件箱", action: #selector(openInboxFromStatus), keyEquivalent: "")
+        menu.addItem(miInbox)
+        miEmergency = NSMenuItem(title: "急停", action: #selector(emergencyClicked), keyEquivalent: "")
+        menu.addItem(miEmergency)
+        menu.addItem(.separator())
+        let miSettings = NSMenuItem(title: "引擎设置…", action: #selector(openEngineSettingsFromStatus), keyEquivalent: "")
+        menu.addItem(miSettings)
+        let miQuit = NSMenuItem(title: "退出 Maestro", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        menu.addItem(miQuit)
+
+        item.menu = menu
+        statusItem = item
+    }
+
+    @objc private func showMainWindow() {
+        if window == nil { buildWindow() }
+        window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc private func openInboxFromStatus() {
+        showMainWindow()
+        segTabs.selectedSegment = 1
+        tabChanged()
+    }
+
+    @objc private func openEngineSettingsFromStatus() {
+        EngineSettingsPanelController(state: state).show()
+    }
+
+    private func refreshStatusItem() {
+        // 未读（待处理收件箱）角标显示在按钮标题
+        let n = state.inbox.count
+        statusItem?.button?.title = n > 0 ? "M \(n)" : "M"
+        miInbox.title = n > 0 ? "收件箱（\(n) 待处理）" : "收件箱"
+        if state.isEmergencyStopped {
+            miEmergency.title = "▶ 恢复全部"
+        } else {
+            miEmergency.title = "🛑 急停"
+        }
+        miEmergency.isEnabled = state.connected
+        miNewTask.isEnabled = state.connected
+        miInbox.isEnabled = state.connected
+    }
+
     // MARK: - 刷新
 
     private func reloadUI() {
+        refreshStatusItem()
         // 状态区
         statusDot.color = state.connected ? .systemGreen : .systemRed
         statusDot.needsDisplay = true
@@ -489,6 +556,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func gearSelected() {
         guard let title = gearMenu.titleOfSelectedItem else { return }
         switch title {
+        case "引擎设置…": EngineSettingsPanelController(state: state).show()
         case "启动 Daemon": state.startDaemon()
         case "演示模式启动（无 AI CLI）": state.startDaemon(force: true)
         case "关停 Daemon": state.shutdownDaemon()

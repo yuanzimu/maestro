@@ -79,11 +79,19 @@ fn hard_budget_cost_exceeded_freezes_and_suspends() {
     let cur = workers["workers"][0]["id"].as_str().unwrap().to_string();
     let meta_pid = workers["workers"][0]["pid"].as_u64().unwrap_or(0);
     assert!(meta_pid > 0, "worker 记录应带 pid: {workers}");
-    let stat = std::fs::read_to_string(format!("/proc/{meta_pid}/stat")).unwrap_or_default();
-    let state_ch = stat.rsplit(')').next().unwrap_or("").split_whitespace().next();
+    // 跨平台读进程状态：`ps -o state= -p PID`（Linux/macOS 均支持，
+    // 原实现读 /proc/{pid}/stat —— macOS 无 /proc，恒报 None）
+    let state_out = std::process::Command::new("ps")
+        .args(["-o", "state=", "-p", &meta_pid.to_string()])
+        .output()
+        .unwrap_or_else(|_| panic!("ps 调用失败"));
+    let state_ch = String::from_utf8_lossy(&state_out.stdout)
+        .trim()
+        .chars()
+        .next();
     assert_eq!(
         state_ch,
-        Some("T"),
+        Some('T'),
         "worker 应被 SIGSTOP 停止（T 态），实际: {state_ch:?}"
     );
     let _ = cur;

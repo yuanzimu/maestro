@@ -422,3 +422,158 @@ extension EventsTableController {
         return f
     }()
 }
+
+// MARK: - 引擎设置窗口
+
+final class EngineSettingsPanelController: NSObject, NSWindowDelegate {
+    private let appState: AppState
+    private var panel: NSWindow!
+    private var gatewaySwitch: NSButton!
+    private var urlField: NSTextField!
+    private var tokenField: NSTextField!
+    private var costField: NSTextField!
+    private var wallField: NSTextField!
+    private var hintLabel: NSTextField!
+
+    init(state: AppState) { self.appState = state }
+
+    func show() {
+        let s = appState.engineSettings
+        panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 430),
+                         styleMask: [.titled, .closable],
+                         backing: .buffered, defer: false)
+        panel.title = "引擎设置"
+        panel.delegate = self
+        panel.isReleasedWhenClosed = false
+
+        let content = NSView()
+        panel.contentView = content
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 9
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 18),
+            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
+            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
+        ])
+
+        func caption(_ t: String) -> NSTextField {
+            let l = NSTextField(labelWithString: t)
+            l.font = .systemFont(ofSize: 11)
+            l.textColor = .secondaryLabelColor
+            return l
+        }
+        func sectionTitle(_ t: String) {
+            let l = NSTextField(labelWithString: t)
+            l.font = .systemFont(ofSize: 12, weight: .semibold)
+            stack.addArrangedSubview(l)
+        }
+
+        // ---- 网关 ----
+        sectionTitle("模型网关（CCR）")
+        gatewaySwitch = NSButton(checkboxWithTitle: "经 CCR 路由（分级路由 / key 池轮换 / provider fallback）",
+                                 target: self, action: #selector(gatewayToggled))
+        gatewaySwitch.state = s.gatewayEnabled ? .on : .off
+        stack.addArrangedSubview(gatewaySwitch)
+
+        stack.addArrangedSubview(caption("网关地址"))
+        urlField = NSTextField(string: s.gatewayURL)
+        urlField.placeholderString = "http://127.0.0.1:3456"
+        stack.addArrangedSubview(urlField)
+        urlField.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+
+        stack.addArrangedSubview(caption("鉴权令牌（本地网关用）"))
+        tokenField = NSTextField(string: s.gatewayToken)
+        stack.addArrangedSubview(tokenField)
+        tokenField.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+
+        // ---- 硬预算 ----
+        sectionTitle("硬预算（超限立即冻结 worker、挂起等你决定）")
+        let costRow = NSStackView()
+        costRow.orientation = .horizontal
+        costRow.spacing = 6
+        costField = NSTextField(string: String(s.maxCostCents))
+        costField.alignment = .right
+        costField.widthAnchor.constraint(equalToConstant: 90).isActive = true
+        costRow.addArrangedSubview(costField)
+        costRow.addArrangedSubview(NSTextField(labelWithString: "美分（0 = 不限花费）"))
+        let g1 = NSView(); g1.setContentHuggingPriority(.init(1), for: .horizontal)
+        costRow.addArrangedSubview(g1)
+        stack.addArrangedSubview(costRow)
+        costRow.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+
+        let wallRow = NSStackView()
+        wallRow.orientation = .horizontal
+        wallRow.spacing = 6
+        wallField = NSTextField(string: String(s.maxWallMinutes))
+        wallField.alignment = .right
+        wallField.widthAnchor.constraint(equalToConstant: 90).isActive = true
+        wallRow.addArrangedSubview(wallField)
+        wallRow.addArrangedSubview(NSTextField(labelWithString: "分钟（0 = 不限时长）"))
+        let g2 = NSView(); g2.setContentHuggingPriority(.init(1), for: .horizontal)
+        wallRow.addArrangedSubview(g2)
+        stack.addArrangedSubview(wallRow)
+        wallRow.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+
+        hintLabel = NSTextField(labelWithString: "重启引擎后新设置生效（急停/关停 → 重新启动）。")
+        hintLabel.font = .systemFont(ofSize: 10)
+        hintLabel.textColor = .tertiaryLabelColor
+        stack.addArrangedSubview(hintLabel)
+
+        // ---- 按钮 ----
+        let buttons = NSStackView()
+        buttons.orientation = .horizontal
+        buttons.spacing = 10
+        let cancel = NSButton(title: "取消", target: self, action: #selector(cancel))
+        buttons.addArrangedSubview(cancel)
+        let gap = NSView(); gap.setContentHuggingPriority(.init(1), for: .horizontal)
+        buttons.addArrangedSubview(gap)
+        let save = NSButton(title: "保存", target: self, action: #selector(save))
+        save.bezelStyle = .rounded
+        save.keyEquivalent = "\r"
+        buttons.addArrangedSubview(save)
+        buttons.translatesAutoresizingMaskIntoConstraints = false
+        stack.addArrangedSubview(buttons)
+        buttons.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+
+        gatewayToggled()
+        panel.center()
+        NSApp.runModal(for: panel)
+    }
+
+    @objc private func gatewayToggled() {
+        let on = gatewaySwitch.state == .on
+        urlField.isEnabled = on
+        tokenField.isEnabled = on
+    }
+
+    @objc private func cancel() {
+        panel.close(); NSApp.stopModal()
+    }
+
+    @objc private func save() {
+        var next = appState.engineSettings
+        next.gatewayEnabled = gatewaySwitch.state == .on
+        next.gatewayURL = urlField.stringValue.trimmingCharacters(in: .whitespaces)
+        next.gatewayToken = tokenField.stringValue
+        next.maxCostCents = Int(costField.stringValue) ?? 0
+        next.maxWallMinutes = Int(wallField.stringValue) ?? 0
+        // 校验：启用网关时 URL 不得空
+        if next.gatewayEnabled && next.gatewayURL.isEmpty {
+            hintLabel.textColor = .systemRed
+            hintLabel.stringValue = "网关已启用，地址不能空。"
+            return
+        }
+        if let err = appState.saveEngineSettings(next) {
+            hintLabel.textColor = .systemRed
+            hintLabel.stringValue = err
+            return
+        }
+        panel.close(); NSApp.stopModal()
+    }
+
+    func windowWillClose(_ notification: Notification) { NSApp.stopModal() }
+}

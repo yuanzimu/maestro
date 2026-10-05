@@ -18,6 +18,8 @@ public final class AppState {
 
     public let api: MaestroAPI
     public let daemon: DaemonManager
+    public let engineSettingsStore: EngineSettingsStore
+    public private(set) var engineSettings: EngineSettings
 
     private var pollTimer: Timer?
     private var eventStream: EventStream?
@@ -27,10 +29,31 @@ public final class AppState {
         let dir = MaestroAPI.defaultDataDir()
         api = MaestroAPI(dataDir: dir)
         daemon = DaemonManager(dataDir: dir)
+        engineSettingsStore = EngineSettingsStore(dataDir: dir)
+        engineSettings = engineSettingsStore.load()
+    }
+
+    /// 把引擎设置应用到 daemon 拉起环境（每次 startDaemon 前调用）
+    public func applyEngineEnv() {
+        daemon.engineEnv = engineSettingsStore.daemonEnv(for: engineSettings)
+    }
+
+    /// 保存引擎设置（设置窗口用）；返回错误描述
+    @discardableResult
+    public func saveEngineSettings(_ s: EngineSettings) -> String? {
+        do {
+            try engineSettingsStore.save(s)
+            engineSettings = s
+            applyEngineEnv()
+            return nil
+        } catch {
+            return "引擎设置保存失败: \(error)"
+        }
     }
 
     public func start() {
         daemon.locateBinaries()
+        applyEngineEnv()
         refresh()
         pollTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
             self?.refresh()
@@ -161,6 +184,7 @@ public final class AppState {
 
     public func startDaemon(force: Bool = false) {
         do {
+            applyEngineEnv()
             try daemon.launchDaemon(force: force)
             queue.asyncAfter(deadline: .now() + 0.6) { [weak self] in
                 _ = self?.api.isDaemonAlive

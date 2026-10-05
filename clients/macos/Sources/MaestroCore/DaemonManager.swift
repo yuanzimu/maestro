@@ -24,6 +24,8 @@ public final class DaemonManager {
     private(set) public var cliPath: URL?
     private(set) public var detectedCLI: AICli?
     private var process: Process?
+    /// 引擎设置环境覆盖（网关/预算；由 AppState 从 EngineSettingsStore 注入）
+    public var engineEnv: [String: String] = [:]
 
     public init(dataDir: URL) {
         self.dataDir = dataDir
@@ -104,6 +106,8 @@ public final class DaemonManager {
         p.arguments = args
         var env = ProcessInfo.processInfo.environment
         if let cli = detectedCLI { env["MAESTRO_CLI_DIALECT"] = cli.dialect }
+        // 引擎设置覆盖（网关/预算；显式覆盖，不继承父进程同名变量）
+        for (k, v) in engineEnv { env[k] = v }
         p.environment = env
 
         // stdout/stderr 落文件（不接管道，防管道满死锁 —— 与 daemon 自身设计同款）
