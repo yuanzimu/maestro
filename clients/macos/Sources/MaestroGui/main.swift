@@ -46,6 +46,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var miInbox: NSMenuItem!
     private var miShowWindow: NSMenuItem!
 
+    // 命令面板：非 run-modal 独立窗口，必须由 AppDelegate 强持有，
+    // 否则局部变量释放后 tableView 的 target（unsafe_unretained）变野指针 → 点击崩溃
+    private var palette: CommandPaletteController?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildWindow()
         buildMenu()
@@ -503,7 +507,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 引擎菜单（急停/恢复 + 引擎设置）
         let engineItem = NSMenuItem()
         let engineMenu = NSMenu(title: "引擎")
-        engineMenu.addItem(withTitle: "急停 / 恢复全部", action: #selector(emergencyClicked), keyEquivalent: ".")
+        // ⌘. 是 macOS 系统保留（取消/Esc 等价键）→ 急停改用 ⌘⇧E
+        let miStop = NSMenuItem(title: "急停 / 恢复全部", action: #selector(emergencyClicked), keyEquivalent: "e")
+        miStop.keyEquivalentModifierMask = [.command, .shift]
+        engineMenu.addItem(miStop)
         engineMenu.addItem(withTitle: "引擎设置…", action: #selector(goEngineSettings), keyEquivalent: ",")
         engineItem.submenu = engineMenu
         mainMenu.addItem(engineItem)
@@ -675,7 +682,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - 动作
 
     @objc private func switchTo(_ index: Int) {
-        guard index >= 0 && index < tabContainers.count else { return }
+        guard index >= 0 && index < tabContainers.count else {
+            AppLog.activity("切换失败：非法索引 \(index)（共 \(tabContainers.count) 视图）")
+            return
+        }
+        let names = ["任务", "收件箱", "事件", "设置"]
+        AppLog.activity("切换视图 → \(names[index])（index=\(index)）")
         for (i, v) in tabContainers.enumerated() {
             v.isHidden = i != index
         }
@@ -683,7 +695,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func emergencyClicked() {
-        state.isEmergencyStopped ? state.resumeAll() : state.emergencyStop()
+        if state.isEmergencyStopped {
+            AppLog.emergency("用户点「恢复全部」→ resume_all(flush)")
+            state.resumeAll()
+        } else {
+            AppLog.emergency("用户点「全局急停」→ emergency_stop")
+            state.emergencyStop()
+        }
     }
 
     @objc private func newTaskClicked() {
@@ -696,7 +714,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// 命令面板（⌘K，B3-5）
     @objc private func commandPaletteClicked() {
-        let palette = CommandPaletteController { [weak self] query -> [CommandItem] in
+        // 已打开则直接聚焦，不重复建窗
+        if let existing = palette {
+            AppLog.ui("⌘K 面板已打开，聚焦现有窗口")
+            existing.focus()
+            return
+        }
+        let p = CommandPaletteController(
+            onClose: { [weak self] in
+                // 面板关闭（Esc/失焦/执行命令）→ 释放强引用
+                AppLog.ui("⌘K 面板关闭，释放持有")
+                self?.palette = nil
+            },
+            provider: { [weak self] query -> [CommandItem] in
             guard let self else { return [] }
             var items: [CommandItem] = [
                 CommandItem(title: "新任务", subtitle: "创建并派发给 AI") { [weak self] in self?.newTaskClicked() },
@@ -705,27 +735,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 CommandItem(title: "收件箱", subtitle: "需要你决策的任务") { [weak self] in self?.switchTo(1) },
                 CommandItem(title: "事件流", subtitle: "实时动态") { [weak self] in self?.switchTo(2) },
                 CommandItem(title: "引擎设置", subtitle: "CCR 网关 + 硬预算") { [weak self] in
-                    EngineSettingsPanelController(state: self!.state).show()
+                    guard let self else { return }
+                    EngineSettingsPanelController(state: self.state).show()
                 },
                 CommandItem(title: "设置", subtitle: "引擎 / 数据 / 日志") { [weak self] in self?.switchTo(3) },
                 CommandItem(title: "启动 Daemon", subtitle: "拉起后台引擎") { [weak self] in self?.state.startDaemon() },
                 CommandItem(title: "关停 Daemon", subtitle: "停止后台引擎") { [weak self] in self?.state.shutdownDaemon() },
             ]
-            // 任务：标题/id 含 query 即列出（限制 20 条）
+            // 任务：标题/id 含 query 即列出（限制 40 条）
             for t in state.tasks.prefix(40) {
                 items.append(CommandItem(title: t.title, subtitle: "\(t.id) · \(t.state)") { [weak self] in
                     self?.selectedTaskID = t.id
                     self?.switchTo(0)
                 })
             }
-            let q = query.trimmingCharacters(in: .whitespaces)
-            if q.isEmpty { return items }
-            return items.filter {
-                $0.title.localizedCaseInsensitiveContains(q)
-                || $0.subtitle.localizedCaseInsensitiveContains(q)
-            }
-        }
-        palette.show()
+            return CommandFilter.filter(items, query: query)
+        })
+        palette = p
+        AppLog.ui("打开 ⌘K 命令面板")
+        p.show()
     }
 
     @objc private func steerSendClicked() {

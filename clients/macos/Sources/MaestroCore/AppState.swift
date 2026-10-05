@@ -130,9 +130,15 @@ public final class AppState {
                 guard let self else { return }
                 self.events.insert(event, at: 0)
                 if self.events.count > 500 { self.events.removeLast(self.events.count - 500) }
-                if event.type == "emergency_stopped" { self.isEmergencyStopped = true }
+                if event.type == "emergency_stopped" {
+                    self.isEmergencyStopped = true
+                    AppLog.emergency("收到 emergency_stopped 事件 → isEmergencyStopped=true")
+                }
                 if event.type == "resumed",
-                   (event.payload["via"] as? String) == "resume_all" { self.isEmergencyStopped = false }
+                   (event.payload["via"] as? String) == "resume_all" {
+                    self.isEmergencyStopped = false
+                    AppLog.emergency("收到 resumed(via=resume_all) 事件 → isEmergencyStopped=false")
+                }
             }
         }
         stream.start()

@@ -352,7 +352,7 @@ final class ActivityBar: NSVisualEffectView {
 // MARK: - 命令面板（B3-5，对齐 B1-2）
 
 /// 命令面板条目
-struct CommandItem {
+struct CommandItem: CommandMatchable {
     let title: String
     let subtitle: String
     let action: () -> Void
@@ -366,8 +366,13 @@ final class CommandPaletteController: NSObject, NSWindowDelegate, NSSearchFieldD
     /// 命令提供者：按 query 返回候选（固定命令 + 匹配任务）
     private let provider: (String) -> [CommandItem]
     private var selectedIndex = 0
+    /// 关闭回调（AppDelegate 凭它释放强引用；只触发一次）
+    private let onClose: () -> Void
+    private var didClose = false
 
-    init(provider: @escaping (String) -> [CommandItem]) {
+    init(onClose: @escaping () -> Void,
+         provider: @escaping (String) -> [CommandItem]) {
+        self.onClose = onClose
         self.provider = provider
         super.init()
     }
@@ -442,6 +447,7 @@ final class CommandPaletteController: NSObject, NSWindowDelegate, NSSearchFieldD
     private func updateItems(keepSelection: Bool) {
         let q = searchField.stringValue.trimmingCharacters(in: .whitespaces)
         items = provider(q)
+        AppLog.ui("⌘K 搜索「\(q)」→ \(items.count) 条候选")
         selectedIndex = keepSelection ? min(selectedIndex, max(0, items.count - 1)) : 0
         tableView.reloadData()
         if !items.isEmpty {
@@ -451,14 +457,28 @@ final class CommandPaletteController: NSObject, NSWindowDelegate, NSSearchFieldD
     }
 
     private func runSelected() {
-        guard selectedIndex >= 0 && selectedIndex < items.count else { return }
+        guard selectedIndex >= 0 && selectedIndex < items.count else {
+            AppLog.ui("⌘K 回车但无有效选中（index=\(selectedIndex)）")
+            return
+        }
         let item = items[selectedIndex]
+        AppLog.ui("⌘K 执行命令「\(item.title)」")
         close()
         item.action()
     }
 
+    /// 重新聚焦已打开的面板（光标放回搜索框）
+    func focus() {
+        panel.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeFirstResponder(searchField)
+    }
+
     private func close() {
         panel.close()
+        guard !didClose else { return }
+        didClose = true
+        onClose()
     }
 
     // MARK: 文本变化
@@ -470,12 +490,14 @@ final class CommandPaletteController: NSObject, NSWindowDelegate, NSSearchFieldD
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
         switch commandSelector {
         case #selector(NSResponder.moveUp(_:)):
-            selectedIndex = max(0, selectedIndex - 1)
+            selectedIndex = CommandFilter.move(index: selectedIndex, direction: .up, count: items.count)
+            AppLog.ui("⌘K ↑ 选中第 \(selectedIndex) 条")
             tableView.selectRowIndexes(IndexSet(integer: selectedIndex), byExtendingSelection: false)
             tableView.scrollRowToVisible(selectedIndex)
             return true
         case #selector(NSResponder.moveDown(_:)):
-            selectedIndex = min(max(0, items.count - 1), selectedIndex + 1)
+            selectedIndex = CommandFilter.move(index: selectedIndex, direction: .down, count: items.count)
+            AppLog.ui("⌘K ↓ 选中第 \(selectedIndex) 条")
             tableView.selectRowIndexes(IndexSet(integer: selectedIndex), byExtendingSelection: false)
             tableView.scrollRowToVisible(selectedIndex)
             return true
@@ -483,6 +505,7 @@ final class CommandPaletteController: NSObject, NSWindowDelegate, NSSearchFieldD
             runSelected()
             return true
         case #selector(NSResponder.cancelOperation(_:)):
+            AppLog.ui("⌘K Esc 关闭")
             close()
             return true
         default:
@@ -491,6 +514,7 @@ final class CommandPaletteController: NSObject, NSWindowDelegate, NSSearchFieldD
     }
 
     func windowDidResignKey(_ notification: Notification) {
+        AppLog.ui("⌘K 面板失焦，自动关闭")
         close()
     }
 }

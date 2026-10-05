@@ -21,5 +21,11 @@ let package = Package(
             dependencies: ["MaestroCore"],
             path: "Sources/ScenarioRunner"
         ),
+        // ⌘K 纯逻辑 mock 验证：模糊搜索 + ↑↓ 快捷键（无 XCTest 环境也能跑：swift run PaletteMockCheck）
+        .executableTarget(
+            name: "PaletteMockCheck",
+            dependencies: ["MaestroCore"],
+            path: "Sources/PaletteMockCheck"
+        ),
     ]
 )
