@@ -462,9 +462,13 @@ final class CommandPaletteController: NSObject, NSWindowDelegate, NSSearchFieldD
             return
         }
         let item = items[selectedIndex]
+        // 栈上自保：close() 内 onClose 会释放 AppDelegate 的最后一个外部强引用，
+        // 需保证 action() 执行期间控制器仍存活
+        let keepAlive = self
         AppLog.ui("⌘K 执行命令「\(item.title)」")
-        close()
+        close(source: .execute)
         item.action()
+        withExtendedLifetime(keepAlive) {}
     }
 
     /// 重新聚焦已打开的面板（光标放回搜索框）
@@ -474,11 +478,32 @@ final class CommandPaletteController: NSObject, NSWindowDelegate, NSSearchFieldD
         panel.makeFirstResponder(searchField)
     }
 
-    private func close() {
-        panel.close()
-        guard !didClose else { return }
+    /// 关闭来源（实机验证时区分触发路径）
+    private enum CloseSource: String {
+        case execute = "回车执行"
+        case escape = "Esc"
+        case resignKey = "窗口失焦"
+    }
+
+    private func close(source: CloseSource) {
+        // 先置位再关窗：panel.close() 会同步触发 windowDidResignKey 重入本方法，
+        // 重入时直接短路，确保 onClose 恰好一次、panel.close() 也只调一次
+        guard !didClose else {
+            AppLog.ui("⌘K [\(source.rawValue)] 触发关闭，但面板已在关闭流程中 → 忽略")
+            return
+        }
         didClose = true
+        AppLog.ui("⌘K 关闭路径 → [\(source.rawValue)]")
+        // 栈上强自保：onClose 让 AppDelegate 释放最后一个外部强引用后，
+        // 控制器也要等当前事件帧（键盘/失焦回调）执行完才允许 dealloc
+        let keepAlive = self
+        panel.close()
         onClose()
+        withExtendedLifetime(keepAlive) {}
+    }
+
+    deinit {
+        AppLog.ui("⌘K CommandPaletteController deinit（控制器已真正释放）")
     }
 
     // MARK: 文本变化
@@ -505,8 +530,7 @@ final class CommandPaletteController: NSObject, NSWindowDelegate, NSSearchFieldD
             runSelected()
             return true
         case #selector(NSResponder.cancelOperation(_:)):
-            AppLog.ui("⌘K Esc 关闭")
-            close()
+            close(source: .escape)
             return true
         default:
             return false
@@ -514,8 +538,7 @@ final class CommandPaletteController: NSObject, NSWindowDelegate, NSSearchFieldD
     }
 
     func windowDidResignKey(_ notification: Notification) {
-        AppLog.ui("⌘K 面板失焦，自动关闭")
-        close()
+        close(source: .resignKey)
     }
 }
 
