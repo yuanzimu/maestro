@@ -45,7 +45,9 @@ export default function App() {
         </aside>
       </main>
 
-      {state.selectedTask && <TaskDetail id={state.selectedTask} />}
+      {state.selectedTask && (state.tasks[state.selectedTask] ? (
+        <TaskDetail id={state.selectedTask} />
+      ) : null)}
       {state.dialog === "new-task" && <NewTaskDialog />}
       {state.dialog === "settings" && <SettingsDialog />}
       {state.toast && (

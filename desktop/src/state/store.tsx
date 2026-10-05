@@ -136,9 +136,11 @@ function reducer(state: AppState, a: Action): AppState {
           emergency: { active: true, reason: String(env.event.reason ?? "") },
         };
       }
-      if (env.event.type === "resumed" || env.event.type === "task_requeued") {
-        // resume_all 后清横幅（粗粒度：任何 resumed 事件都可能来自 resume_all）
-        if (state.emergency && env.event.type === "resumed") {
+      if (env.event.type === "resumed") {
+        // 只认 resume_all（via=resume_all）：自动恢复/单任务恢复的
+        // resumed 事件不得清全局急停横幅（否则无关任务的网络自动恢复
+        // 会把横幅误清，用户以为急停已解除）
+        if (state.emergency && env.event.via === "resume_all") {
           next = { ...next, emergency: null };
         }
       }

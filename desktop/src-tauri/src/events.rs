@@ -39,7 +39,7 @@ pub fn spawn_bridge(app: tauri::AppHandle) {
             };
             let app2 = app.clone();
             let seq_cell = last_seq.clone();
-            let _ = client.subscribe(from, move |env| {
+            let _ = client.subscribe(from, true, move |env| {
                 seq_cell.fetch_max(env.seq, Ordering::SeqCst);
                 let _ = app2.emit("maestro://event", &env);
                 true
