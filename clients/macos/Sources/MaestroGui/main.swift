@@ -10,7 +10,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusDot: CircleView!
     private var statusLabel: NSTextField!
     private var statusSub: NSTextField!
-    private var segTabs: NSSegmentedControl!
+    private var activityBar: ActivityBar!
     private var btnEmergency: NSButton!
     private var gearMenu: NSPopUpButton!
     private var bottomInfo: NSTextField!
@@ -97,6 +97,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         bottomBar.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(bottomBar)
 
+        // 左侧活动栏（B3-1，IA 对齐 B0-2）
+        let activityBar = ActivityBar()
+        activityBar.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(activityBar)
+        self.activityBar = activityBar
+
         let contentBox = NSView()
         contentBox.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(contentBox)
@@ -106,14 +112,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             topBar.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             topBar.trailingAnchor.constraint(equalTo: content.trailingAnchor),
             topBar.heightAnchor.constraint(equalToConstant: 46),
+            // 活动栏：顶栏下、底栏上，贴左，固定宽
+            activityBar.topAnchor.constraint(equalTo: topBar.bottomAnchor, constant: 4),
+            activityBar.bottomAnchor.constraint(equalTo: bottomBar.topAnchor),
+            activityBar.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            activityBar.widthAnchor.constraint(equalToConstant: 60),
+            // 内容盒：活动栏右侧
+            contentBox.topAnchor.constraint(equalTo: topBar.bottomAnchor, constant: 4),
+            contentBox.bottomAnchor.constraint(equalTo: bottomBar.topAnchor),
+            contentBox.leadingAnchor.constraint(equalTo: activityBar.trailingAnchor),
+            contentBox.trailingAnchor.constraint(equalTo: content.trailingAnchor),
             bottomBar.bottomAnchor.constraint(equalTo: content.bottomAnchor),
             bottomBar.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             bottomBar.trailingAnchor.constraint(equalTo: content.trailingAnchor),
             bottomBar.heightAnchor.constraint(equalToConstant: 24),
-            contentBox.topAnchor.constraint(equalTo: topBar.bottomAnchor, constant: 4),
-            contentBox.bottomAnchor.constraint(equalTo: bottomBar.topAnchor),
-            contentBox.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-            contentBox.trailingAnchor.constraint(equalTo: content.trailingAnchor),
         ])
 
         // ---- 顶栏左：状态 ----
@@ -142,21 +154,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         spacer1.setContentHuggingPriority(.init(1), for: .horizontal)
         topBar.addArrangedSubview(spacer1)
 
-        // ---- 顶栏中：页签 ----
-        segTabs = NSSegmentedControl(labels: ["任务", "收件箱", "事件"], trackingMode: .selectOne,
-                                     target: self, action: #selector(tabChanged))
-        segTabs.selectedSegment = 0
-        segTabs.segmentStyle = .texturedRounded
-        topBar.addArrangedSubview(segTabs)
-
-        let spacer2 = NSView()
-        spacer2.setContentHuggingPriority(.init(1), for: .horizontal)
-        topBar.addArrangedSubview(spacer2)
-        NSLayoutConstraint.activate([
-            spacer1.widthAnchor.constraint(equalTo: spacer2.widthAnchor),
-        ])
-
-        // ---- 顶栏右：急停 / 新任务 / 齿轮 ----
+        // ---- 顶栏右：急停 / 新任务 / 引擎操作（导航已移交活动栏）----
         btnEmergency = NSButton(title: "🛑 急停", target: self, action: #selector(emergencyClicked))
         btnEmergency.bezelStyle = .rounded
         topBar.addArrangedSubview(btnEmergency)
@@ -181,11 +179,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         bottomInfo.textColor = .secondaryLabelColor
         bottomBar.addArrangedSubview(bottomInfo)
 
-        // ---- 三个页签容器 ----
+        // ---- 四个视图容器（任务/收件箱/事件/设置）----
         let tasksView = buildTasksView()
         let inboxView = buildInboxView()
         let eventsView = buildEventsView()
-        tabContainers = [tasksView, inboxView, eventsView]
+        let settingsView = buildSettingsView()
+        tabContainers = [tasksView, inboxView, eventsView, settingsView]
         for v in tabContainers {
             v.translatesAutoresizingMaskIntoConstraints = false
             contentBox.addSubview(v)
@@ -198,6 +197,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         tabContainers[1].isHidden = true
         tabContainers[2].isHidden = true
+        tabContainers[3].isHidden = true
+
+        // 活动栏导航回调
+        activityBar.onSelect = { [weak self] idx in
+            self?.switchTo(idx)
+        }
+        activityBar.select(0)
     }
 
     private func makeTable(_ columns: [(id: String, title: String, width: CGFloat)]) -> (NSTableView, NSScrollView) {
@@ -376,8 +382,92 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return scroll
     }
 
+    /// 设置主视图（活动栏第四图标；B0 IA）
+    private func buildSettingsView() -> NSView {
+        let scroll = NSScrollView()
+        scroll.hasVerticalScroller = true
+        let doc = NSView()
+        scroll.documentView = doc
+        doc.translatesAutoresizingMaskIntoConstraints = false
+
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 12
+        stack.edgeInsets = NSEdgeInsets(top: 20, left: 24, bottom: 24, right: 24)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        doc.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: doc.topAnchor),
+            stack.leadingAnchor.constraint(equalTo: doc.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: doc.trailingAnchor),
+            stack.bottomAnchor.constraint(equalTo: doc.bottomAnchor),
+        ])
+        // 文档宽度跟随滚动视口（在加入父视图后由约束系统生效）
+        stack.widthAnchor.constraint(equalTo: scroll.widthAnchor, multiplier: 1).isActive = true
+
+        func title(_ t: String) {
+            let l = NSTextField(labelWithString: t)
+            l.font = .systemFont(ofSize: 15, weight: .semibold)
+            stack.addArrangedSubview(l)
+        }
+        func row(_ items: [NSButton]) {
+            let r = NSStackView(views: items)
+            r.orientation = .horizontal
+            r.spacing = 8
+            stack.addArrangedSubview(r)
+        }
+        func infoLine(_ l: NSTextField) {
+            l.font = .systemFont(ofSize: 12)
+            l.textColor = .secondaryLabelColor
+            stack.addArrangedSubview(l)
+        }
+
+        title("引擎")
+        let engineState = NSTextField(labelWithString: "—")
+        engineState.identifier = NSUserInterfaceItemIdentifier("settings-engine-state")
+        infoLine(engineState)
+
+        row([
+            NSButton(title: "启动", target: self, action: #selector(settingsStartDaemon)),
+            NSButton(title: "演示模式启动", target: self, action: #selector(settingsStartDemo)),
+            NSButton(title: "关停", target: self, action: #selector(settingsStopDaemon)),
+        ])
+
+        title("引擎设置（网关 / 硬预算）")
+        let summary = NSTextField(labelWithString: "—")
+        summary.identifier = NSUserInterfaceItemIdentifier("settings-engine-summary")
+        infoLine(summary)
+        row([
+            NSButton(title: "打开引擎设置…", target: self, action: #selector(settingsOpenEngine)),
+        ])
+
+        title("数据与日志")
+        row([
+            NSButton(title: "打开数据目录", target: self, action: #selector(settingsOpenData)),
+            NSButton(title: "打开 daemon 日志", target: self, action: #selector(settingsOpenLog)),
+        ])
+
+        title("关于")
+        infoLine(NSTextField(labelWithString: "Maestro —— AI 任务指挥台 · Apache-2.0"))
+        infoLine(NSTextField(labelWithString: "关窗口不杀引擎，任务照跑；菜单栏图标可随时回来。"))
+
+        return scroll
+    }
+
+    @objc private func settingsStartDaemon() { state.startDaemon() }
+    @objc private func settingsStartDemo() { state.startDaemon(force: true) }
+    @objc private func settingsStopDaemon() { state.shutdownDaemon() }
+    @objc private func settingsOpenEngine() {
+        EngineSettingsPanelController(state: state).show()
+    }
+    @objc private func settingsOpenData() { state.openDataDir() }
+    @objc private func settingsOpenLog() { state.openDaemonLog() }
+
     private func buildMenu() {
         let mainMenu = NSMenu()
+
+        // App 菜单
         let appMenuItem = NSMenuItem()
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "关于 Maestro",
@@ -387,7 +477,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appMenuItem.submenu = appMenu
         mainMenu.addItem(appMenuItem)
+
+        // 文件菜单（⌘N 新任务 / ⌘K 命令面板）
+        let fileItem = NSMenuItem()
+        let fileMenu = NSMenu(title: "文件")
+        let miNew = NSMenuItem(title: "新任务…", action: #selector(newTaskClicked), keyEquivalent: "n")
+        fileMenu.addItem(miNew)
+        let miPalette = NSMenuItem(title: "命令面板", action: #selector(commandPaletteClicked), keyEquivalent: "k")
+        fileMenu.addItem(miPalette)
+        fileMenu.addItem(.separator())
+        fileMenu.addItem(withTitle: "关闭窗口", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        fileItem.submenu = fileMenu
+        mainMenu.addItem(fileItem)
+
+        // 导航菜单（活动栏四视图）
+        let navItem = NSMenuItem()
+        let navMenu = NSMenu(title: "导航")
+        navMenu.addItem(withTitle: "任务", action: #selector(goTasks), keyEquivalent: "1")
+        navMenu.addItem(withTitle: "收件箱", action: #selector(goInbox), keyEquivalent: "2")
+        navMenu.addItem(withTitle: "事件", action: #selector(goEvents), keyEquivalent: "3")
+        navMenu.addItem(withTitle: "设置", action: #selector(goSettings), keyEquivalent: "4")
+        navItem.submenu = navMenu
+        mainMenu.addItem(navItem)
+
+        // 引擎菜单（急停/恢复 + 引擎设置）
+        let engineItem = NSMenuItem()
+        let engineMenu = NSMenu(title: "引擎")
+        engineMenu.addItem(withTitle: "急停 / 恢复全部", action: #selector(emergencyClicked), keyEquivalent: ".")
+        engineMenu.addItem(withTitle: "引擎设置…", action: #selector(goEngineSettings), keyEquivalent: ",")
+        engineItem.submenu = engineMenu
+        mainMenu.addItem(engineItem)
+
+        // 自定义 action 项显式绑到 AppDelegate（否则沿 responder chain 找不到而置灰）
+        for m in fileMenu.items + navMenu.items + engineMenu.items {
+            m.target = self
+        }
+        // performClose 走窗口本身（target 恢复 nil）
+        fileMenu.item(withTitle: "关闭窗口")?.target = nil
+
         NSApp.mainMenu = mainMenu
+    }
+
+    @objc private func goTasks() { switchTo(0) }
+    @objc private func goInbox() { switchTo(1) }
+    @objc private func goEvents() { switchTo(2) }
+    @objc private func goSettings() { switchTo(3) }
+    @objc private func goEngineSettings() {
+        EngineSettingsPanelController(state: state).show()
     }
 
     // MARK: - 菜单栏 status item
@@ -424,8 +560,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openInboxFromStatus() {
         showMainWindow()
-        segTabs.selectedSegment = 1
-        tabChanged()
+        switchTo(1)
     }
 
     @objc private func openEngineSettingsFromStatus() {
@@ -460,7 +595,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             statusSub.stringValue = ""
         }
-        segTabs.setLabel(state.inbox.isEmpty ? "收件箱" : "收件箱 (\(state.inbox.count))", forSegment: 1)
+        // 活动栏角标：收件箱待处理数
+        activityBar.badge(index: 1, count: state.inbox.count)
+
+        // 设置视图：引擎状态 / 引擎摘要
+        if let content = window?.contentView {
+        if let es = content.viewWith(identifier: "settings-engine-state") as? NSTextField {
+            if state.connected, let s = state.status {
+                es.stringValue = "运行中 · v\(s.version) · pid \(s.pid) · 已运行 \(fmtUptime(s.uptimeSecs))"
+            } else {
+                es.stringValue = "未运行"
+            }
+        }
+        if let es = content.viewWith(identifier: "settings-engine-summary") as? NSTextField {
+            let e = state.engineSettings
+            let gw = e.gatewayEnabled ? "网关 \(e.gatewayURL)" : "网关关闭（直连）"
+            let cost = e.maxCostCents > 0 ? "$\(Double(e.maxCostCents)/100.0)" : "花费不限"
+            let wall = e.maxWallMinutes > 0 ? "\(e.maxWallMinutes) 分钟" : "时长不限"
+            es.stringValue = "\(gw) ｜ 预算：\(cost) / \(wall)"
+        }
+        }
 
         // 急停按钮
         if state.isEmergencyStopped {
@@ -520,10 +674,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - 动作
 
-    @objc private func tabChanged() {
+    @objc private func switchTo(_ index: Int) {
+        guard index >= 0 && index < tabContainers.count else { return }
         for (i, v) in tabContainers.enumerated() {
-            v.isHidden = i != segTabs.selectedSegment
+            v.isHidden = i != index
         }
+        activityBar.select(index)
     }
 
     @objc private func emergencyClicked() {
@@ -536,6 +692,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.state.createTask(title: title, prompt: prompt, workdir: dir)
         }
         panel.show()
+    }
+
+    /// 命令面板（⌘K，B3-5）
+    @objc private func commandPaletteClicked() {
+        let palette = CommandPaletteController { [weak self] query -> [CommandItem] in
+            guard let self else { return [] }
+            var items: [CommandItem] = [
+                CommandItem(title: "新任务", subtitle: "创建并派发给 AI") { [weak self] in self?.newTaskClicked() },
+                CommandItem(title: self.state.isEmergencyStopped ? "恢复全部" : "全局急停",
+                            subtitle: "冻结所有 worker / 恢复") { [weak self] in self?.emergencyClicked() },
+                CommandItem(title: "收件箱", subtitle: "需要你决策的任务") { [weak self] in self?.switchTo(1) },
+                CommandItem(title: "事件流", subtitle: "实时动态") { [weak self] in self?.switchTo(2) },
+                CommandItem(title: "引擎设置", subtitle: "CCR 网关 + 硬预算") { [weak self] in
+                    EngineSettingsPanelController(state: self!.state).show()
+                },
+                CommandItem(title: "设置", subtitle: "引擎 / 数据 / 日志") { [weak self] in self?.switchTo(3) },
+                CommandItem(title: "启动 Daemon", subtitle: "拉起后台引擎") { [weak self] in self?.state.startDaemon() },
+                CommandItem(title: "关停 Daemon", subtitle: "停止后台引擎") { [weak self] in self?.state.shutdownDaemon() },
+            ]
+            // 任务：标题/id 含 query 即列出（限制 20 条）
+            for t in state.tasks.prefix(40) {
+                items.append(CommandItem(title: t.title, subtitle: "\(t.id) · \(t.state)") { [weak self] in
+                    self?.selectedTaskID = t.id
+                    self?.switchTo(0)
+                })
+            }
+            let q = query.trimmingCharacters(in: .whitespaces)
+            if q.isEmpty { return items }
+            return items.filter {
+                $0.title.localizedCaseInsensitiveContains(q)
+                || $0.subtitle.localizedCaseInsensitiveContains(q)
+            }
+        }
+        palette.show()
     }
 
     @objc private func steerSendClicked() {

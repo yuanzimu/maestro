@@ -216,6 +216,330 @@ extension Array {
     }
 }
 
+extension NSView {
+    /// 递归按 identifier 查找子视图
+    func viewWith(identifier id: String) -> NSView? {
+        if identifier?.rawValue == id { return self }
+        for sub in subviews {
+            if let v = sub.viewWith(identifier: id) { return v }
+        }
+        return nil
+    }
+}
+
+// MARK: - 活动栏（B3-1，IA 对齐 B0-2）
+
+/// 活动栏单个按钮：SF Symbol + 选中底色 + 角标
+final class ActivityBarButton: NSButton {
+    var isSelected = false {
+        didSet { needsDisplay = true }
+    }
+    var badgeCount = 0 {
+        didSet { needsDisplay = true }
+    }
+
+    init(symbol: String, tooltip: String, tag: Int) {
+        super.init(frame: NSRect(x: 0, y: 0, width: 44, height: 44))
+        self.tag = tag
+        self.toolTip = tooltip
+        isBordered = false
+        image = NSImage(systemSymbolName: symbol, accessibilityDescription: tooltip)
+        image?.isTemplate = true
+        contentTintColor = .labelColor
+        symbolConfig = .init(pointSize: 17, weight: .regular)
+        title = ""
+        target = nil // 由 ActivityBar 的 stack/手势处理；这里用 sendAction
+    }
+    var symbolConfig: NSImage.SymbolConfiguration! {
+        didSet {
+            if let c = symbolConfig, let im = image { image = im.withSymbolConfiguration(c) }
+        }
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func draw(_ dirtyRect: NSRect) {
+        // 选中圆角底
+        if isSelected {
+            let r = bounds.insetBy(dx: 5, dy: 5)
+            NSColor.selectedContentBackgroundColor.withAlphaComponent(0.18).setFill()
+            NSBezierPath(roundedRect: r, xRadius: 8, yRadius: 8).fill()
+        }
+        super.draw(dirtyRect)
+        // 角标（红点 + 数字）
+        if badgeCount > 0 {
+            let txt = badgeCount > 99 ? "99+" : String(badgeCount)
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: NSFont.systemFont(ofSize: 9, weight: .bold),
+                .foregroundColor: NSColor.white,
+            ]
+            let pad: CGFloat = 4
+            let w = txt.size(withAttributes: attrs).width + pad * 2
+            let dot = NSRect(x: bounds.midX + 5, y: bounds.midY - 18, width: w, height: 15)
+            NSColor.systemRed.setFill()
+            NSBezierPath(roundedRect: dot, xRadius: 7.5, yRadius: 7.5).fill()
+            let s = NSMutableParagraphStyle()
+            s.alignment = .center
+            var a = attrs
+            a[.paragraphStyle] = s
+            txt.draw(in: dot.offsetBy(dx: 0, dy: 2), withAttributes: a)
+        }
+    }
+}
+
+/// 左侧活动栏：任务 / 收件箱 / 事件 / 设置
+final class ActivityBar: NSVisualEffectView {
+    var onSelect: ((Int) -> Void)?
+    private var buttons: [ActivityBarButton] = []
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        blendingMode = .withinWindow
+        material = .sidebar
+        state = .active
+
+        let items: [(symbol: String, name: String)] = [
+            ("list.bullet", "任务"),
+            ("tray.full", "收件箱"),
+            ("waveform", "事件"),
+            ("gearshape", "设置"),
+        ]
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 4
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: 10),
+            stack.centerXAnchor.constraint(equalTo: centerXAnchor),
+        ])
+
+        for (i, it) in items.enumerated() {
+            let b = ActivityBarButton(symbol: it.symbol, tooltip: it.name, tag: i)
+            b.target = self
+            b.action = #selector(clicked(_:))
+            buttons.append(b)
+            stack.addArrangedSubview(b)
+            b.widthAnchor.constraint(equalToConstant: 44).isActive = true
+            b.heightAnchor.constraint(equalToConstant: 44).isActive = true
+        }
+        let gap = NSView()
+        gap.setContentHuggingPriority(.init(1), for: .vertical)
+        stack.addArrangedSubview(gap)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    @objc private func clicked(_ sender: ActivityBarButton) {
+        onSelect?(sender.tag)
+    }
+
+    /// 选中第几个（只更新视觉，不触发 onSelect）
+    func select(_ index: Int) {
+        for (i, b) in buttons.enumerated() {
+            b.isSelected = i == index
+        }
+    }
+
+    /// 设置某图标的角标数
+    func badge(index: Int, count: Int) {
+        guard index < buttons.count else { return }
+        buttons[index].badgeCount = count
+    }
+}
+
+// MARK: - 命令面板（B3-5，对齐 B1-2）
+
+/// 命令面板条目
+struct CommandItem {
+    let title: String
+    let subtitle: String
+    let action: () -> Void
+}
+
+final class CommandPaletteController: NSObject, NSWindowDelegate, NSSearchFieldDelegate {
+    private var panel: NSWindow!
+    private var searchField: NSSearchField!
+    private var tableView: NSTableView!
+    private var items: [CommandItem] = []
+    /// 命令提供者：按 query 返回候选（固定命令 + 匹配任务）
+    private let provider: (String) -> [CommandItem]
+    private var selectedIndex = 0
+
+    init(provider: @escaping (String) -> [CommandItem]) {
+        self.provider = provider
+        super.init()
+    }
+
+    func show() {
+        panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 580, height: 380),
+                         styleMask: [.titled, .fullSizeContentView],
+                         backing: .buffered, defer: false)
+        panel.titlebarAppearsTransparent = true
+        panel.titleVisibility = .hidden
+        panel.isMovableByWindowBackground = true
+        panel.standardWindowButton(.closeButton)?.isHidden = true
+        panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        panel.standardWindowButton(.zoomButton)?.isHidden = true
+        panel.delegate = self
+        panel.isReleasedWhenClosed = false
+        panel.backgroundColor = .windowBackgroundColor
+
+        let content = NSView()
+        panel.contentView = content
+
+        searchField = NSSearchField()
+        searchField.placeholderString = "输入命令或搜索任务…"
+        searchField.translatesAutoresizingMaskIntoConstraints = false
+        searchField.delegate = self
+        searchField.bezelStyle = .roundedBezel
+        content.addSubview(searchField)
+
+        let scroll = NSScrollView()
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .noBorder
+        content.addSubview(scroll)
+
+        tableView = NSTableView()
+        tableView.headerView = nil
+        tableView.style = .plain
+        tableView.rowHeight = 40
+        tableView.dataSource = self
+        tableView.delegate = self
+        let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("c"))
+        col.resizingMask = .autoresizingMask
+        tableView.addTableColumn(col)
+        tableView.target = self
+        tableView.doubleAction = #selector(tableDoubleClicked)
+        tableView.action = #selector(tableSingleClicked)
+        scroll.documentView = tableView
+
+        NSLayoutConstraint.activate([
+            searchField.topAnchor.constraint(equalTo: content.topAnchor, constant: 12),
+            searchField.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 14),
+            searchField.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -14),
+            scroll.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 10),
+            scroll.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            scroll.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+        ])
+
+        updateItems(keepSelection: false)
+
+        // 居中偏上
+        if let scr = NSScreen.main {
+            let vf = scr.visibleFrame
+            panel.center()
+            panel.setFrameOrigin(NSPoint(x: vf.midX - panel.frame.width / 2,
+                                        y: vf.midY + vf.height * 0.12))
+        }
+        panel.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func updateItems(keepSelection: Bool) {
+        let q = searchField.stringValue.trimmingCharacters(in: .whitespaces)
+        items = provider(q)
+        selectedIndex = keepSelection ? min(selectedIndex, max(0, items.count - 1)) : 0
+        tableView.reloadData()
+        if !items.isEmpty {
+            tableView.selectRowIndexes(IndexSet(integer: selectedIndex), byExtendingSelection: false)
+            tableView.scrollRowToVisible(selectedIndex)
+        }
+    }
+
+    private func runSelected() {
+        guard selectedIndex >= 0 && selectedIndex < items.count else { return }
+        let item = items[selectedIndex]
+        close()
+        item.action()
+    }
+
+    private func close() {
+        panel.close()
+    }
+
+    // MARK: 文本变化
+
+    func controlTextDidChange(_ obj: Notification) {
+        updateItems(keepSelection: false)
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        switch commandSelector {
+        case #selector(NSResponder.moveUp(_:)):
+            selectedIndex = max(0, selectedIndex - 1)
+            tableView.selectRowIndexes(IndexSet(integer: selectedIndex), byExtendingSelection: false)
+            tableView.scrollRowToVisible(selectedIndex)
+            return true
+        case #selector(NSResponder.moveDown(_:)):
+            selectedIndex = min(max(0, items.count - 1), selectedIndex + 1)
+            tableView.selectRowIndexes(IndexSet(integer: selectedIndex), byExtendingSelection: false)
+            tableView.scrollRowToVisible(selectedIndex)
+            return true
+        case #selector(NSResponder.insertNewline(_:)):
+            runSelected()
+            return true
+        case #selector(NSResponder.cancelOperation(_:)):
+            close()
+            return true
+        default:
+            return false
+        }
+    }
+
+    func windowDidResignKey(_ notification: Notification) {
+        close()
+    }
+}
+
+extension CommandPaletteController: NSTableViewDataSource, NSTableViewDelegate {
+    func numberOfRows(in tableView: NSTableView) -> Int { items.count }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        let item = items[row]
+        let cell = NSTableCellView()
+        let title = NSTextField(labelWithString: item.title)
+        title.font = .systemFont(ofSize: 13, weight: .medium)
+        title.lineBreakMode = .byTruncatingTail
+        title.translatesAutoresizingMaskIntoConstraints = false
+        let sub = NSTextField(labelWithString: item.subtitle)
+        sub.font = .systemFont(ofSize: 10)
+        sub.textColor = .secondaryLabelColor
+        sub.lineBreakMode = .byTruncatingTail
+        sub.translatesAutoresizingMaskIntoConstraints = false
+        cell.addSubview(title)
+        cell.addSubview(sub)
+        NSLayoutConstraint.activate([
+            title.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 12),
+            title.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -10),
+            title.topAnchor.constraint(equalTo: cell.topAnchor, constant: 6),
+            sub.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            sub.trailingAnchor.constraint(equalTo: title.trailingAnchor),
+            sub.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 1),
+        ])
+        return cell
+    }
+
+    func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
+        selectedIndex = row
+        return true
+    }
+
+    @objc private func tableDoubleClicked() {
+        if tableView.clickedRow >= 0 {
+            selectedIndex = tableView.clickedRow
+            runSelected()
+        }
+    }
+
+    @objc private func tableSingleClicked() {
+        if tableView.clickedRow >= 0 { selectedIndex = tableView.clickedRow }
+    }
+}
+
 // MARK: - 详情文本
 
 func detailAttributedString(for task: TaskSummary?, events: [MaestroEvent]) -> NSAttributedString {
