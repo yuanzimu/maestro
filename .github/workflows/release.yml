@@ -78,6 +78,7 @@ jobs:
           npx tauri build
       - name: Sign installer (degrades to unsigned without secrets)
         shell: pwsh
+        working-directory: desktop
         env:
           WINDOWS_CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX }}
           WINDOWS_CERT_PFX_PATH: ${{ secrets.WINDOWS_CERT_PFX_PATH }}
