@@ -11,6 +11,7 @@ pub mod events;
 pub mod settings;
 pub mod state;
 pub mod tools;
+pub mod tray;
 
 use tauri::{Emitter, Manager};
 
@@ -25,8 +26,18 @@ pub fn run() {
                 let _ = handle.emit("maestro://daemon-error", serde_json::json!({ "message": e }));
             }
             events::spawn_bridge(handle.clone());
-            events::spawn_poller(handle);
+            events::spawn_poller(handle.clone());
+            // C3-1：托盘常驻（关窗最小化 + 菜单 + 状态角标）
+            tray::build(&handle);
             Ok(())
+        })
+        // C3-2：关窗 = 最小化到托盘（daemon 独立常驻、ensure_daemon 支持接管，
+        // 「关窗任务照跑」承诺）；真正退出走托盘菜单「退出」
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let _ = window.hide();
+                api.prevent_close();
+            }
         })
         .invoke_handler(tauri::generate_handler![
             commands::bridge_ready,

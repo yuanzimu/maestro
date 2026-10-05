@@ -48,6 +48,19 @@ pub fn spawn_bridge(app: tauri::AppHandle) {
             // 需要长连接实时推送 → true
             let _ = client.subscribe(from, true, move |env| {
                 seq_cell.fetch_max(env.seq, Ordering::SeqCst);
+                // C3-3：托盘随事件刷新急停态（重放亦覆盖 —— 重启后直接对齐）
+                match &env.event {
+                    maestro_protocol::events::Event::EmergencyStopped { .. } => {
+                        crate::tray::set_emergency(&app2, true);
+                    }
+                    maestro_protocol::events::Event::Resumed {
+                        via: maestro_protocol::types::ResumeVia::ResumeAll,
+                        ..
+                    } => {
+                        crate::tray::set_emergency(&app2, false);
+                    }
+                    _ => {}
+                }
                 let _ = app2.emit("maestro://event", &env);
                 true
             });
@@ -83,6 +96,8 @@ pub fn spawn_poller(app: tauri::AppHandle) {
                 .call("poll-inbox", Method::InboxList, serde_json::json!({}))
                 .and_then(|v| Ok(v["items"].clone()))
                 .unwrap_or(serde_json::json!([]));
+            // C3-3：未读数进托盘收件箱项（复用本就存在的 5s 轮询，不新增）
+            crate::tray::set_unread(&app, inbox.as_array().map(|a| a.len()).unwrap_or(0));
             let workers = client
                 .call("poll-workers", Method::WorkerList, serde_json::json!({}))
                 .and_then(|v| Ok(v["workers"].clone()))

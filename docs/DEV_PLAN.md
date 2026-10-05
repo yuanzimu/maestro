@@ -708,8 +708,11 @@ C1 + C2 + C3 + C4 全部完成 → C5 三端发版演练（一次性验收）
 | ⬜ | C1-6 Authenticode 实签 | 脚本/降级契约就绪，**等真实证书**（C0-2 凭据到位即可签） |
 | ⬜ | C1-7 mock-cli 剔除 | **计划冲突待决策**：mock-cli 是桌面「演示模式」的内置 worker（[daemon.rs](../desktop/src-tauri/src/daemon.rs) 缺失直接报安装不完整），剔除将破坏无 API key 的体验路径与 GUI 回归基线 —— 需产品层先定义「演示模式」的发布语义（保留 / dev-only 构建 / 移除并改写回归） |
 | ⬜ | C1 包体 <20MB 核验 | 当前 arm64 NSIS ≈3.02MiB（含 mock-cli），达标但按 C1-7 决策后需复测 |
-| ⬜ | C2 全部（macOS 签名/公证/universal） | 需 Apple 凭据 + Mac 侧执行（C0-2 模板已含 notarytool 三元组占位） |
-| ⬜ | C3/C4/C5 | 下一轮迭代：托盘与窗口收口（C3-1~C3-4）→ Linux 收尾 → 三端发版演练 |
+| ✅ | C3-1~C3-3 [tray.rs](../desktop/src-tauri/src/tray.rs) + [lib.rs](../desktop/src-tauri/src/lib.rs) + [events.rs](../desktop/src-tauri/src/events.rs) | tray-icon feature 托盘常驻：菜单六项 + 左键恢复；关窗 = prevent_close + hide（任务照跑）；急停态/未读数随事件桥与既有 poller 刷新（无新增轮询），菜单动作经 `maestro://tray` 交前端复用确认流 |
+| ✅ | C3-4 [tools.rs](../desktop/src-tauri/src/tools.rs) | 后缀/PATH 分隔符/claude 候选按平台分支（triple 候选在前）；修 current_exe 失败跳过 dev 布局的早退缺陷；+2 单测 |
+| ⬜ | C2 全部（macOS 签名/公证/universal） | 需 Apple 凭据 + Mac 侧执行（C0-2 模板已含 notarytool 三元组占位）；**由 macOS 端另行开发** |
+| ⬜ | C4 Linux 收尾 | **由 Linux 端另行开发**（SNI 托盘在 Tauri 壳由 C3 共享覆盖大半，实测项留 C4） |
+| ⬜ | C5 三端发版演练 | 依赖 C2/C4 完成后跨端总验 |
 
 验证（本轮）：daemon **103 项全绿**（含 5 个新进程面测试）、workspace 全量 **126 项 0 失败**、clippy 零告警。`test-cross` 的 windows job 现在能跑到 worker 进程面测试（此前 cfg 门控下为空转）。
 
