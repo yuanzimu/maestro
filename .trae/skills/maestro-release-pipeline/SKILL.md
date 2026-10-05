@@ -58,7 +58,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "C:\dev\maestro\desktop\scri
 
 ## 步骤 5：发版
 
-1. **升版本号**（桌面发布版，4 处）：`desktop\src-tauri\tauri.conf.json`、`desktop\src-tauri\Cargo.toml`、`desktop\package.json`、`desktop\package-lock.json`（顶部 + packages 两处，共 2 处）。workspace 根 crate 版本（0.1.1）与发布版解耦，**不动**。同步到 C:\dev。
+1. **升版本号**（桌面发布版，C0-3 单源化）：`tauri.conf.json` 是唯一源，用脚本一键同步四处：
+   `node desktop\scripts\sync-version.cjs <ver>`（同步 package.json / package-lock.json 2 处 / src-tauri\Cargo.toml；幂等，可重复跑）。workspace 根 crate 版本（0.1.1）与发布版解耦，**不动**。同步到 C:\dev。
 2. commit（`-F` 文件），打 annotated tag：`git tag -a v<ver> -F <msgfile>`。
 3. push 前再 `fetch`，远程前进则先 rebase；`git push origin master` + `git push origin v<ver>`。
 4. **GitHub Release**：取令牌（不落盘）：
@@ -69,6 +70,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "C:\dev\maestro\desktop\scri
 
 ## 已知遗留（不必每次处理）
 
-- daemon 重启后急停状态不持久化（需协议加事件类型，涉及 macOS 兼容）。
-- 急停时 git 快照偶发失败。
-- Windows 无进程组/信号，freeze 为 no-op，kill 降级为单进程 Terminate。
+- daemon 重启后急停状态不持久化（需协议加事件类型，涉及 macOS 兼容）。根因已定位：
+  `EmergencyStopped` 事件虽已入库，但 `Core::recover` 把 `emergency` 硬编码为 `None`，
+  且无「急停解除」事件可派生恢复 —— 已排入 Sprint C 后续（需新增协议事件并三端同步）。
+- ~~急停时 git 快照偶发失败~~（v0.2.4 已修：checkpoints 锁冲突退避重试）。
+- ~~Windows 无进程组/信号，freeze 为 no-op~~（Sprint C C1 已落地 Job Objects 真冻结）。
+- C1-7 mock-cli 是否出发布包待产品决策（当前保留：演示模式内置 worker）。
+- C1-6 Authenticode 需真实证书（sign-windows.ps1 降级契约已就绪）。

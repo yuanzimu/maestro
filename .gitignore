@@ -18,3 +18,6 @@ desktop/dist/
 desktop/src-tauri/target/
 desktop/src-tauri/bin/
 desktop/src-tauri/gen/
+
+# 发布签名凭据（Sprint C C0-2：真值绝不入库，模板见 .env.example）
+.env

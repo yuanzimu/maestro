@@ -691,6 +691,28 @@ C1 + C2 + C3 + C4 全部完成 → C5 三端发版演练（一次性验收）
 - C1 的 unsafe FFI（线程枚举/挂起）集中在 `imp` 模块内，先以最小 feature 集引入 windows-sys，避免依赖膨胀；
 - C1/C2 各自完成后先做平台内自测，C5 才做跨端一致性与干净环境总验；每完成一个 ID 即在进度表勾稽，测试同步新增。
 
+#### Sprint C 实施进度（2026-10-05，Windows 侧第一轮迭代）
+
+| 状态 | 交付 | 说明 |
+|---|---|---|
+| ✅ | C1-1 [Cargo.toml](../crates/maestro-daemon/Cargo.toml) | windows-sys 0.52 target-gated，feature 最小集（Foundation/Security/Console/ToolHelp/JobObjects/Threading），非 Win 构建零影响 |
+| ✅ | C1-2 [worker.rs](../crates/maestro-daemon/src/worker.rs) Win imp | 每 worker 一个 kill-on-close Job；`BasicProcessIdList` 枚举整组（孙进程自动继承资格）；Job 失败 best-effort 降级单进程并打日志 |
+| ✅ | C1-3 worker.rs Win imp | 真冻结：枚举 Job 内进程逐线程 `SuspendThread`（句柄入注册表，unfreeze 逐个 Resume 配对释放，Suspend 计数不悬空） |
+| ✅ | C1-4 worker.rs Win imp | 两级关闭：CTRL_BREAK（子进程作进程组长，CREATE_NEW_PROCESS_GROUP）→ 超时 TerminateJobObject；无共享控制台时自然落二级 |
+| ✅ | C1-5 [emergency.rs](../crates/maestro-daemon/src/emergency.rs) + worker.rs | SNAPSHOT 前 `settle_workdir` 静止确认：Win 轮询目录项指纹（80ms×5），Unix 恒 true 直通；不静止 best-effort 继续 + eprintln |
+| ✅ | C1-8 worker.rs 测试面 | 5 个 cfg(windows) 进程面测试：生命周期对齐 / 冻结-写入停止-恢复 / 孙进程整组终止 / 两级关闭收敛 / 注册表语义 —— 急停关键行为首次在 Win CI 可自动验证（`test-cross` windows job 从 continue-on-error 转正的候选依据） |
+| ✅ | C0-3 [sync-version.cjs](../desktop/scripts/sync-version.cjs) | 版本单源：tauri.conf.json 为源，一键同步 package/package-lock(2处)/Cargo.toml；幂等，替代手工四处改 |
+| ✅ | C0-2 [.env.example](../../.env.example) + [sign-windows.ps1](../desktop/scripts/sign-windows.ps1) + .gitignore | 凭据模板入库（真值 .env 已 git-ignore）；签名脚本无凭据时大声降级（UNSIGNED + exit 0）而非静默产出，契合「不静默降级」契约 |
+| ✅ | C0-4 [release.yml](../../.github/workflows/release.yml) | tag 触发骨架：Win x64+arm64 / macOS / Linux x64 矩阵构建 → 签名槽 → 产物归档 → dry-run 门；发布仍走本地流水线（C5 收口） |
+| ✅ | C0-1 发布矩阵 | 落在 release.yml 矩阵注释（CI 变量形态，任务书允许的二选一）；prepare-sidecars 两脚本均已 -Triple 参数化 |
+| ⬜ | C1-6 Authenticode 实签 | 脚本/降级契约就绪，**等真实证书**（C0-2 凭据到位即可签） |
+| ⬜ | C1-7 mock-cli 剔除 | **计划冲突待决策**：mock-cli 是桌面「演示模式」的内置 worker（[daemon.rs](../desktop/src-tauri/src/daemon.rs) 缺失直接报安装不完整），剔除将破坏无 API key 的体验路径与 GUI 回归基线 —— 需产品层先定义「演示模式」的发布语义（保留 / dev-only 构建 / 移除并改写回归） |
+| ⬜ | C1 包体 <20MB 核验 | 当前 arm64 NSIS ≈3.02MiB（含 mock-cli），达标但按 C1-7 决策后需复测 |
+| ⬜ | C2 全部（macOS 签名/公证/universal） | 需 Apple 凭据 + Mac 侧执行（C0-2 模板已含 notarytool 三元组占位） |
+| ⬜ | C3/C4/C5 | 下一轮迭代：托盘与窗口收口（C3-1~C3-4）→ Linux 收尾 → 三端发版演练 |
+
+验证（本轮）：daemon **103 项全绿**（含 5 个新进程面测试）、workspace 全量 **126 项 0 失败**、clippy 零告警。`test-cross` 的 windows job 现在能跑到 worker 进程面测试（此前 cfg 门控下为空转）。
+
 ### 10.5 模型目录：运行一次即获取免费 / 低价 token 的 API 与模型
 
 > 解决「去哪找不要钱和便宜的模型、在客户端怎么填」的问题。
