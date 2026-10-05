@@ -48,9 +48,21 @@ fn main() {
     // --- 模拟干活耗时 ---
     std::thread::sleep(std::time::Duration::from_millis(800));
 
-    // --- 轮数 = 既有节数 + 1 ---
-    let existing = std::fs::read_to_string(RESULT_FILE).unwrap_or_default();
-    let round = existing.matches("## Round").count() as u32 + 1;
+    // --- 轮数 = 本任务已完成轮数 + 1 ---
+    // 口径 = rounder 轮账 .maestro/<task>/rounds.jsonl 行数（与 daemon GC 同一
+    // dir_name 消毒逻辑）。旧口径按 demo-result.md 节数推算 —— 同 workdir 跑过
+    // 的任务互相累计，第 1 轮就算出 round≥3 直接 MAESTRO_DONE（叙事错乱
+    // 「第 1 轮：第 2 轮完成」+ steer 来不及注入就终态）
+    let task = std::env::var("MAESTRO_TASK_ID").unwrap_or_default();
+    let dir: String = task
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') { c } else { '_' })
+        .collect();
+    let rounds_file = std::path::Path::new(".maestro").join(&dir).join("rounds.jsonl");
+    let done_rounds = std::fs::read_to_string(&rounds_file)
+        .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count())
+        .unwrap_or(0);
+    let round = done_rounds as u32 + 1;
 
     let no_output = prompt.contains("无产物");
     let finish_now = round >= 3 || prompt.contains("结束");
@@ -100,11 +112,13 @@ fn main() {
         200 + round * 50,
         40 + round * 10
     );
+    // 注：故意不带 total_cost_usd —— 演示模式的拍脑袋费用与 daemon 牌价表
+    // 必然对不上（>25% 漂移），每轮刷「费用对账漂移」告警纯属噪声；
+    // 缺省 None 时 daemon 跳过对账（R34 设计内行为）
     let _ = writeln!(
         out,
-        r#"{{"type":"result","subtype":"success","is_error":false,"result":{},"session_id":"{sid}","model":"{model}","usage":{usage},"total_cost_usd":{:.3}}}"#,
-        serde_json::to_string(&result).unwrap_or_default(),
-        0.008 + round as f64 * 0.004
+        r#"{{"type":"result","subtype":"success","is_error":false,"result":{},"session_id":"{sid}","model":"{model}","usage":{usage}}}"#,
+        serde_json::to_string(&result).unwrap_or_default()
     );
     let _ = out.flush();
 }

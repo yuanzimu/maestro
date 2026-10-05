@@ -39,6 +39,8 @@ pub fn spawn_bridge(app: tauri::AppHandle) {
             };
             let app2 = app.clone();
             let seq_cell = last_seq.clone();
+            // R59 起 subscribe 增 follow 形参（false=回放完即返）：桌面事件桥
+            // 需要长连接实时推送 → true
             let _ = client.subscribe(from, true, move |env| {
                 seq_cell.fetch_max(env.seq, Ordering::SeqCst);
                 let _ = app2.emit("maestro://event", &env);
@@ -89,6 +91,9 @@ pub fn spawn_poller(app: tauri::AppHandle) {
                     "tasks": tasks,
                     "inbox": inbox,
                     "workers": workers,
+                    // 前端 managed 仅此通道更新 —— 否则设置页引擎永远误显
+                    // 「外部启动（接管）」（daemon_status command 无人轮询）
+                    "managed": state.is_managed(),
                 }),
             );
         }

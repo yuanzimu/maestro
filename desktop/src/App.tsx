@@ -9,13 +9,15 @@ import NewTaskDialog from "./components/NewTaskDialog";
 import SettingsDialog from "./components/SettingsDialog";
 import InboxPanel from "./components/InboxPanel";
 import TaskDetail from "./components/TaskDetail";
+import ErrorBoundary from "./components/ErrorBoundary";
 
 export default function App() {
   const { state } = useStore();
 
   return (
     <div className="app">
-      <StatusBar />
+      <ErrorBoundary>
+        <StatusBar />
       {state.emergency && (
         <div className="banner">
           ⛔ 全局急停中：{state.emergency.reason || "用户急停"} —— 现场已冻结保留。
@@ -46,13 +48,16 @@ export default function App() {
       </main>
 
       {state.selectedTask && (state.tasks[state.selectedTask] ? (
-        <TaskDetail id={state.selectedTask} />
+        <ErrorBoundary>
+          <TaskDetail id={state.selectedTask} />
+        </ErrorBoundary>
       ) : null)}
       {state.dialog === "new-task" && <NewTaskDialog />}
       {state.dialog === "settings" && <SettingsDialog />}
       {state.toast && (
         <div className={`toast ${state.toast.kind}`}>{state.toast.text}</div>
       )}
+      </ErrorBoundary>
     </div>
   );
 }

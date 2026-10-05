@@ -506,6 +506,32 @@ input.steer {
   border-color: var(--red);
 }
 
+/* 渲染兜底（ErrorBoundary）：整树崩溃时降级为错误条而非黑屏 */
+.fatal {
+  margin: 18px;
+  padding: 16px 18px;
+  background: var(--card);
+  border: 1px solid var(--red);
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  font-size: 13px;
+}
+.fatal-err {
+  margin-top: 6px;
+  color: var(--dim);
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  word-break: break-all;
+}
+.fatal .btns {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
 /* 滚动条 */
 ::-webkit-scrollbar {
   width: 9px;

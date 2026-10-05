@@ -38,7 +38,14 @@ export default function InboxPanel() {
           {state.emergency && (
             <button
               disabled={busy}
-              onClick={() => act(() => api.resumeAll("flush"), "已全部恢复（轻推 flush）")}
+              onClick={() =>
+                act(async () => {
+                  await api.resumeAll("flush");
+                  // RPC 成功 = daemon 已解除急停（EmergencyPhase::None）；
+                  // 0 挂起任务时 daemon 不发任何事件，横幅须在此直清
+                  dispatch({ type: "clear-emergency" });
+                }, "已全部恢复（轻推 flush）")
+              }
             >
               ▶▶ 全部恢复
             </button>

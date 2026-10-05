@@ -54,8 +54,12 @@ export const emergencyStop = (reason?: string) =>
 export const resumeAll = (steering: "flush" | "hold") =>
   invoke<{ resumed: number }>("resume_all", { steering });
 
+// daemon wire 为 { checkpoints: [...] } 包装（core.rs CheckpointList），
+// 此处解包 —— 否则 TaskDetail 渲染 checkpoints.map 直接 TypeError 黑屏
 export const listCheckpoints = (task: string) =>
-  invoke<CheckpointItem[]>("list_checkpoints", { task });
+  invoke<{ checkpoints: CheckpointItem[] }>("list_checkpoints", { task }).then(
+    (r) => r.checkpoints ?? []
+  );
 
 export const rollbackCheckpoint = (task: string, to: string) =>
   invoke<RollbackResult>("rollback_checkpoint", { task, to });

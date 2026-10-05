@@ -28,8 +28,12 @@ export function evText(ev: Record<string, unknown> & { type: string }): string {
       return `worker 退出（code ${ev.exit_code ?? "?"}）`;
     case "steering_queued":
       return `💬 轻推：${String(ev.message ?? "").slice(0, 40)}`;
-    case "steering_delivered":
-      return `轻推已投递（第 ${ev.round} 轮生效）`;
+    case "steering_delivered": {
+      // wire 的 round = 投递时 daemon 侧当前轮数，消息实际注入**下一轮**
+      // prompt（rounder 轮边界语义）—— 显示 +1 才符合用户预期
+      const r = Number(ev.round ?? 0);
+      return `轻推已投递（第 ${r + 1} 轮生效）`;
+    }
     case "steering_dropped":
       return "轻推已丢弃（任务终态）";
     case "suspended":

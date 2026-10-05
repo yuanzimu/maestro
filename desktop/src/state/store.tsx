@@ -40,12 +40,13 @@ export interface AppState {
 
 type Action =
   | { type: "daemon"; status: DaemonStatus }
-  | { type: "sync"; status: ServerStatus | null; tasks: TaskSummary[]; inbox: InboxItem[]; workers: WorkerItem[] }
+  | { type: "sync"; status: ServerStatus | null; tasks: TaskSummary[]; inbox: InboxItem[]; workers: WorkerItem[]; managed?: boolean }
   | { type: "event"; env: Envelope }
   | { type: "select"; id: string | null }
   | { type: "dialog"; dialog: AppState["dialog"] }
   | { type: "toast"; text: string; kind: "ok" | "err" }
-  | { type: "clear-toast" };
+  | { type: "clear-toast" }
+  | { type: "clear-emergency" };
 
 const initial: AppState = {
   daemon: {
@@ -91,7 +92,9 @@ function emptyTask(id: string): TaskSummary {
 function reducer(state: AppState, a: Action): AppState {
   switch (a.type) {
     case "daemon":
-      return { ...state, daemon: a.status };
+      // 只更新 running：daemon 探活事件以 initial 为底构造，整体合并会把
+      // sync 填入的 version/pid/uptime 用零值覆盖（顶栏版本号闪 "?" 最多 5s）
+      return { ...state, daemon: { ...state.daemon, running: a.status.running } };
 
     case "sync": {
       // 权威 reconcile：以 RPC 快照覆盖本地推导状态。
@@ -119,7 +122,7 @@ function reducer(state: AppState, a: Action): AppState {
         inbox: a.inbox,
         workers: a.workers,
         daemon: a.status
-          ? { ...state.daemon, running: true, version: a.status.version, pid: a.status.pid, uptime_secs: a.status.uptime_secs, event_seq: a.status.event_seq }
+          ? { ...state.daemon, running: true, version: a.status.version, pid: a.status.pid, uptime_secs: a.status.uptime_secs, event_seq: a.status.event_seq, managed: a.managed ?? state.daemon.managed }
           : { ...state.daemon, running: false },
       };
     }
@@ -163,6 +166,8 @@ function reducer(state: AppState, a: Action): AppState {
       return { ...state, toast: { text: a.text, kind: a.kind } };
     case "clear-toast":
       return { ...state, toast: null };
+    case "clear-emergency":
+      return { ...state, emergency: null };
     default:
       return state;
   }
@@ -184,7 +189,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       dispatch({ type: "event", env: e.payload })
     );
     // 兜底轮询（Rust 侧 5s 推 server_status + task_list 快照）
-    const un2 = listen<{ status: ServerStatus | null; tasks: TaskSummary[]; inbox: InboxItem[]; workers: WorkerItem[] }>(
+    const un2 = listen<{ status: ServerStatus | null; tasks: TaskSummary[]; inbox: InboxItem[]; workers: WorkerItem[]; managed?: boolean }>(
       "maestro://sync",
       (e) => dispatch({ type: "sync", ...e.payload })
     );
