@@ -64,7 +64,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "C:\dev\maestro\desktop\scri
 4. **GitHub Release**：取令牌（不落盘）：
    `git credential fill`（输入 `protocol=https`+`host=github.com`）→ 取 `password=`。
    用 Node + `https` 调 API：POST `/repos/yuanzimu/maestro/releases`（已存在则 PATCH），上传资产走 `uploads.github.com`（`content-type: application/octet-stream`）。令牌只走环境变量。
-   参考脚本：`C:\dev\maestro\desktop\scripts\gh-release.cjs`。
+   参考脚本 `C:\dev\maestro\desktop\scripts\gh-release.cjs` 已参数化，版本/notes 走命令行参数，无需手改：
+   `node gh-release.cjs <version> <notes.md>`，如 `node gh-release.cjs 0.2.3 C:\dev\release-v023.md`（notes 为 Markdown 文件，含中文无碍）。
 
 ## 已知遗留（不必每次处理）
 
