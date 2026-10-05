@@ -89,10 +89,16 @@ pub fn ensure_daemon(app: &tauri::AppHandle) -> Result<(), String> {
         .managed
         .store(true, std::sync::atomic::Ordering::SeqCst);
 
-    // 就绪等待：端口文件 bind 后 is_daemon_alive 才为真（200ms 轮询，15s 超时）
+    // 就绪等待：端口文件 bind 后 is_daemon_alive 才为真（200ms 轮询，15s 超时）。
+    // ⚠️ 必须每轮新建 client：Windows 下 MaestroClient::new 创建时一次性
+    // 读端口文件固化地址（transport::endpoints），复用上方 spawn 前创建的
+    // client = 永远连旧/占位地址 → 轮询必败 → 15s 超时误杀健康 daemon
+    // （v0.1.0 潜伏 P0，首验走「接管活 daemon」路径未暴露；重装后首启
+    // 走 spawn 路径必现：引擎就绪后被自家 GUI 杀掉，端口文件指向死端口，
+    // 事件桥永远「引擎未连接」）
     let mut waited = 0u64;
     while waited < 15_000 {
-        if client.is_daemon_alive() {
+        if MaestroClient::new(&state.data_dir).is_daemon_alive() {
             let _ = app.emit("maestro://daemon", serde_json::json!({ "alive": true }));
             return Ok(());
         }
