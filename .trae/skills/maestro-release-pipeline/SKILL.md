@@ -1,0 +1,73 @@
+---
+name: "maestro-release-pipeline"
+description: "Maestro Windows 客户端的同步-审计-构建-测试-发布闭环。当用户要求拉取远程最新、审计修复、出安装包、发版本，或说『按流程走一遍/发个新版』时调用。"
+---
+
+# Maestro 发布流水线（Windows ARM64）
+
+一句话执行的完整闭环：**同步远程 → 审计 → 构建 → 测试 → 发布**。未经用户明确要求不要创建 git commit/tag/release；但用户说「直接执行/发新版」时一路做完。
+
+## 环境事实（务必遵守）
+
+- **Git 仓库（挂载盘）**：`c:\Mac\Home\Documents\windows_trae_projects\maestro`
+  - ⚠️ 此盘 **cargo build 报 os error 87，不可构建**；只做 git 提交与编辑。
+- **构建镜像**：`C:\dev\maestro`（源码同步副本，cargo 在此构建）。
+- **跨盘复制**：用 .NET 方法，最可靠：
+  `[System.IO.File]::Copy($src,$dst,$true)`
+  - 不要用 `tar`（无法穿透挂载符号链接）；不要用管道式 tar 中转（中文变 `?`）。
+  - 若 Copy-Item 被去重/取消，换 `[System.IO.File]::Copy`。
+- **git 路径**：`C:\Program Files\Git\cmd\git.exe`（PATH 里可能没有）；所有命令加 `--no-pager`。
+- **MSVC 环境**：先 `. C:\dev\maestro\desktop\scripts\build-env.ps1`（cl 指向 Hostarm64\ARM64）。
+- **Node**：`C:\Users\a1234\node-v22.14.0-win-arm64\node.exe`。
+- **CARGO_TARGET_DIR**：workspace=`C:\cargo-target\maestro`；desktop=`C:\cargo-target\maestro-desktop`。
+- **PowerShell 5.1 坑**：不支持 `&&`/heredoc；脚本必须 **ASCII-only**（无 BOM，中文注释会被按 GBK 误读吞换行）；commit message 用 `-F <file>`，不要内联多行。
+- **Wire 协议**：daemon 是**裸 TCP + 换行 JSON**，不是 HTTP（PowerShell `Invoke-RestMethod`/Node `http` 都会报协议错）；测试用 Node `net` 直连。
+
+## 步骤 1：同步远程
+
+```powershell
+# cwd = 挂载盘仓库
+& "C:\Program Files\Git\cmd\git.exe" fetch origin --tags
+# 有本地提交则 rebase（远程由 Mac 侧频繁更新）：
+& "C:\Program Files\Git\cmd\git.exe" rebase origin/master
+```
+冲突优先保留双方意图（如本地 P0 修复 + 远程新增字段），手动合并。随后把挂载盘新增/改动文件用 `[System.IO.File]::Copy` 同步到 `C:\dev\maestro`（只补缺失/更新，不覆盖镜像里已验证但未回写的改动；可先比对两侧文件清单）。
+
+## 步骤 2：审计
+
+- **UTF-8 切字隐患**：搜 `on("data")` 后字符串累加（应 Buffer 拼接或用 `.json()`）；搜字节切片转字符串、`bytes[start..]`（start 可能落在字符中间 panic）。
+- **分模块通读**，重点：并发/锁（临时 MutexGuard 是否贯穿含阻塞调用的链式语句）、序号生成（GC 后 `len+1` 会碰撞）、整数溢出（`checked_*`）、错误是否被静默 `let _=`/`continue` 吞掉、子进程/句柄泄漏。
+- 可用并行子代理分模块审查，但**每个候选问题必须亲自核验后再改**，避免误报。
+- 优先编辑 `C:\dev\maestro` 下文件（编译验证），完成后回写挂载盘。
+
+## 步骤 3：构建
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "C:\dev\maestro\desktop\scripts\rebuild-all.ps1"
+```
+串联 `prepare-sidecars.ps1`（release daemon/rounder/mock-cli 三件套→`src-tauri\bin\*-aarch64-pc-windows-msvc.exe`）+ `build-installer.ps1`（Tauri build → NSIS）。放后台跑并等结束标记。
+产物：`C:\cargo-target\maestro-desktop\release\bundle\nsis\Maestro_<ver>_arm64-setup.exe`。
+
+## 步骤 4：测试
+
+- **Rust 全量**：`. build-env.ps1; $env:CARGO_TARGET_DIR='C:\cargo-target\maestro'; cargo test`（日志 Tee 到文件，检查 `CARGO_EXIT_CODE=0`、无 `FAILED`）。
+- **GUI 回归**（需要时）：先结束 maestro-desktop/daemon，静默安装 `setup.exe /S`；带 CDP 启动：
+  `$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS='--remote-debugging-port=9222'`
+  playwright-core 已装在 `C:\dev\maestro\desktop`；回归脚本 `scripts\uitest-regress.cjs`（4 项：事件重放/任务详情/急停恢复/轮数轻推）。
+  - 安装目录：`C:\Users\a1234\AppData\Local\Maestro\`；数据：`%APPDATA%\maestro-desktop\data\`。
+
+## 步骤 5：发版
+
+1. **升版本号**（桌面发布版，4 处）：`desktop\src-tauri\tauri.conf.json`、`desktop\src-tauri\Cargo.toml`、`desktop\package.json`、`desktop\package-lock.json`（顶部 + packages 两处，共 2 处）。workspace 根 crate 版本（0.1.1）与发布版解耦，**不动**。同步到 C:\dev。
+2. commit（`-F` 文件），打 annotated tag：`git tag -a v<ver> -F <msgfile>`。
+3. push 前再 `fetch`，远程前进则先 rebase；`git push origin master` + `git push origin v<ver>`。
+4. **GitHub Release**：取令牌（不落盘）：
+   `git credential fill`（输入 `protocol=https`+`host=github.com`）→ 取 `password=`。
+   用 Node + `https` 调 API：POST `/repos/yuanzimu/maestro/releases`（已存在则 PATCH），上传资产走 `uploads.github.com`（`content-type: application/octet-stream`）。令牌只走环境变量。
+   参考脚本：`C:\dev\maestro\desktop\scripts\gh-release.cjs`。
+
+## 已知遗留（不必每次处理）
+
+- daemon 重启后急停状态不持久化（需协议加事件类型，涉及 macOS 兼容）。
+- 急停时 git 快照偶发失败。
+- Windows 无进程组/信号，freeze 为 no-op，kill 降级为单进程 Terminate。
