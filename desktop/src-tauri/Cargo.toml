@@ -1,6 +1,6 @@
 [package]
 name = "maestro-desktop"
-version = "0.1.0"
+version = "0.2.2"
 description = "Maestro 桌面指挥台（Windows 客户端）"
 edition = "2021"
 license = "Apache-2.0"
