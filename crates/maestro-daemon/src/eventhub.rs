@@ -145,6 +145,13 @@ impl EventHub {
         sub
     }
 
+    /// 恢复模式：把广播水位抬到 seq。重启后历史事件视为「已广播」——
+    /// 否则 broadcast_seq=0 会让订阅的重放窗口 [from_seq, floor] 为空，
+    /// 新客户端首连（from_seq=1）收不到任何历史事件（GUI 重启后事件流空白）
+    pub fn set_broadcast_floor(&self, seq: u64) {
+        self.broadcast_seq.fetch_max(seq, Ordering::SeqCst);
+    }
+
     /// 恢复模式：把序号地板抬到 seq（重放历史后接着分配，不与历史冲突）
     pub fn set_seq_floor(&self, floor: u64) {
         let mut cur = self.next_seq.load(Ordering::SeqCst);
@@ -329,6 +336,46 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(1))
             .unwrap();
         assert_eq!((a.seq, b.seq, c.seq), (2, 3, 4));
+    }
+
+    /// 重启恢复场景：历史事件已入库但本次会话未广播（broadcast_seq=0）。
+    /// set_broadcast_floor(max_seq) 后，新订阅 from_seq=1 必须重放全部历史；
+    /// 恢复后新发布的事件（seq > max_seq）只走 live，不重放（无双份）。
+    #[test]
+    fn replay_after_restart_recovery() {
+        let hub = EventHub::new();
+        // 模拟重启恢复：历史 seq 1..=3 已在事件库（上次会话），本次未广播
+        let history: Vec<Envelope> = (1..=3u64)
+            .map(|s| Envelope::new(s, ev(s)))
+            .collect();
+        hub.set_seq_floor(4);
+        hub.set_broadcast_floor(3);
+
+        let replay = move |from: u64| -> Vec<Envelope> {
+            history.iter().filter(|e| e.seq >= from).cloned().collect()
+        };
+        let sub = hub.subscribe(Some(&replay), 1);
+        let got: Vec<u64> = (0..3)
+            .map(|_| {
+                sub.rx
+                    .recv_timeout(std::time::Duration::from_secs(1))
+                    .unwrap()
+                    .seq
+            })
+            .collect();
+        assert_eq!(got, vec![1, 2, 3], "首连应重放全部历史");
+
+        // 新事件 seq=4 走 live（且不会触发重放窗口 → 仅一份）
+        hub.publish(ev(4));
+        let d = sub
+            .rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(d.seq, 4);
+        assert!(
+            sub.rx.recv_timeout(std::time::Duration::from_millis(200)).is_err(),
+            "不应有重复投递"
+        );
     }
 
     /// 事件优先级透传（U9 埋点验证）

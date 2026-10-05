@@ -188,6 +188,9 @@ impl Core {
         let (tx, rx) = channel();
         let hub = Arc::new(EventHub::new());
         hub.set_seq_floor(max_seq + 1);
+        // 历史事件视作已广播：新订阅的重放窗口 [from_seq, max_seq] 才能覆盖
+        // 重启前的事件库（否则 GUI 首连 from_seq=1 重放为空）
+        hub.set_broadcast_floor(max_seq);
         if let Some(s) = &store {
             let s = s.clone();
             hub.set_sink(Box::new(move |env| {
