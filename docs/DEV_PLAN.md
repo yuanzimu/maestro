@@ -711,7 +711,7 @@ C1 + C2 + C3 + C4 全部完成 → C5 三端发版演练（一次性验收）
 | ⬜ | C1-7 mock-cli 剔除 | **计划冲突待决策**：mock-cli 是桌面「演示模式」的内置 worker（[daemon.rs](../desktop/src-tauri/src/daemon.rs) 缺失直接报安装不完整），剔除将破坏无 API key 的体验路径与 GUI 回归基线 —— 需产品层先定义「演示模式」的发布语义（保留 / dev-only 构建 / 移除并改写回归） |
 | ⬜ | C1 包体 <20MB 核验 | 当前 arm64 NSIS ≈3.02MiB（含 mock-cli），达标但按 C1-7 决策后需复测 |
 | ✅ | C3-1~C3-3 [tray.rs](../desktop/src-tauri/src/tray.rs) + [lib.rs](../desktop/src-tauri/src/lib.rs) + [events.rs](../desktop/src-tauri/src/events.rs) | tray-icon feature 托盘常驻：菜单六项 + 左键恢复；关窗 = prevent_close + hide（任务照跑）；急停态/未读数随事件桥与既有 poller 刷新（无新增轮询），菜单动作经 `maestro://tray` 交前端复用确认流 |
-| ✅ | C3-4 [tools.rs](../desktop/src-tauri/src/tools.rs) | 后缀/PATH 分隔符/claude 候选按平台分支（triple 候选在前）；修 current_exe 失败跳过 dev 布局的早退缺陷；+2 单测 |
+| ✅ | C3-4 [tools.rs](../desktop/src-tauri/src/tools.rs) | 后缀/PATH 分隔符/claude 候选按平台分支（triple 候选在前）；dev 布局双候选目录探测；+2 单测 |
 | ⬜ | C2 全部（macOS 签名/公证/universal） | 需 Apple 凭据 + Mac 侧执行（C0-2 模板已含 notarytool 三元组占位）；**由 macOS 端另行开发** |
 | ⬜ | C4 Linux 收尾 | **由 Linux 端另行开发**（SNI 托盘在 Tauri 壳由 C3 共享覆盖大半，实测项留 C4） |
 | ⬜ | C5 三端发版演练 | 依赖 C2/C4 完成后跨端总验 |
@@ -726,6 +726,15 @@ C1 + C2 + C3 + C4 全部完成 → C5 三端发版演练（一次性验收）
 | ✅ | CI 转正 + release 骨架修复 | 见上表 C1-8 后半 / C0-4 行 |
 
 验证（第二轮）：daemon **105 项全绿**（+2）、protocol 13 项（+1）、workspace 0 失败、clippy/tsc 零告警。
+
+第三轮迭代（2026-10-05，71b6b42 + c47fe49）：
+
+| 状态 | 交付 | 说明 |
+|---|---|---|
+| ✅ | **U5 结果卡**（B1-5，C1 前半） | daemon task_get 增量返回 `workdir`（旧客户端宽松解析）；桌面 `task_diff` 命令（baseline checkpoint → 工作区 stat+patch，96KB 钳制 + UTF-8 边界截断，quotepath=false 防 CJK 转义）；新组件 [ResultCard.tsx](../desktop/src/components/ResultCard.tsx)：一句话摘要 + 验收门状态 + 花费 + 节省比例 + diff 按需加载，挂 TaskDetail 顶部；+2 单测（numstat/UTF-8 截断） |
+| ✅ | release dry-run 三跑失败修复 | arm64 Sign 步骤漏 `working-directory: desktop`（仓库根跑 → `$exe` null）→ 补齐；NSIS 产物本身正常（3.10 MiB） |
+
+验证（第三轮）：daemon **105 项全绿**、desktop 4 项（+2）、tsc 0 错；CI push 门（c47fe49）全绿。
 
 ### 10.5 模型目录：运行一次即获取免费 / 低价 token 的 API 与模型
 
