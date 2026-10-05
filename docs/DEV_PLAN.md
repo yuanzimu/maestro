@@ -494,6 +494,88 @@ Worker 市场（G7）/ 插件系统（H1）/ Web 客户端（H2，含移动端�
 | ✅ | 测试 | 新增 2 个预算 e2e（[budget_enforcement.rs](../crates/maestro-e2e/tests/budget_enforcement.rs)）；全 workspace **205 项全绿**；clippy `-D warnings` 零告警；生产 daemon 冒烟通过（默认网关 / `--ccr-url ""` 直连 / status / shutdown） |
 | ⬜ | 真实链路联调 | 需本机安装并配置 CCR（`npm i -g @musistudio/claude-code-router`）+ 真实 provider key，验证真实 claude CLI 经 CCR 路由与成本量化；机制层已用 mock 全量验证 |
 
+#### Sprint B 详细任务书（2026-10-05 规划，尚未开发——待三端分别下发）
+
+> 目标：三端同一套界面语言对齐 Trae IDE；Linux GUI 首次出包。
+> **本 Sprint 只写计划不写代码。** 任务按「B0 共享契约 → B1 Tauri/React 共享前端（Win+Linux）/ B3 macOS 原生对齐（可并行）→ B2/B4 平台打包」组织，每条带唯一 ID，便于在 Windows、Linux、macOS 三端分别下发与追踪。
+
+**出口断言（Sprint B 完成时必须全部成立）**
+
+1. Win / Linux（Tauri）与 macOS（AppKit）呈现一致的信息架构与视觉语言，普通用户切换平台零学习成本；
+2. Linux 产出可安装的 GUI 包（AppImage 主推 + .deb + .rpm），安装后能拉起引擎、派活、看叙事、收通知；
+3. 审批门 / 结果卡 / 命令面板 / 通知中心四类核心界面在三端行为一致；
+4. 三端包体与内存不恶化（Win/Linux <20MB，macOS 无新增重依赖）；全量测试与 clippy 保持全绿。
+
+##### B0 · 共享设计契约（**必须最先做，三端共同依据**）
+
+| ID | 任务 | 落点 / 产出 | 验收 |
+|---|---|---|---|
+| B0-1 | 设计 token 单一事实源：spacing（4/8 基准）、色板（含亮+暗双主题）、8 种状态色、字体阶梯、圆角、阴影、动效时长 | 以现有 [styles.css](../desktop/src/styles.css) 的 CSS 变量为底补齐亮色主题并冻结命名；macOS 侧给出同名 token 到 NSColor 的映射表 | token 清单三端各一份且命名/数值一一对应；无硬编码颜色残留 |
+| B0-2 | 信息架构（IA）：左活动栏四图标（任务 / 收件箱 / 事件 / 设置）+ 主区 + 右可折叠详情；顶部只留模式切换（专注单 Agent / 并行多 Worker）与全局动作 | IA 线框 + 导航状态机（含收件箱未读角标） | 三端导航路径与默认落点一致；替代当前顶栏 Tab |
+| B0-3 | 核心组件契约：TaskCard / TaskDetail / CommandPalette / ApprovalGate / ResultCard / NotificationCenter 的数据字段、状态、动效、空态 | 组件契约表（props / 状态 / 事件，三端各自实现） | 同一任务数据在三端渲染结构等价 |
+| B0-4 | 文案与术语表：状态、按钮、空状态、错误引导的统一中英文案（含「下一步」提示） | 术语表 | 三端同义不同译的情况清零 |
+
+##### B1 · Tauri/React 共享前端改造（**Windows 与 Linux 共用，一次开发两端受益**）
+
+> 全部落在 [desktop/src](../desktop/src)；仅在共享前端完成后，Win/Linux 的平台打包（B2/B4）才有意义。
+
+| ID | 任务 | 落点 | 验收 |
+|---|---|---|---|
+| B1-1 | 布局改 Trae 式：新增 ActivityBar 组件 + 主区 + 右侧可折叠详情；移除/改造 [StatusBar](../desktop/src/components/StatusBar.tsx) 的导航职责 | 新 `components/ActivityBar.tsx`；改 [App.tsx](../desktop/src/App.tsx)、styles | 四图标导航可用、角标正确、窗口缩放无破版 |
+| B1-2 | 命令面板：`Ctrl/Cmd+K` 唤起，支持新建/搜索任务/执行急停/跳设置；模糊匹配 + 键盘上下/回车 | 新 `components/CommandPalette.tsx` | 纯键盘可完成派活；Esc 关闭 |
+| B1-3 | 全局快捷输入 `Alt+M`（U1）：任意界面唤起输入条 + 剪贴板智能识别（错误日志/URL/代码） | 前端入口 + Tauri 快捷键注册（B2/B4 平台接线） | 剪贴板类型识别并附为上下文 |
+| B1-4 | 计划审批门卡片（U8+C-4）：步骤清单 + 成本预估 + 批准 / 编辑 / 拒绝 | 新 `components/ApprovalGate.tsx` | 审批前不执行；成本一目了然 |
+| B1-5 | 结果卡 v2（U5+C-5）：一句话摘要 + 验收 12/12 + 花费 + **节省比例** + inline diff 入口 | 改 TaskDetail / 新 `components/ResultCard.tsx` | 5 秒可扫视；节省数据显著 |
+| B1-6 | 通知中心（U9+C-6）：非打扰事件统一收纳 + 仅 blocked/done/异常走系统通知 + 全部已读 | 新 `components/NotificationCenter.tsx` | 非关键事件不弹系统通知 |
+| B1-7 | 空状态 / 断连重连 / 首跑引导（U2+C-7）：示例任务 + doctor 入口前置 | 改 App 空态与各空组件 | 新用户首屏有明确下一步 |
+| B1-8 | 亮 / 暗主题切换 + 跟随系统 | styles 双主题 + 设置项 | 切换无闪烁、持久化 |
+
+##### B2 · Windows 平台专项（Tauri，依赖 B1）
+
+| ID | 任务 | 落点 | 验收 |
+|---|---|---|---|
+| B2-1 | **Sprint A 网关参数透传**：Tauri 拉起 sidecar 时支持把 CCR url/token 传给 daemon（当前 [daemon.rs](../desktop/src-tauri/src/daemon.rs) 只传 worker/data-dir） | 改 src-tauri/src/daemon.rs、settings | 引擎日志显示正确网关；可在设置中关闭 |
+| B2-2 | Win11 原生观感：Mica/Acrylic、跟随系统深浅色 | tauri 配置 + 窗口效果 | Win11 生效、旧版自动降级不报错 |
+| B2-3 | 全局快捷键 `Alt+M` 的 Windows 注册 | src-tauri | 全应用可唤起 |
+| B2-4 | IME composition（中文输入法）在 WebView2 下验证 | 实测 | 拼音组词不丢字、回车不误提交 |
+| B2-5 | 发布包剔除 mock-cli（仅开发期需要）+ NSIS 包体 **<20MB** | tauri externalBin 条件化 | 安装包达标且功能完整 |
+
+##### B3 · macOS 原生对齐（AppKit，**可与 B1 并行**）
+
+> 依据 B0 契约用原生 AppKit 实现，不引入 SwiftUI 重依赖；公证 / Developer ID 签名留 Sprint C。
+
+| ID | 任务 | 落点 | 验收 |
+|---|---|---|---|
+| B3-1 | SF Symbols 活动栏 + `NSToolbar` 替代自绘顶栏 | 改 [AppKitUI.swift](../clients/macos/Sources/MaestroGui/AppKitUI.swift)、[main.swift](../clients/macos/Sources/MaestroGui/main.swift) | 四图标导航 + 角标与 B0-IA 一致 |
+| B3-2 | 深浅色自动：状态色全部走 system colors / B0 token 映射 | AppKitUI.swift | 切换系统外观即时生效 |
+| B3-3 | `NSStatusItem` 菜单栏常驻：未读角标 + 急停 / 新建任务全局菜单 | main.swift | 菜单栏可完成常用动作 |
+| B3-4 | 快捷键体系 `⌘N / ⌘K / ⌘M` | 菜单 + key equivalent | 与 Win/Linux 功能对等（仅修饰键差异） |
+| B3-5 | 审批门 / 结果卡 / 命令面板的 AppKit 原生实现（对齐 B1-4/5/2 行为） | 新增对应视图 | 与 Tauri 版行为等价 |
+
+##### B4 · Linux GUI 出包（方案 A 复用 Tauri，依赖 B1）
+
+| ID | 任务 | 落点 | 验收 |
+|---|---|---|---|
+| B4-1 | Tauri bundle target 增加 Linux：`appimage` / `deb` / `rpm` | [tauri.conf.json](../desktop/src-tauri/tauri.conf.json) | 三产物均可构建 |
+| B4-2 | Linux sidecar 准备脚本：产出/收集 maestro-daemon、maestro-rounder（对齐 Windows 的 prepare-sidecars.ps1） | 新增 `desktop/scripts/prepare-sidecars.sh` | 打包前 sidecar 就位、可执行位正确 |
+| B4-3 | Freedesktop 集成：`.desktop` 文件 + 托盘图标（SNI）+ 跟随 GNOME/KDE 深浅色 | bundle 配置 + 前端 | GNOME/KDE 菜单可启动、托盘可用 |
+| B4-4 | 全局快捷键走 XDG：兼容 X11 与 Wayland | src-tauri | 两协议下 `Alt+M` 可用 |
+| B4-5 | fcitx5 输入法验证（含 xrdp/XFCE 场景） | 实测 | 中文输入不丢字 |
+| B4-6 | 产物验收：AppImage 单文件免安装可跑；.deb/.rpm 安装卸载干净 | 实测三形态 | 装→派活→看叙事→收通知→卸载全链通 |
+
+**下发顺序与依赖**
+
+```
+B0 共享契约（先做，一次性）
+   ├── B1 Tauri/React 共享前端 ──┬── B2 Windows 打包/专项
+   │                            └── B4 Linux GUI 出包
+   └── B3 macOS AppKit 对齐（可与 B1 并行，只依赖 B0）
+```
+
+- 建议：三端同时开工时，**先在一处完成 B0 并合入**，Win/Linux 走 B1→B2/B4，mac 走 B3；
+- B1 与 B3 完成后做一次「三端一致性走查」（同一组任务数据对照 B0-3 契约），再进入 B2/B4 的安装包验证；
+- 每个 ID 完成即在下表勾稽；测试随任务同步新增（共享前端行为测试 + Linux 安装包冒烟可纳入 CI 的 ubuntu job）。
+
 ## 十一、决策记录（v1→v2，含 v2.2 重排与 v2.3 增补）
 
 | # | 决策 | 理由 |
