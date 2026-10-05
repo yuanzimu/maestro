@@ -18,9 +18,22 @@ tracing-subscriber.workspace = true
 rusqlite.workspace = true
 ureq.workspace = true
 
-# Unix 进程组信号/进程管理（Windows 走 worker.rs 的 Child 注册表降级路径）
+# Unix 进程组信号/进程管理（Windows 走 worker.rs 的 Job Objects 语义）
 [target.'cfg(unix)'.dependencies]
 nix.workspace = true
+
+# Windows Job Objects：急停真冻结（逐线程挂起）+ 整组终止 + kill-on-close 防孙进程泄漏
+# （Sprint C C1-1：feature 最小集，非 Windows 构建零影响。Security 为 CreateJobObjectW 的
+# SECURITY_ATTRIBUTES 参数类型所需）
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
 
 [[bin]]
 name = "maestro-daemon"

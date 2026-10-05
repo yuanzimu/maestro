@@ -6,11 +6,12 @@
 //! 2. **spawn 即专属线程 wait**：防僵尸（herdr 决策）；kill/cancel 路径不依赖 Child
 //! 3. **PID 文件带 start_time**（Linux /proc）：防 PID 复用误杀（oxo-flow 的双因子法）
 //!
-//! 平台矩阵（R57）：
+//! 平台矩阵（R57 + Sprint C C1）：
 //! - Linux：完整语义 —— 独立进程组（killpg 三级升级/SIGSTOP 急停）+ /proc 双因子
 //! - macOS：进程组信号同 Linux；无 /proc → start_time 恒 0、组探活/身份用 kill 探测
-//! - Windows：降级语义 —— 无进程组/SIGSTOP（占位 no-op），kill 走 Child 注册表，
-//!   完整语义待 Job Objects（后续迭代）
+//! - Windows：Job Objects 语义 —— 每 worker 一个 kill-on-close Job（防孙进程泄漏），
+//!   FREEZE 枚举 Job 内进程逐线程挂起、RESUME 逆操作，关闭两级 CTRL_BREAK →
+//!   TerminateJobObject（整组含孙进程）；快照前 workdir 静止确认（C1-5）
 //!
 //! 对外门面函数签名跨平台一致（`imp` 模块按 cfg 提供实现）。
 
@@ -150,9 +151,18 @@ pub fn group_alive(pgid: u32) -> bool {
     imp::group_alive(pgid)
 }
 
-/// SIGKILL 硬杀（graceful 后仍存活的兜底）。Windows：TerminateProcess
+/// SIGKILL 硬杀（graceful 后仍存活的兜底）。Windows：TerminateJobObject 整组
 pub fn hard_kill_group(pgid: u32) -> bool {
     imp::hard_kill_group(pgid)
+}
+
+/// 急停快照静止确认（C1-5）：FREEZE 后、SNAPSHOT 前调用。
+/// Windows：短轮询 workdir 目录项指纹（名字/大小/mtime）直至连续两轮稳定 ——
+/// 真冻结应瞬时静止，不稳说明有外部写入者（另一 worktree/杀毒扫描）；
+/// Unix：SIGSTOP 已静止文件系统，恒 true（零开销直通）。
+/// 返回是否静止；调用方 best-effort 继续（快照失败路径已有如实上报）。
+pub fn settle_workdir(workdir: &Path) -> bool {
+    imp::settle_workdir(workdir)
 }
 
 /// PID 是否仍是我们启动的那个进程（Linux：pid + start_time 双因子防复用；
@@ -333,29 +343,72 @@ mod imp {
     pub fn proc_start_time(pid: u32) -> u64 {
         proc_stat(pid).map(|(_, _, st)| st).unwrap_or(0)
     }
+
+    /// Unix：SIGSTOP 冻结后文件系统已静止，无需轮询（C1-5 平台直通）
+    pub fn settle_workdir(_workdir: &std::path::Path) -> bool {
+        true
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Windows 实现：Child 注册表（降级语义，待 Job Objects）
+// Windows 实现：Job Objects（Sprint C C1）+ Child 注册表
 // ---------------------------------------------------------------------------
 
 #[cfg(windows)]
 mod imp {
     use super::{finish_exit, WorkerExit, WorkerMeta};
     use std::collections::HashMap;
+    use std::mem::size_of;
+    use std::os::windows::io::AsRawHandle;
+    use std::os::windows::process::CommandExt;
+    use std::path::Path;
     use std::process::{Child, Command};
     use std::sync::mpsc::Sender;
     use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
 
-    /// Child 注册表：Windows 无进程组信号 —— kill/alive 经 Child 句柄操作。
-    /// waiter 线程 take 走所有权；kill 路径 get_mut。
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Thread32First, Thread32Next, THREADENTRY32,
+        TH32CS_SNAPTHREAD,
+    };
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicProcessIdList,
+        JobObjectExtendedLimitInformation, QueryInformationJobObject,
+        SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenThread, ResumeThread, SuspendThread, THREAD_SUSPEND_RESUME,
+    };
+
+    // windows-sys 0.52 的 HANDLE = isize：Job/线程句柄直接以 isize 存储（跨线程
+    // 进 static 容器安全，无需 Send 包装）
+    type Raw = isize;
+
+    /// 每 worker 的 Job 单元：Job 句柄 + 冻结中线程句柄（freeze/unfreeze 配对）
+    #[derive(Default)]
+    struct JobCell {
+        job: Raw,
+        frozen: Vec<Raw>,
+    }
+
+    fn jobs() -> &'static Mutex<HashMap<u32, JobCell>> {
+        static J: OnceLock<Mutex<HashMap<u32, JobCell>>> = OnceLock::new();
+        J.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    /// Child 注册表：waiter 线程 take 走所有权；kill/alive 路径 get_mut。
     fn registry() -> &'static Mutex<HashMap<u32, Child>> {
         static REG: OnceLock<Mutex<HashMap<u32, Child>>> = OnceLock::new();
         REG.get_or_init(|| Mutex::new(HashMap::new()))
     }
 
-    pub fn decorate(_cmd: &mut Command) {
-        // Windows 无 process_group —— 完整组语义待 Job Objects
+    pub fn decorate(cmd: &mut Command) {
+        // 子进程作为进程组长（CREATE_NEW_PROCESS_GROUP）——CTRL_BREAK 可定向投递
+        // 到该组（graceful 第一级），且不影响 daemon 自身所在组
+        cmd.creation_flags(0x0000_0200);
     }
 
     pub fn spawn_waiter(
@@ -364,15 +417,17 @@ mod imp {
         child: Child,
     ) -> std::io::Result<()> {
         let pid = child.id();
-        // child 必须**保留**在注册表：Windows 无进程组信号，kill/alive 全靠
-        // Child 句柄。若 waiter 一启动就 remove 走，之后 kill_pid 永远找不
-        // 到，取消/急停实际从不生效。
+        // C1-2：绑定 kill-on-close Job（best-effort —— 失败退回注册表单进程语义，
+        // 但仍保留冻结/整组终止之外的兜底 kill）
+        attach_job(&child);
+        // child 必须**保留**在注册表：kill/alive 全靠 Child 句柄。若 waiter 一启动
+        // 就 remove 走，之后 kill_pid 永远找不到，取消/急停实际从不生效。
         registry().lock().unwrap().insert(pid, child);
         let thread = std::thread::Builder::new()
             .name(format!("waiter-{}", meta.id))
             .spawn(move || {
                 // 周期性 try_wait 轮询（每轮短暂持锁，不阻塞 kill/alive）：
-                // 自然退出或被 kill_pid 终止都会在此被发现
+                // 自然退出或被终止都会在此被发现
                 loop {
                     let exited = {
                         let mut reg = registry().lock().unwrap();
@@ -383,48 +438,206 @@ mod imp {
                     };
                     match exited {
                         Some(status) => {
-                            // 进程已退出：锁内 remove 取出（锁立即释放，
-                            // 不持有锁做任何阻塞操作）
+                            // 进程已退出：锁内 remove 取出（锁立即释放），
+                            // 再收尾 Job（关 kill-on-close 句柄 → 兜底清仍在组的孙进程）
                             let removed = registry().lock().unwrap().remove(&pid);
-                            let exit_code = removed
-                                .map(|_| status.code())
-                                .flatten();
+                            let exit_code = removed.and_then(|_| status.code());
+                            reap_job(pid);
                             finish_exit(meta, on_exit, exit_code);
                             break;
                         }
-                        None => std::thread::sleep(std::time::Duration::from_millis(100)),
+                        None => std::thread::sleep(Duration::from_millis(100)),
                     }
                 }
             });
         match thread {
             Ok(_) => Ok(()),
             Err(e) => {
-                // 线程创建失败：回滚注册表并显式 kill+wait，不泄漏句柄/进程
+                // 线程创建失败：回滚注册表/Job 并显式 kill+wait，不泄漏句柄/进程
                 if let Some(mut c) = registry().lock().unwrap().remove(&pid) {
                     let _ = c.kill();
                     let _ = c.wait();
                 }
+                reap_job(pid);
                 Err(e)
             }
         }
     }
 
+    /// C1-2：每 worker 一个 kill-on-close Job —— daemon 崩溃即整组清理
+    /// （堵住「孙进程泄漏」：worker CLI 派生的子进程自动继承 Job 成员资格）
+    fn attach_job(child: &Child) {
+        unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job == 0 {
+                eprintln!("maestro: Job 创建失败，该 worker 降级为单进程语义");
+                return;
+            }
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const core::ffi::c_void,
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            ) == 0
+            {
+                eprintln!("maestro: Job kill-on-close 设置失败，降级单进程语义");
+                CloseHandle(job);
+                return;
+            }
+            if AssignProcessToJobObject(job, child.as_raw_handle() as Raw) == 0 {
+                eprintln!("maestro: Job 绑定失败（进程可能已退出），降级单进程语义");
+                CloseHandle(job);
+                return;
+            }
+            jobs()
+                .lock()
+                .unwrap()
+                .insert(child.id(), JobCell { job: job as Raw, frozen: vec![] });
+        }
+    }
+
+    /// waiter 收尾：释放冻结线程句柄并关 Job —— 关闭动作触发 kill-on-close，
+    /// 兜底清掉主进程已退出但仍在组内滞留的孙进程
+    fn reap_job(pid: u32) {
+        if let Some(cell) = jobs().lock().unwrap().remove(&pid) {
+            for th in cell.frozen {
+                unsafe { CloseHandle(th as _) };
+            }
+            unsafe { CloseHandle(cell.job as _) };
+        }
+    }
+
+    /// Job 内全部进程 pid（含孙进程 —— C1 的核心收益：枚举以 Job 为准，
+    /// 不靠父子关系推断，CLI 换任何派生方式都逃不出组）。
+    /// 走 BasicProcessIdList：直接返回 pid 数组，无句柄管理负担
+    unsafe fn job_pids(job: Raw) -> Vec<u32> {
+        let mut slots = 64usize;
+        for _ in 0..2 {
+            // 布局 = JOBOBJECT_BASIC_PROCESS_ID_LIST：[assigned, in_list, pid...]
+            let mut buf: Vec<u32> = vec![0; slots + 2];
+            let ok = QueryInformationJobObject(
+                job,
+                JobObjectBasicProcessIdList,
+                buf.as_mut_ptr() as *mut core::ffi::c_void,
+                (buf.len() * size_of::<u32>()) as u32,
+                std::ptr::null_mut(),
+            );
+            let assigned = buf[0] as usize;
+            let in_list = buf[1] as usize;
+            if ok != 0 {
+                return buf[2..2 + in_list].to_vec();
+            }
+            // 失败：组已终止/空（返回空）或缓冲不足（按 assigned 扩容重试一次）
+            if assigned > slots && slots < 8192 {
+                slots = assigned + 8;
+                continue;
+            }
+            return vec![];
+        }
+        vec![]
+    }
+
+    /// 逐线程挂起 Job 内全部进程（C1-3 真冻结）。返回被挂起的线程句柄
+    /// （unfreeze 逐个 Resume 一次 + 关闭 —— Suspend 计数精确配对）
+    unsafe fn suspend_threads_of(pids: &[u32]) -> Vec<Raw> {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if snap == INVALID_HANDLE_VALUE {
+            return vec![];
+        }
+        let mut te: THREADENTRY32 = std::mem::zeroed();
+        te.dwSize = size_of::<THREADENTRY32>() as u32;
+        let mut out = vec![];
+        if Thread32First(snap, &mut te) != 0 {
+            loop {
+                if pids.contains(&te.th32OwnerProcessID) {
+                    let th = OpenThread(THREAD_SUSPEND_RESUME, 0, te.th32ThreadID);
+                    if th != 0 {
+                        if SuspendThread(th) != 0xFFFF_FFFF {
+                            out.push(th as Raw);
+                        } else {
+                            // 线程已退出等：直接关闭，不留悬空计数
+                            CloseHandle(th);
+                        }
+                    }
+                }
+                if Thread32Next(snap, &mut te) == 0 {
+                    break;
+                }
+            }
+        }
+        CloseHandle(snap);
+        out
+    }
+
+    pub fn freeze_group(pgid: u32) -> std::io::Result<()> {
+        // 句柄先复制出锁再 FFI（不持锁做系统调用；reap_job 并发安全）
+        let job = {
+            jobs()
+                .lock()
+                .unwrap()
+                .get(&pgid)
+                .map(|c| c.job)
+                .ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::NotFound, "no job for worker")
+                })?
+        };
+        unsafe {
+            let pids = job_pids(job);
+            // 空组 = 主进程已退出（竞态窗口）：vacuously frozen，交给 waiter 路径
+            if !pids.is_empty() {
+                let suspended = suspend_threads_of(&pids);
+                if let Some(cell) = jobs().lock().unwrap().get_mut(&pgid) {
+                    cell.frozen.extend(suspended);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn unfreeze_group(pgid: u32) -> std::io::Result<()> {
+        let threads: Vec<Raw> = {
+            match jobs().lock().unwrap().get_mut(&pgid) {
+                Some(cell) => std::mem::take(&mut cell.frozen),
+                // 无 Job（attach 失败的降级路径）：冻结本就是 no-op，恢复亦然
+                None => vec![],
+            }
+        };
+        for th in threads {
+            unsafe {
+                ResumeThread(th as _);
+                CloseHandle(th as _);
+            }
+        }
+        Ok(())
+    }
+
+    /// C1-4 两级关闭：CTRL_BREAK（共享控制台时 CLI 有保存现场窗口）→
+    /// 超时后 TerminateJobObject 整组硬杀。原「直接 Terminate」无优雅期。
     pub fn graceful_kill_group(pgid: u32) {
-        // 降级：单进程 Terminate（无三级升级 —— Windows 无信号语义）
-        let _ = kill_pid(pgid);
-    }
-
-    pub fn freeze_group(_pgid: u32) -> std::io::Result<()> {
-        // 降级 no-op：Windows 挂起需 NtSuspendProcess/Job Objects（后续迭代）
-        Ok(())
-    }
-
-    pub fn unfreeze_group(_pgid: u32) -> std::io::Result<()> {
-        Ok(())
+        // 第一级：定向投递到子进程组（daemon 与子组不同组，自身不受影响；
+        // 无共享控制台/子进程不处理时调用失败，自然落到第二级）
+        unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pgid) };
+        if wait_gone(pgid, Duration::from_millis(2000)) {
+            return;
+        }
+        let job = jobs().lock().unwrap().get(&pgid).map(|c| c.job);
+        match job {
+            Some(job) => unsafe { TerminateJobObject(job as _, 1); },
+            None => {
+                let _ = kill_pid(pgid);
+            }
+        }
+        let _ = wait_gone(pgid, Duration::from_millis(1000));
     }
 
     pub fn hard_kill_group(pgid: u32) -> bool {
-        kill_pid(pgid)
+        let job = jobs().lock().unwrap().get(&pgid).map(|c| c.job);
+        match job {
+            Some(job) => unsafe { TerminateJobObject(job as _, 1) != 0 },
+            None => kill_pid(pgid),
+        }
     }
 
     pub fn group_alive(pgid: u32) -> bool {
@@ -446,12 +659,58 @@ mod imp {
         0 // 无 /proc 双因子 —— 恒 0（is_our_process 走注册表）
     }
 
+    /// C1-5：workdir 静止确认 —— 目录项（名字/大小/mtime）指纹连续两轮一致。
+    /// 真冻结后应 1 轮即稳；不稳定说明有外部写入者，返回 false 由调用方决策。
+    pub fn settle_workdir(workdir: &Path) -> bool {
+        let mut prev = fingerprint(workdir);
+        for _ in 0..5 {
+            std::thread::sleep(Duration::from_millis(80));
+            let cur = fingerprint(workdir);
+            if cur == prev {
+                return true;
+            }
+            prev = cur;
+        }
+        false
+    }
+
+    fn fingerprint(dir: &Path) -> Vec<(String, u64, u64)> {
+        let mut out = vec![];
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for e in rd.flatten() {
+                if let Ok(md) = e.metadata() {
+                    let mtime = md
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    out.push((e.file_name().to_string_lossy().into_owned(), md.len(), mtime));
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
     fn kill_pid(pid: u32) -> bool {
         let mut reg = registry().lock().unwrap();
         match reg.get_mut(&pid) {
             Some(c) => c.kill().is_ok(),
             None => false,
         }
+    }
+
+    /// 轮询等待组清空（带超时；组 = 注册表里的主进程，孙进程随 Job 一并终止）
+    fn wait_gone(pgid: u32, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if !group_alive(pgid) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        !group_alive(pgid)
     }
 }
 
@@ -676,5 +935,233 @@ mod tests {
             "stderr 尾部应含错误: {}",
             exit.stderr_tail
         );
+    }
+
+    // -------------------------------------------------------------------
+    // Windows 进程面测试（Sprint C C1-8：把急停/孤儿回收关键行为做成
+    // Win 可跑的自动化，脱离 e2e 的 #![cfg(unix)] 限制）
+    // -------------------------------------------------------------------
+
+    #[cfg(windows)]
+    use std::time::{Duration, Instant};
+
+    #[cfg(windows)]
+    use std::sync::mpsc;
+
+    #[cfg(windows)]
+    fn spec(program: &str, args: &[&str], tmp: &Path) -> SpawnSpec {
+        SpawnSpec {
+            worker: WorkerId::new("w-test"),
+            task: TaskId::new("t-test"),
+            program: program.to_string(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+            workdir: tmp.to_path_buf(),
+            log_dir: tmp.join("logs"),
+            extra_env: vec![],
+            prompt: "p".into(),
+        }
+    }
+
+    /// 测试专用进程枚举（与 imp 同一 windows-sys 依赖，不走 FFI 封装）
+    #[cfg(windows)]
+    mod winproc {
+        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+            TH32CS_SNAPPROCESS,
+        };
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+
+        /// 指定 pid 的**直接子进程**清单（找 start /b 派生的孙进程）
+        pub fn children_of(parent: u32) -> Vec<u32> {
+            unsafe {
+                let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+                if snap == INVALID_HANDLE_VALUE {
+                    return vec![];
+                }
+                let mut pe: PROCESSENTRY32W = std::mem::zeroed();
+                pe.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+                let mut out = vec![];
+                if Process32FirstW(snap, &mut pe) != 0 {
+                    loop {
+                        if pe.th32ParentProcessID == parent && pe.th32ProcessID != parent {
+                            out.push(pe.th32ProcessID);
+                        }
+                        if Process32NextW(snap, &mut pe) == 0 {
+                            break;
+                        }
+                    }
+                }
+                CloseHandle(snap);
+                out
+            }
+        }
+
+        /// pid 是否存活（OpenProcess 探测；进程退出且句柄全关后即失效）
+        pub fn alive(pid: u32) -> bool {
+            unsafe {
+                let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+                if h == 0 {
+                    return false;
+                }
+                CloseHandle(h);
+                true
+            }
+        }
+    }
+
+    /// 等待文件持续增长（写循环在跑的证据）；超时即 panic
+    #[cfg(windows)]
+    fn wait_grow(f: &std::path::Path, ms: u64) {
+        let deadline = Instant::now() + Duration::from_millis(ms);
+        let mut last = 0u64;
+        while Instant::now() < deadline {
+            let cur = std::fs::metadata(f).map(|m| m.len()).unwrap_or(0);
+            if last > 0 && cur > last {
+                return;
+            }
+            last = cur;
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        panic!("文件未持续增长（写循环没跑起来？）: {f:?}");
+    }
+
+    /// 间隔 ms 两次采样大小是否一致（冻结后写入停止的证据）
+    #[cfg(windows)]
+    fn size_stable(f: &std::path::Path, ms: u64) -> bool {
+        let a = std::fs::metadata(f).map(|m| m.len()).unwrap_or(0);
+        std::thread::sleep(Duration::from_millis(ms));
+        let b = std::fs::metadata(f).map(|m| m.len()).unwrap_or(0);
+        a == b
+    }
+
+    /// 等待 pid 消失（含 daemon 持句柄的注册表收尾延迟）
+    #[cfg(windows)]
+    fn wait_pid_gone(pid: u32, ms: u64) -> bool {
+        let deadline = Instant::now() + Duration::from_millis(ms);
+        while Instant::now() < deadline {
+            if !winproc::alive(pid) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        !winproc::alive(pid)
+    }
+
+    /// 生命周期对齐 unix 用例：spawn → 退出码 → stdout 落盘（Windows 基线）
+    #[cfg(windows)]
+    #[test]
+    fn win_spawn_exit_report() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let meta = spawn_worker(spec("cmd", &["/c", "echo hi"], tmp.path()), "pipe", tx).unwrap();
+        // Windows pgid 语义：pid 占位（Job 才是真正的「组」）
+        assert_eq!(meta.pgid, meta.pid);
+        let exit = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(exit.exit_code, Some(0));
+        let out = std::fs::read_to_string(&meta.stdout_path).unwrap();
+        assert!(out.contains("hi"), "stdout 应落盘: {out}");
+    }
+
+    /// C1-3 真冻结主径：FREEZE 后写入停止 → RESUME 后继续 → hard kill 整组清空。
+    /// 写循环 = cmd 的 for /l 死循环追加 tick.txt（cmd 自身单进程执行，挂起其
+    /// 主线程即冻结全部写入 —— 与急停对真实 CLI 的冻结路径一致）
+    #[cfg(windows)]
+    #[test]
+    fn win_freeze_halts_writes_and_resume_continues() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, _rx) = mpsc::channel();
+        let script = "for /l %i in (1,0,1) do (echo x >> tick.txt)";
+        let meta =
+            spawn_worker(spec("cmd", &["/c", script], tmp.path()), "pipe", tx).unwrap();
+        let tick = tmp.path().join("tick.txt");
+        wait_grow(&tick, 5000);
+
+        freeze_group(meta.pgid).expect("真冻结应成功");
+        assert!(
+            size_stable(&tick, 250),
+            "FREEZE 后 250ms 内仍无新写入应成立（快照静止前提）"
+        );
+
+        unfreeze_group(meta.pgid).expect("恢复应成功");
+        wait_grow(&tick, 5000);
+
+        assert!(hard_kill_group(meta.pgid), "Terminate Job 应成功");
+        assert!(wait_pid_gone(meta.pid, 3000), "整组应清空");
+        assert!(!group_alive(meta.pgid));
+    }
+
+    /// C1-2 核心：Terminate Job 整组含孙进程 —— 堵住「孙进程泄漏」。
+    /// 孙进程 = start /b 派生的后台 cmd（跑 ping 保持存活），与主进程同 Job
+    #[cfg(windows)]
+    #[test]
+    fn win_job_terminate_kills_grandchildren() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, _rx) = mpsc::channel();
+        let script = "start /b cmd /c ping -n 60 127.0.0.1 & for /l %i in (1,0,1) do (echo x >> tick.txt)";
+        let meta =
+            spawn_worker(spec("cmd", &["/c", script], tmp.path()), "pipe", tx).unwrap();
+        let tick = tmp.path().join("tick.txt");
+        wait_grow(&tick, 5000);
+
+        // 等孙进程出现（start /b 是异步的）
+        let mut grand = None;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if let Some(p) = winproc::children_of(meta.pid).first().cloned() {
+                grand = Some(p);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let grand = grand.expect("start /b 应派生孙进程");
+
+        assert!(hard_kill_group(meta.pgid), "Terminate Job 应成功");
+        assert!(wait_pid_gone(meta.pid, 3000), "主进程应被终止");
+        assert!(
+            wait_pid_gone(grand, 3000),
+            "孙进程应随 Job 一并终止（此前泄漏到任务结束）"
+        );
+        assert!(!group_alive(meta.pgid));
+    }
+
+    /// C1-4 两级关闭收敛性：CTRL_BREAK 无效/无共享控制台时，
+    /// 第二级 Terminate Job 兜底，最终组清空（超时窗口内）
+    #[cfg(windows)]
+    #[test]
+    fn win_graceful_kill_terminates_stubborn_process() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, _rx) = mpsc::channel();
+        let script = "for /l %i in (1,0,1) do (echo x >> tick.txt)";
+        let meta =
+            spawn_worker(spec("cmd", &["/c", script], tmp.path()), "pipe", tx).unwrap();
+        wait_grow(&tmp.path().join("tick.txt"), 5000);
+
+        graceful_kill_group(meta.pgid);
+
+        let deadline = Instant::now() + Duration::from_secs(6);
+        while group_alive(meta.pgid) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!group_alive(meta.pgid), "两级关闭后组应清空");
+        assert!(wait_pid_gone(meta.pid, 3000));
+    }
+
+    /// is_our_process 注册表语义（Windows 单因子）：活=ours，kill 后即非
+    #[cfg(windows)]
+    #[test]
+    fn win_is_our_process_registry_semantics() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (tx, _rx) = mpsc::channel();
+        let script = "for /l %i in (1,0,1) do (echo x >> tick.txt)";
+        let meta =
+            spawn_worker(spec("cmd", &["/c", script], tmp.path()), "pipe", tx).unwrap();
+        wait_grow(&tmp.path().join("tick.txt"), 5000);
+        assert!(is_our_process(meta.pid, meta.start_time));
+        assert!(hard_kill_group(meta.pgid));
+        assert!(wait_pid_gone(meta.pid, 3000));
+        assert!(!is_our_process(meta.pid, meta.start_time), "死后不得再认领");
     }
 }

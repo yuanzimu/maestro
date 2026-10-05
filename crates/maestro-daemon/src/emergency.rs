@@ -64,6 +64,16 @@ pub fn emergency_stop(
             continue;
         };
 
+        // C1-5 快照前提守护：FREEZE 后确认 workdir 静止再 SNAPSHOT。
+        // Windows 真冻结后应瞬时稳定；不稳定 = 外部写入者（另一 worktree/
+        // 杀毒扫描）—— best-effort 继续（capture 的锁重试与如实报错兜底）。
+        if !crate::worker::settle_workdir(std::path::Path::new(&task.task.workdir)) {
+            eprintln!(
+                "maestro: 急停快照前 workdir 未见静止（best-effort 继续）: {}",
+                task.task.workdir
+            );
+        }
+
         let cp_ref = match crate::checkpoints::capture(
             std::path::Path::new(&task.task.workdir),
             &task.task.id,
