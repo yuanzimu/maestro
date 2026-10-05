@@ -13,6 +13,7 @@ import {
   type ReactNode,
 } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import type {
   DaemonStatus,
   Envelope,
@@ -200,6 +201,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         status: { ...initial.daemon, running: e.payload.alive },
       })
     );
+    // All three listeners are now registered -> release the Rust bridge to do
+    // its first subscribe. Without this, the daemon's instant replay burst on
+    // the take-alive path is emitted before any listener exists and is lost.
+    invoke("bridge_ready").catch(() => {});
     return () => {
       un1.then((f) => f());
       un2.then((f) => f());

@@ -629,6 +629,7 @@ B0 共享契约（先做，一次性）
 | 26 | **【v2.5】新增 Foreman 式 cost/time/turn 硬预算闸门** | 软预算只报告不阻止，失控时仍烧钱；硬闸门超限即挂起（复用 `SuspendReason::BudgetExceeded`，仅手动恢复），是「敢放手」的硬保障 |
 | 27 | **【v2.5】观测走 OpenTelemetry + Langfuse，不自建观测 UI；agent 生态走 ACP** | 标准协议不锁定厂商；ACP 一次接入整个 agent 生态，避免逐 CLI 写方言 |
 | 28 | **【v2.6】免费/低价模型走「同步工具实拉目录」而非仓库内置死清单** | 免费 roster 高频轮换（旧 `:free` id 数月即失效）；OpenRouter 公开目录无需 key、按 price 筛选比 `:free` 后缀更全；工具每次实拉 + 内置直连 provider 兜底，仓库只存生成快照 |
+| 29 | **【v2.6】事件桥首订阅加「前端就绪」门控（bridge_ready）** | 回归 A 项暴露竞态：daemon 存活的接管路径下，bridge 在 setup 阶段立即 `subscribe(from_seq=1)`，全量重放瞬时爆发，早于 React `listen()` 注册的事件全部丢失（事件流空白；spawn 路径因等 daemon 就绪侥幸避开）。前端监听器注册后 invoke `bridge_ready` 再放行首订阅，从协议层消除竞态 |
 
 ## 十二、下一步
 

@@ -19,6 +19,11 @@ pub fn spawn_bridge(app: tauri::AppHandle) {
         let state = app.state::<AppState>();
         let data_dir = state.data_dir.clone();
         let last_seq = state.last_seq.clone();
+        // 等前端监听器就绪再首订阅：daemon 存活时 subscribe(from_seq=1) 的
+        // 全量重放是瞬时爆发，早于 React listen() 注册的事件会全部丢失
+        while !state.bridge_start.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
         loop {
             let client = MaestroClient::new(&data_dir);
             if !client.is_daemon_alive() {

@@ -32,6 +32,10 @@ pub struct AppState {
     pub child: Arc<Mutex<Option<std::process::Child>>>,
     /// daemon 是否由本应用托管（false = 外部启动，接管）
     pub managed: Arc<AtomicBool>,
+    /// 前端监听器已就绪（bridge 收到此信号才开始订阅，避免重放爆发在
+    /// React listen() 注册前被 emit 而丢失 —— daemon 存活的接管路径下
+    /// 首订阅是瞬时的，必现竞态）
+    pub bridge_start: Arc<AtomicBool>,
     pub settings: Arc<Mutex<settings::Settings>>,
 }
 
@@ -45,6 +49,7 @@ impl AppState {
             last_seq: Arc::new(AtomicU64::new(0)),
             child: Arc::new(Mutex::new(None)),
             managed: Arc::new(AtomicBool::new(false)),
+            bridge_start: Arc::new(AtomicBool::new(false)),
             settings: Arc::new(Mutex::new(settings)),
         }
     }

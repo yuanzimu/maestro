@@ -31,6 +31,15 @@ fn call(state: &AppState, method: Method, params: Value) -> Result<Value, String
 
 // ---- 引擎 ----
 
+/// 前端监听器已注册（store 的 listen() 全部就位）→ 放行事件桥首订阅
+#[tauri::command]
+pub async fn bridge_ready(state: State<'_, AppState>) -> Result<(), String> {
+    state
+        .bridge_start
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn daemon_status(state: State<'_, AppState>) -> Result<Value, String> {
     let c = client(&state);
