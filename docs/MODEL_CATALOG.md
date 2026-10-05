@@ -277,17 +277,17 @@ curl https://openrouter.ai/api/v1/chat/completions \
 | `deepseek/deepseek-v4.1-flash` | $0.003 | $2.4 | 1048576 |
 | `~deepseek/deepseek-v4-flash-latest` | $0.015 | $1.28 | 1048576 |
 | `deepseek/deepseek-v4-flash-0731` | $0.015 | $1.28 | 1048576 |
+| `z-ai/glm-5.2` | $0.016 | $16 | 1048576 |
 | `ibm-granite/granite-4.0-h-micro` | $0.017 | $0.112 | 131000 |
 | `openai/gpt-oss-20b` | $0.018 | $0.09 | 131072 |
 | `mistralai/mistral-nemo` | $0.019 | $0.03 | 131072 |
 | `inclusionai/ling-3.0-flash-vl` | $0.021 | $0.062 | 262144 |
 | `inclusionai/ling-3.0-flash` | $0.021 | $0.063 | 262144 |
-| `deepseek/deepseek-v4-flash` | $0.023 | $1.28 | 1048576 |
-| `z-ai/glm-5.2` | $0.024 | $16 | 1048576 |
 | `openai/gpt-oss-20b:batch` | $0.024 | $0.112 | 131072 |
 | `nex-agi/nex-n2.5-mini` | $0.025 | $0.1 | 262144 |
 | `openai/gpt-5-nano:batch` | $0.025 | $0.2 | 400000 |
 | `meta-llama/llama-3.2-1b-instruct` | $0.027 | $0.201 | 60000 |
+| `deepseek/deepseek-v4-flash` | $0.029 | $1.28 | 1048576 |
 
 **填写示例：**
 

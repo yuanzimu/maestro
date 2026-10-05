@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-10-05T02:47:40.783Z",
+  "generated_at": "2026-10-05T04:14:10.127Z",
   "direct_providers": [
     {
       "id": "groq",
@@ -435,6 +435,16 @@
       "tools": true
     },
     {
+      "id": "z-ai/glm-5.2",
+      "context_length": 1048576,
+      "input_per_m": 0.016,
+      "output_per_m": 16,
+      "modalities": [
+        "text"
+      ],
+      "tools": true
+    },
+    {
       "id": "ibm-granite/granite-4.0-h-micro",
       "context_length": 131000,
       "input_per_m": 0.017,
@@ -487,26 +497,6 @@
       "tools": true
     },
     {
-      "id": "deepseek/deepseek-v4-flash",
-      "context_length": 1048576,
-      "input_per_m": 0.023,
-      "output_per_m": 1.28,
-      "modalities": [
-        "text"
-      ],
-      "tools": true
-    },
-    {
-      "id": "z-ai/glm-5.2",
-      "context_length": 1048576,
-      "input_per_m": 0.024,
-      "output_per_m": 16,
-      "modalities": [
-        "text"
-      ],
-      "tools": true
-    },
-    {
       "id": "openai/gpt-oss-20b:batch",
       "context_length": 131072,
       "input_per_m": 0.024,
@@ -548,6 +538,16 @@
         "text"
       ],
       "tools": false
+    },
+    {
+      "id": "deepseek/deepseek-v4-flash",
+      "context_length": 1048576,
+      "input_per_m": 0.029,
+      "output_per_m": 1.28,
+      "modalities": [
+        "text"
+      ],
+      "tools": true
     }
   ]
 }
