@@ -5,6 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   CheckpointItem,
   DaemonStatus,
+  DiffSummary,
   EmergencyStopResult,
   InboxItem,
   LedgerSummary,
@@ -63,6 +64,10 @@ export const listCheckpoints = (task: string) =>
 
 export const rollbackCheckpoint = (task: string, to: string) =>
   invoke<RollbackResult>("rollback_checkpoint", { task, to });
+
+// U5 结果卡：变更明细（baseline checkpoint → 工作区，按需加载）
+export const taskDiff = (id: string) =>
+  invoke<DiffSummary>("task_diff", { id });
 
 export const getSettings = () => invoke<Settings>("get_settings");
 export const saveSettings = (settings: Settings) =>

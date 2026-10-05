@@ -441,6 +441,94 @@ input.steer {
   padding: 3px 8px;
 }
 
+/* ---- U5 结果卡 ---- */
+.result-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg);
+  padding: 12px 14px;
+  margin-bottom: 14px;
+}
+.rc-head {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+}
+.rc-state {
+  flex: none;
+  font-size: 14px;
+}
+.rc-state.done {
+  color: var(--green);
+}
+.rc-state.failed {
+  color: var(--red);
+}
+.rc-state.cancelled {
+  color: var(--dim);
+}
+.rc-summary {
+  font-size: 13.5px;
+  word-break: break-all;
+}
+.rc-stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+}
+.rc-stats > div {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.rc-stats b {
+  font-size: 13.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rc-stats span {
+  color: var(--dim);
+  font-size: 11.5px;
+}
+.rc-stats .good b {
+  color: var(--green);
+}
+.rc-diff-btn {
+  align-self: flex-start;
+}
+.rc-diff-meta {
+  font-size: 12px;
+  color: var(--dim);
+}
+.rc-diff-meta .ins {
+  color: var(--green);
+}
+.rc-diff-meta .del {
+  color: var(--red);
+}
+.rc-patch {
+  font-family: Consolas, monospace;
+  font-size: 11.5px;
+  line-height: 1.5;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 10px;
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre;
+  margin: 0;
+}
+
 /* ---- 设置 ---- */
 .mode-grid {
   display: flex;

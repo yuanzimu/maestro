@@ -36,6 +36,8 @@ export interface TaskDetail extends TaskSummary {
   worker: string | null;
   session_ref: string | null;
   checkpoint_ref: string | null;
+  /// U5 结果卡：task_diff 定位 git 仓库（增量字段，daemon core.rs task_get）
+  workdir: string | null;
 }
 
 /// Envelope（events.rs）—— event 用宽松 dict（tagged union 数十变体，
@@ -110,6 +112,19 @@ export interface EmergencyStopResult {
 export interface RollbackResult {
   rolled_back_to: string;
   pre_rollback: string;
+}
+
+/// task_diff command 返回（src-tauri commands.rs）：
+/// baseline checkpoint → 当前工作区的变更（stat + patch）
+export interface DiffSummary {
+  available: boolean;
+  reason?: string;
+  baseline?: string;
+  files?: number;
+  insertions?: number;
+  deletions?: number;
+  patch?: string;
+  truncated?: boolean;
 }
 
 /// 引擎状态（daemon_status command 返回）

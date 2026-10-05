@@ -5,6 +5,7 @@ import { useStore } from "../state/store";
 import * as api from "../api";
 import { evText } from "../state/events";
 import type { CheckpointItem, LedgerSummary, TaskDetail as TaskDetailT } from "../types";
+import ResultCard from "./ResultCard";
 
 export default function TaskDetailPanel({ id }: { id: string }) {
   const { state, dispatch } = useStore();
@@ -93,6 +94,9 @@ export default function TaskDetailPanel({ id }: { id: string }) {
             )}
           </div>
         )}
+
+        {/* U5 结果卡：终态任务置顶 5 秒扫视（非终态组件自渲染 null） */}
+        {task && <ResultCard task={task} ledger={ledger} events={taskEvents} />}
 
         {ledger && (
           <section>

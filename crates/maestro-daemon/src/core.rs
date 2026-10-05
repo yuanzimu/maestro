@@ -384,6 +384,9 @@ impl Core {
                                 "id": t.task.id, "title": t.task.title, "state": t.state,
                                 "round": t.round, "worker": t.worker,
                                 "session_ref": t.session_ref, "checkpoint_ref": t.checkpoint_ref,
+                                // U5 结果卡：变更明细（task_diff）需要 workdir 定位 git 仓库。
+                                // 增量字段 —— 旧客户端宽松解析，安全忽略
+                                "workdir": t.task.workdir,
                                 "suspend_reason": t.suspend.as_ref().map(|s| s.reason),
                                 "blocked_kind": t.blocked_kind,
                                 "acceptance_failures": t.acceptance_failures,

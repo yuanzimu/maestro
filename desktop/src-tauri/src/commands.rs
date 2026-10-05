@@ -10,6 +10,7 @@ use crate::tools;
 use maestro_client::MaestroClient;
 use maestro_protocol::api::Method;
 use serde_json::{json, Value};
+use std::process::Command;
 use tauri::{AppHandle, Manager, State};
 
 fn client(state: &AppState) -> MaestroClient {
@@ -204,4 +205,144 @@ pub async fn probe_worker(state: State<'_, AppState>) -> Result<Value, String> {
         "mock_path": p("mock-cli"),
         "data_dir": state.data_dir.to_string_lossy(),
     }))
+}
+
+// ---- U5 结果卡：变更明细（task_diff）----
+
+/// diff 钳制上限：结果卡 inline 展示，超长截断（完整内容看工作区 git）
+const MAX_PATCH_BYTES: usize = 96 * 1024;
+
+/// task_diff：baseline checkpoint → 当前工作区的变更（stat + patch）。
+/// 结果卡「变更明细」入口。只读操作，桌面进程直接跑 git ——
+/// 仓库布局与 daemon checkpoints.rs 一致（refs/maestro/cp/<task>/<seq>-<label>），
+/// baseline 为任务入队时的 seq=1 锚点（缺失则取最早一条 checkpoint）。
+#[tauri::command]
+pub async fn task_diff(state: State<'_, AppState>, id: String) -> Result<Value, String> {
+    let unavailable = |reason: String| Ok(json!({ "available": false, "reason": reason }));
+
+    // workdir 从 daemon 拿（task_get 响应的权威字段），防前端传陈旧路径
+    let task = call(&state, Method::TaskGet, json!({ "task": id }))?;
+    let workdir = task["workdir"].as_str().unwrap_or_default().to_string();
+    if workdir.is_empty() {
+        return unavailable("任务无 workdir（无变更明细）".into());
+    }
+
+    // baseline：version 排序下最早一条（正常即 1-baseline；
+    // for-each-ref 前缀匹配到 / 为止，t-1 不会误吞 t-10 的引用）
+    let refs = match git_out(
+        &workdir,
+        &[
+            "for-each-ref",
+            &format!("refs/maestro/cp/{id}"),
+            "--sort=version:refname",
+            "--format=%(refname)",
+        ],
+    ) {
+        Ok(r) => r,
+        Err(e) => return unavailable(format!("git 不可用：{e}")),
+    };
+    let Some(baseline) = refs.lines().map(str::trim).find(|l| !l.is_empty()) else {
+        return unavailable("无 checkpoint（任务未产生快照）".into());
+    };
+
+    // stat：--numstat 每行 `ins\tdel\tpath`，二进制为 `-`；quotepath=false 防
+    // CJK 文件名被转义成八进制
+    let numstat = git_out(
+        &workdir,
+        &["-c", "core.quotepath=false", "diff", "--numstat", baseline],
+    )?;
+    let (files, ins, del) = parse_numstat(&numstat);
+
+    // patch：baseline commit → 工作区（含未提交改动）；按字节钳制 + UTF-8 边界截断
+    let patch_bytes = git_bytes(&workdir, &["diff", "--no-color", baseline])?;
+    let truncated = patch_bytes.len() > MAX_PATCH_BYTES;
+    let patch = clamp_utf8(&patch_bytes, MAX_PATCH_BYTES);
+
+    Ok(json!({
+        "available": true,
+        "baseline": baseline,
+        "files": files,
+        "insertions": ins,
+        "deletions": del,
+        "patch": patch,
+        "truncated": truncated,
+    }))
+}
+
+fn git_out(workdir: &str, args: &[&str]) -> Result<String, String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(workdir)
+        .args(args)
+        .output()
+        .map_err(|e| format!("spawn git: {e}"))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+fn git_bytes(workdir: &str, args: &[&str]) -> Result<Vec<u8>, String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(workdir)
+        .args(args)
+        .output()
+        .map_err(|e| format!("spawn git: {e}"))?;
+    if out.status.success() {
+        Ok(out.stdout)
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+/// numstat 解析：`ins\tdel\tpath` 每行一条；二进制文件增删为 `-`（只计文件数）
+fn parse_numstat(s: &str) -> (u64, u64, u64) {
+    let (mut files, mut ins, mut del) = (0, 0, 0);
+    for line in s.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        files += 1;
+        let mut parts = line.splitn(3, '\t');
+        ins += parts.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+        del += parts.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+    }
+    (files, ins, del)
+}
+
+/// 字节钳制 + UTF-8 字符边界截断（回退越过续字节 0b10xxxxxx，防多字节字符切断）
+fn clamp_utf8(bytes: &[u8], max: usize) -> String {
+    if bytes.len() <= max {
+        return String::from_utf8_lossy(bytes).into_owned();
+    }
+    let mut end = max;
+    while end > 0 && (bytes[end] & 0b1100_0000) == 0b1000_0000 {
+        end -= 1;
+    }
+    let mut s = String::from_utf8_lossy(&bytes[..end]).into_owned();
+    s.push_str("\n…（diff 过长已截断，完整变更请查看工作区 git）");
+    s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn numstat_parses_and_skips_binary() {
+        let (f, i, d) = parse_numstat("12\t3\tsrc/a.rs\n-\t-\tlogo.png\n\n5\t0\tsrc/b.rs");
+        assert_eq!((f, i, d), (3, 17, 3));
+    }
+
+    #[test]
+    fn clamp_cuts_on_char_boundary() {
+        // "中" 3 字节 / "文" 3 字节：max=5 应回退到 3 —— 保留完整一个字符
+        let s = clamp_utf8("中文".as_bytes(), 5);
+        assert_eq!(s.matches('中').count(), 1);
+        assert!(s.contains("截断"));
+        // 未超限原样返回
+        assert_eq!(clamp_utf8(b"abc", 10), "abc");
+    }
 }

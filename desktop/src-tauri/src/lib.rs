@@ -58,6 +58,7 @@ pub fn run() {
             commands::resume_all,
             commands::list_checkpoints,
             commands::rollback_checkpoint,
+            commands::task_diff,
             commands::get_settings,
             commands::save_settings,
             commands::probe_worker,
