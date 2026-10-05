@@ -193,12 +193,20 @@ pub struct TaskCreateResult {
     pub worker: Option<WorkerId>,
 }
 
-/// `events.subscribe` 参数
+/// `events.subscribe` 参数（事件 socket 握手行）
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct EventsSubscribeParams {
     /// 断点续订游标（0 = 从现在开始）
     #[serde(default)]
     pub from_seq: u64,
+    /// 是否跟随实时事件：true（默认）= 持续推送；false = 重放历史后即关。
+    /// daemon 对缺省按 true 处理（兼容老客户端）。
+    #[serde(default = "default_live")]
+    pub live: bool,
+}
+
+fn default_live() -> bool {
+    true
 }
 
 /// `server.status` 结果

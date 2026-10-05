@@ -82,32 +82,42 @@ pub fn capture(
 ) -> Result<CheckpointRef, String> {
     // 1. 暂存全部（含 untracked；.gitignore 的构建产物天然排除）
     git(worktree, &["add", "-A"])?;
-    // 2. 树对象
-    let tree = git(worktree, &["write-tree"])?;
-    // 3. 父 commit：任务最近的 checkpoint（无则用 HEAD，允许空仓用 --allow-empty 语义）
-    let seq = next_seq(worktree, task)?;
-    let parent = latest_commit(worktree, task).or_else(|| head_commit(worktree));
-    // 4. commit-tree（不动 HEAD）
-    let msg = serde_json::json!({
-        "task": task.as_str(),
-        "round": round,
-        "reason": serde_json::to_value(reason).unwrap_or_default(),
-        "parent_cp": serde_json::Value::Null,
-        "ts": clock.now_ms(),
-    })
-    .to_string();
-    let mut args = vec!["commit-tree", tree.as_str(), "-m", msg.as_str()];
-    if let Some(p) = &parent {
-        args.push("-p");
-        args.push(p.as_str());
+    // add 之后的主体包进闭包：任一步失败都在传播错误前尽力 reset，
+    // 否则改动会以 staged 状态留在 index，违背「工作区零扰动」契约
+    // （外部 git 并发持锁/磁盘满时 write-tree、update-ref 等可能失败）。
+    let result = (|| -> Result<CheckpointRef, String> {
+        // 2. 树对象
+        let tree = git(worktree, &["write-tree"])?;
+        // 3. 父 commit：最近 checkpoint（无则用 HEAD，允许空仓 --allow-empty）
+        let seq = next_seq(worktree, task)?;
+        let parent = latest_commit(worktree, task).or_else(|| head_commit(worktree));
+        // 4. commit-tree（不动 HEAD）
+        let msg = serde_json::json!({
+            "task": task.as_str(),
+            "round": round,
+            "reason": serde_json::to_value(reason).unwrap_or_default(),
+            "parent_cp": serde_json::Value::Null,
+            "ts": clock.now_ms(),
+        })
+        .to_string();
+        let mut args = vec!["commit-tree", tree.as_str(), "-m", msg.as_str()];
+        if let Some(p) = &parent {
+            args.push("-p");
+            args.push(p.as_str());
+        }
+        let commit = git(worktree, &args)?;
+        // 5. update-ref
+        let r = cp_ref(task, seq, reason);
+        git(worktree, &["update-ref", r.as_str(), commit.as_str()])?;
+        Ok(r)
+    })();
+    // 无论成败都还原 index（reset 本身失败不覆盖原始错误）
+    let reset_err = git(worktree, &["reset"]).err();
+    match result {
+        Ok(r) if reset_err.is_none() => Ok(r),
+        Ok(_r) => Err(reset_err.unwrap_or_default()),
+        Err(e) => Err(e),
     }
-    let commit = git(worktree, &args)?;
-    // 5. update-ref
-    let r = cp_ref(task, seq, reason);
-    git(worktree, &["update-ref", r.as_str(), commit.as_str()])?;
-    // 6. 还原 index，工作区零扰动
-    git(worktree, &["reset"])?;
-    Ok(r)
 }
 
 /// restore 原语（设计 §4.4）：
@@ -187,7 +197,10 @@ pub fn gc(worktree: &Path, task: &TaskId, keep_recent: usize) -> Result<usize, S
 // ---------------------------------------------------------------------------
 
 fn next_seq(worktree: &Path, task: &TaskId) -> Result<u32, String> {
-    Ok(list(worktree, task).len() as u32 + 1)
+    // 基于**现存最大序号** +1，而非数量 +1：gc 会物理删除早期 ref 而不
+    // 压缩序号，len+1 会在 gc 之后产生与现存 ref 碰撞的序号，
+    // update-ref 静默覆盖旧 checkpoint（历史丢失、谱系错乱）。
+    Ok(list(worktree, task).iter().map(|i| i.seq).max().unwrap_or(0) + 1)
 }
 
 fn latest_commit(worktree: &Path, task: &TaskId) -> Option<String> {

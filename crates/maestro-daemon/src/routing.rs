@@ -109,7 +109,7 @@ impl ModelRouter for RuleRouter {
                 reason: "user_forced".into(),
             };
         }
-        let base = Self::base_tier(ctx);
+        let mut base = Self::base_tier(ctx);
         if ctx.consecutive_failures >= self.escalate_after && base != Tier::L3 {
             let up = Self::escalate(base);
             return RouteDecision {
@@ -117,15 +117,25 @@ impl ModelRouter for RuleRouter {
                 reason: format!("escalated_after_{}_failures", ctx.consecutive_failures),
             };
         }
-        let reason = match ctx.kind {
-            Some(TaskKind::Lightweight) => "lightweight_round".to_string(),
-            Some(TaskKind::Deep) => "deep_task".to_string(),
-            Some(TaskKind::Coding) | None => {
-                if ctx.input_chars > self.long_input_chars {
-                    "long_input".to_string()
-                } else {
-                    "default_coding".to_string()
-                }
+        // 超长输入规则（规则 5）：轻量轮同样可能携带 >200k 字符，L1 装不下
+        // 会溢出/截断、白烧一轮再靠失败升级。旧实现只在 Coding/None 判断，
+        // Lightweight 被跳过。
+        // 注意区分两件事：
+        // - 升档：仅当基线是 L1 时抬到 L2（Coding 基线已是 L2，无需再升）
+        // - reason：只要输入超长且基线 <L3，就标 long_input（含 Coding L2，
+        //   保留原有「Coding 500k -> long_input」语义；Deep L3 维持 deep_task）
+        let too_long = ctx.input_chars > self.long_input_chars;
+        let long_input = too_long && base != Tier::L3;
+        if too_long && base == Tier::L1 {
+            base = Tier::L2;
+        }
+        let reason = if long_input {
+            "long_input".to_string()
+        } else {
+            match ctx.kind {
+                Some(TaskKind::Lightweight) => "lightweight_round".to_string(),
+                Some(TaskKind::Deep) => "deep_task".to_string(),
+                Some(TaskKind::Coding) | None => "default_coding".to_string(),
             }
         };
         RouteDecision { tier: base, reason }
@@ -182,6 +192,18 @@ mod tests {
         // L3 不再升
         let d = r.route(&ctx(Some(TaskKind::Deep), 5, 100));
         assert_eq!(d.tier, Tier::L3);
+    }
+
+    #[test]
+    fn lightweight_long_input_escalates_to_l2() {
+        // 规则 5 对轻量轮同样生效：>200k 字符时 L1 装不下 → L2
+        let r = RuleRouter::default();
+        let d = r.route(&ctx(Some(TaskKind::Lightweight), 0, 250_000));
+        assert_eq!(d.tier, Tier::L2);
+        assert_eq!(d.reason, "long_input");
+        // 临界内仍走 L1
+        let d = r.route(&ctx(Some(TaskKind::Lightweight), 0, 200_000));
+        assert_eq!(d.tier, Tier::L1);
     }
 
     #[test]

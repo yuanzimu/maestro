@@ -118,6 +118,9 @@ fn walk(root: &Path, rel: PathBuf, out: &mut Snapshot, budget: &mut usize, exclu
             *budget -= 1;
             walk(root, child_rel, out, budget, excluded);
         } else if ft.is_file() {
+            // 文件同样计入 budget：否则单层平铺海量文件时上限失效，
+            // 每个文件还会触发整文件指纹读取，拖垮 Core 线程/撑爆内存
+            *budget -= 1;
             out.insert((child_rel, file_fingerprint(&e.path())));
         }
         // symlink：不跟进（防循环 + 产物应以真实文件为准）

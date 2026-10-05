@@ -53,24 +53,32 @@ impl TaskBudget {
     /// - `MAESTRO_BUDGET_CENTS`
     /// - `MAESTRO_BUDGET_WALL_MS`
     pub fn from_env() -> Self {
-        let parse = |v: Result<String, std::env::VarError>| match v {
-            Ok(s) => s.trim().parse::<u64>().ok().filter(|n| *n > 0),
-            Err(_) => None,
+        // 区分四种结果，避免非法值被静默解释成「不限」（拆除安全网）：
+        // 缺省 → 默认；"0" → None(不限)；合法 >0 → Some；
+        // 非数字/负数 → 告警后回退默认（而非 None）。
+        let resolve = |v: Result<String, std::env::VarError>, name, default| match v {
+            Err(_) => default,
+            Ok(s) => match s.trim().parse::<u64>() {
+                Ok(0) => None,
+                Ok(n) => Some(n),
+                Err(_) => {
+                    tracing::warn!("非法 {name}={}（应为非负整数），回退默认安全网", s.trim());
+                    default
+                }
+            },
         };
         let d = Self::default();
-        let cost_env = parse(std::env::var("MAESTRO_BUDGET_CENTS"));
-        let wall_env = parse(std::env::var("MAESTRO_BUDGET_WALL_MS"));
         Self {
-            max_cost_cents: if std::env::var("MAESTRO_BUDGET_CENTS").is_ok() {
-                cost_env
-            } else {
-                d.max_cost_cents
-            },
-            max_wall_ms: if std::env::var("MAESTRO_BUDGET_WALL_MS").is_ok() {
-                wall_env
-            } else {
-                d.max_wall_ms
-            },
+            max_cost_cents: resolve(
+                std::env::var("MAESTRO_BUDGET_CENTS"),
+                "MAESTRO_BUDGET_CENTS",
+                d.max_cost_cents,
+            ),
+            max_wall_ms: resolve(
+                std::env::var("MAESTRO_BUDGET_WALL_MS"),
+                "MAESTRO_BUDGET_WALL_MS",
+                d.max_wall_ms,
+            ),
         }
     }
 

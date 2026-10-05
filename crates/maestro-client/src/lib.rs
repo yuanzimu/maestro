@@ -73,9 +73,15 @@ impl MaestroClient {
             .map_err(|e| ClientError::Protocol(e.to_string()))?;
         let mut reader = BufReader::new(stream);
         let mut resp_line = String::new();
-        reader
+        let n = reader
             .read_line(&mut resp_line)
             .map_err(|e| ClientError::Protocol(e.to_string()))?;
+        // 对端在写响应前关闭/崩溃：read_line 返回 0（EOF）。这是连接中断，
+        // 不是「协议解析错误」——旧实现对空串做 from_str 报成误导性的
+        // "EOF while parsing"，影响上层诊断/重试归类。
+        if n == 0 {
+            return Err(ClientError::Connect("对端在响应前关闭连接".into()));
+        }
         let resp: Response =
             serde_json::from_str(&resp_line).map_err(|e| ClientError::Protocol(e.to_string()))?;
         match resp {
@@ -112,13 +118,20 @@ impl MaestroClient {
             if line.trim().is_empty() {
                 continue;
             }
+            // 1) 先按无类型 Value 校验 JSON 结构完整性：结构损坏（传输
+            //    破坏）属真实故障，返回错误而非静默丢弃。
+            if let Err(e) = serde_json::from_str::<serde_json::Value>(&line) {
+                return Err(ClientError::Protocol(format!("事件 JSON 损坏: {e}")));
+            }
+            // 2) 再做强类型解析：失败通常是 daemon 版本更新、发来旧客户端
+            //    不认识的事件类型（前向兼容）——告警计数后跳过，不静默。
             match serde_json::from_str(&line) {
                 Ok(env) => {
                     if !on_event(env) {
                         break;
                     }
                 }
-                Err(_) => continue,
+                Err(e) => eprintln!("maestro: 跳过无法解析的事件（daemon 更新？）: {e}"),
             }
         }
         Ok(())

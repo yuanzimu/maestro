@@ -1,6 +1,6 @@
 //! maestro CLI：status/task/worker/inbox/stop/resume/doctor（0.13 + R19 体验）
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use maestro_client::MaestroClient;
 use maestro_protocol::api::Method;
 use serde_json::Value;
@@ -14,6 +14,15 @@ struct Cli {
 
     #[command(subcommand)]
     command: Cmd,
+}
+
+/// 急停恢复时积压轻推的处理方式（强类型校验，拒绝未知值）
+#[derive(Clone, ValueEnum)]
+enum SteeringMode {
+    /// 按序投递积压轻推
+    Flush,
+    /// 丢弃积压轻推（每条发 SteeringDropped，不静默）
+    Hold,
 }
 
 #[derive(Subcommand)]
@@ -34,8 +43,8 @@ enum Cmd {
     /// 急停恢复
     Resume {
         /// steering 处理：flush 投递积压轻推 | hold 丢弃（发事件不静默）
-        #[arg(long, default_value = "flush")]
-        steering: String,
+        #[arg(long, value_enum, default_value_t = SteeringMode::Flush)]
+        steering: SteeringMode,
     },
     /// 事件流（默认从 seq 1 重放全部历史；--follow 持续跟随；--human 可读渲染）
     Events {
@@ -274,7 +283,11 @@ fn run(client: &MaestroClient, data_dir: Option<&str>, cmd: Cmd) -> Result<(), S
             println!("已冻结。现场保留。resume 可恢复。");
         }
         Cmd::Resume { steering } => {
-            let mode = if steering == "hold" { "hold" } else { "flush" };
+            // ValueEnum 已在解析期拒绝非法值（不再静默回落 flush）
+            let mode = match steering {
+                SteeringMode::Hold => "hold",
+                SteeringMode::Flush => "flush",
+            };
             let v = client
                 .call(
                     "resume",

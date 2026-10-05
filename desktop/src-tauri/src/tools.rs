@@ -46,7 +46,12 @@ pub fn log_tail(max_bytes: usize) -> String {
     let log = crate::state::app_root().join("logs").join("daemon.log");
     match std::fs::read(&log) {
         Ok(bytes) => {
-            let start = bytes.len().saturating_sub(max_bytes);
+            let mut start = bytes.len().saturating_sub(max_bytes);
+            // 起点可能落在多字节 UTF-8 字符中间：直接切片会 panic。
+            // 向前推进到一个字符边界（首字节满足 0b10xx_xxxx 的是续字节）。
+            while start < bytes.len() && (bytes[start] & 0xC0) == 0x80 {
+                start += 1;
+            }
             String::from_utf8_lossy(&bytes[start..]).into_owned()
         }
         Err(_) => String::new(),

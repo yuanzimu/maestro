@@ -190,14 +190,36 @@ mod imp {
         on_exit: Sender<WorkerExit>,
         child: Child,
     ) -> std::io::Result<()> {
-        std::thread::Builder::new()
+        // 先起线程，再经 channel 交接 Child：这样线程创建失败时 Child
+        // 仍在调用方手里，可干净 kill+wait（std 的 Child drop 既不 kill
+        // 也不 wait，直接 move 进失败闭包会泄漏进程并留僵尸）。
+        let (tx, rx) = std::sync::mpsc::channel::<Child>();
+        let h = std::thread::Builder::new()
             .name(format!("waiter-{}", meta.id))
             .spawn(move || {
+                // Unix：kill 走进程组（pgid），不依赖 Child 句柄，
+                // waiter 本地持有并阻塞 wait 即可
+                if let Ok(mut child) = rx.recv() {
+                    let exit_code = child.wait().ok().and_then(|s| s.code());
+                    finish_exit(meta, on_exit, exit_code);
+                }
+            });
+        match h {
+            Ok(_) => {
+                if let Err(mut child) = tx.send(child) {
+                    // 线程在 recv 前死亡（极端）：兜底回收
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                Ok(())
+            }
+            Err(e) => {
                 let mut child = child;
-                let exit_code = child.wait().ok().and_then(|s| s.code());
-                finish_exit(meta, on_exit, exit_code);
-            })?;
-        Ok(())
+                let _ = child.kill();
+                let _ = child.wait();
+                Err(e)
+            }
+        }
     }
 
     pub fn graceful_kill_group(pgid: u32) {
@@ -341,19 +363,49 @@ mod imp {
         child: Child,
     ) -> std::io::Result<()> {
         let pid = child.id();
+        // child 必须**保留**在注册表：Windows 无进程组信号，kill/alive 全靠
+        // Child 句柄。若 waiter 一启动就 remove 走，之后 kill_pid 永远找不
+        // 到，取消/急停实际从不生效。
         registry().lock().unwrap().insert(pid, child);
-        std::thread::Builder::new()
+        let thread = std::thread::Builder::new()
             .name(format!("waiter-{}", meta.id))
             .spawn(move || {
-                // 从注册表取回：kill 可能已先一步操作过（已退出 → None → exit_code None）
-                let exit_code = registry()
-                    .lock()
-                    .unwrap()
-                    .remove(&pid)
-                    .and_then(|mut c| c.wait().ok().and_then(|s| s.code()));
-                finish_exit(meta, on_exit, exit_code);
-            })?;
-        Ok(())
+                // 周期性 try_wait 轮询（每轮短暂持锁，不阻塞 kill/alive）：
+                // 自然退出或被 kill_pid 终止都会在此被发现
+                loop {
+                    let exited = {
+                        let mut reg = registry().lock().unwrap();
+                        match reg.get_mut(&pid) {
+                            Some(c) => c.try_wait().ok().flatten(),
+                            None => None,
+                        }
+                    };
+                    match exited {
+                        Some(status) => {
+                            // 进程已退出：锁内 remove 取出（锁立即释放，
+                            // 不持有锁做任何阻塞操作）
+                            let removed = registry().lock().unwrap().remove(&pid);
+                            let exit_code = removed
+                                .map(|_| status.code())
+                                .flatten();
+                            finish_exit(meta, on_exit, exit_code);
+                            break;
+                        }
+                        None => std::thread::sleep(std::time::Duration::from_millis(100)),
+                    }
+                }
+            });
+        match thread {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                // 线程创建失败：回滚注册表并显式 kill+wait，不泄漏句柄/进程
+                if let Some(mut c) = registry().lock().unwrap().remove(&pid) {
+                    let _ = c.kill();
+                    let _ = c.wait();
+                }
+                Err(e)
+            }
+        }
     }
 
     pub fn graceful_kill_group(pgid: u32) {

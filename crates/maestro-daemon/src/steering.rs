@@ -81,24 +81,22 @@ impl SteeringQueue {
         }
     }
 
-    fn persist_append(&self, msg: &SteeringMsg) {
+    fn persist_append(&self, msg: &SteeringMsg) -> std::io::Result<()> {
         if self.file.as_os_str() == "/dev/null" {
-            return;
+            return Ok(());
         }
         use std::io::Write;
-        if let Ok(mut f) = std::fs::OpenOptions::new()
+        let mut f = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&self.file)
-        {
-            let _ = writeln!(f, "{}", serde_json::to_string(msg).unwrap_or_default());
-            let _ = f.sync_data();
-        }
+            .open(&self.file)?;
+        writeln!(f, "{}", serde_json::to_string(msg).unwrap_or_default())?;
+        f.sync_data()
     }
 
-    fn persist_rewrite(&self) {
+    fn persist_rewrite(&self) -> std::io::Result<()> {
         if self.file.as_os_str() == "/dev/null" {
-            return;
+            return Ok(());
         }
         let mut lines = vec![];
         for q in self.queues.values() {
@@ -112,13 +110,14 @@ impl SteeringQueue {
             }
         }
         let tmp = self.file.with_extension("jsonl.tmp");
-        if std::fs::write(&tmp, lines.join("\n") + "\n").is_ok() {
-            let _ = std::fs::rename(&tmp, &self.file);
-        }
+        std::fs::write(&tmp, lines.join("\n") + "\n")?;
+        std::fs::rename(&tmp, &self.file)
     }
 
-    /// 入队（持久化后返回消息）
-    pub fn push(&mut self, task: &TaskId, message: String) -> SteeringMsg {
+    /// 入队并持久化。持久化失败时返回 Err（不破坏 kill -9 不丢的承诺：
+    /// 磁盘满/不可写时必须让上层知道，而非静默吞掉让用户误以为已落盘）。
+    /// 消息已先入内存队列；持久化失败时保留在内存（本进程内仍可投递）。
+    pub fn push(&mut self, task: &TaskId, message: String) -> Result<SteeringMsg, String> {
         let msg = SteeringMsg {
             seq: self.next_seq,
             task: task.clone(),
@@ -131,8 +130,8 @@ impl SteeringQueue {
             .entry(task.clone())
             .or_default()
             .push_back(msg.clone());
-        self.persist_append(&msg);
-        msg
+        self.persist_append(&msg).map_err(|e| format!("轻推持久化失败: {e}"))?;
+        Ok(msg)
     }
 
     /// poll：取走积压（进入 inflight）+ 重投未确认的（at-least-once）
@@ -149,7 +148,8 @@ impl SteeringQueue {
         }
         let out = inflight.clone();
         if !out.is_empty() {
-            self.persist_rewrite();
+            // 尽力而为：内存队列是本进程权威，重写失败不影响本轮投递
+            let _ = self.persist_rewrite();
         }
         out
     }
@@ -166,7 +166,7 @@ impl SteeringQueue {
             self.inflight.remove(task);
         }
         if n > 0 {
-            self.persist_rewrite();
+            let _ = self.persist_rewrite();
         }
         n
     }
@@ -181,7 +181,7 @@ impl SteeringQueue {
             .unwrap_or_default();
         out.extend(self.inflight.remove(task).unwrap_or_default());
         if !out.is_empty() {
-            self.persist_rewrite();
+            let _ = self.persist_rewrite();
         }
         out
     }
@@ -212,9 +212,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         {
             let mut q = SteeringQueue::open(tmp.path());
-            q.push(&TaskId::new("t1"), "别动那个文件".into());
-            q.push(&TaskId::new("t1"), "先跑测试".into());
-            q.push(&TaskId::new("t2"), "other".into());
+            q.push(&TaskId::new("t1"), "别动那个文件".into()).unwrap();
+            q.push(&TaskId::new("t1"), "先跑测试".into()).unwrap();
+            q.push(&TaskId::new("t2"), "other".into()).unwrap();
         }
         let mut q2 = SteeringQueue::open(tmp.path());
         assert_eq!(q2.pending(&TaskId::new("t1")), 2);
@@ -237,7 +237,7 @@ mod tests {
     fn inflight_redelivered_until_acked() {
         let tmp = tempfile::tempdir().unwrap();
         let mut q = SteeringQueue::open(tmp.path());
-        let m = q.push(&TaskId::new("t"), "重要指示".into());
+        let m = q.push(&TaskId::new("t"), "重要指示".into()).unwrap();
         // 第一次 poll：取走
         let got = q.poll(&TaskId::new("t"));
         assert_eq!(got.len(), 1);
@@ -265,10 +265,10 @@ mod tests {
     fn ack_partial_keeps_new_queue() {
         let mut q = SteeringQueue::in_memory();
         let t = TaskId::new("t");
-        let a = q.push(&t, "a".into()).seq;
+        let a = q.push(&t, "a".into()).unwrap().seq;
         let polled = q.poll(&t);
         assert_eq!(polled.len(), 1);
-        let _ = q.push(&t, "b".into()); // poll 后新入队
+        let _ = q.push(&t, "b".into()).unwrap(); // poll 后新入队
         assert_eq!(q.ack(&t, &[a]), 1);
         let next = q.poll(&t);
         assert_eq!(next.len(), 1, "新积压应可投");
@@ -281,10 +281,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let s1 = {
             let mut q = SteeringQueue::open(tmp.path());
-            q.push(&TaskId::new("t"), "a".into()).seq
+            q.push(&TaskId::new("t"), "a".into()).unwrap().seq
         };
         let mut q2 = SteeringQueue::open(tmp.path());
-        let s2 = q2.push(&TaskId::new("t"), "b".into()).seq;
+        let s2 = q2.push(&TaskId::new("t"), "b".into()).unwrap().seq;
         assert!(s2 > s1, "seq 跨重启递增: {s1} -> {s2}");
     }
 }

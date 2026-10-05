@@ -188,7 +188,8 @@ pub fn cost_micro_cents(model: &str, input_tokens: u64, output_tokens: u64) -> O
     let p = price_of(model)?;
     let in_mc = p.input_per_m.checked_mul(input_tokens)?;
     let out_mc = p.output_per_m.checked_mul(output_tokens)?;
-    Some(in_mc + out_mc)
+    // 同样用 checked_add：溢出按「无法计价」返回 None，而非 panic/wrap 假低价
+    Some(in_mc.checked_add(out_mc)?)
 }
 
 /// 成本（整美分，向上取整 —— 账本条目精度）
@@ -205,8 +206,17 @@ pub fn usage_entry(
     path: &str,
     discount: f64,
 ) -> UsageEntry {
+    // 折扣合法性：有限且落在 [0,1]。非法值（负/NaN/inf/>1）若直接做
+    // f64->u64 转换会得到 0（费用清零）或 u64::MAX（假巨额），写进账本；
+    // 统一钳回 1.0（按牌价，不打折）并记录实际采用值。
+    let eff = if discount.is_finite() && (0.0..=1.0).contains(&discount) {
+        discount
+    } else {
+        tracing::warn!("非法 discount {discount}，按 1.0 计");
+        1.0
+    };
     let list_mc = cost_micro_cents(model, input_tokens, output_tokens);
-    let actual_mc = list_mc.map(|mc| (mc as f64 * discount) as u64);
+    let actual_mc = list_mc.map(|mc| (mc as f64 * eff) as u64);
     let to_cents = |mc: Option<u64>| mc.map(|x| x.div_ceil(1_000_000));
     UsageEntry {
         input_tokens,
@@ -214,7 +224,7 @@ pub fn usage_entry(
         cache_read_tokens: None,
         cache_creation_tokens: None,
         path: Some(path.to_string()),
-        discount: Some(discount),
+        discount: Some(eff),
         counterfactual_cost_cents: to_cents(list_mc),
         actual_cost_cents: to_cents(actual_mc),
     }
@@ -238,20 +248,27 @@ pub fn priced_usage_entry(
     path: &str,
 ) -> Option<UsageEntry> {
     let p = price_of(model)?;
-    let cache_r = cache_read.unwrap_or(0).min(input_tokens);
-    let cache_w = cache_write
-        .unwrap_or(0)
-        .min(input_tokens.saturating_sub(cache_r));
-    let cold_in = input_tokens - cache_r - cache_w;
+    // 三桶按 API 语义**互斥**（见函数文档）：input_tokens 本身就是排除
+    // cache 命中/写入后的**冷输入**（Anthropic/OpenAI/Gemini wire 均如此；
+    // Codex 方言也已归一化为互斥口径）。因此不再做 input-c_r-c_w 的减法——
+    // 旧实现把 input 当「含缓存总量」会把冷输入错按 cache 读价计费，
+    // 并在 Codex 拆桶上报时系统性低估费用。cache 桶只用于防御性钳制。
+    let cache_r = cache_read.unwrap_or(0);
+    let cache_w = cache_write.unwrap_or(0);
+    let cold_in = input_tokens;
     let actual_mc = p
         .input_per_m
         .checked_mul(cold_in)?
         .checked_add(p.cache_read_per_m.checked_mul(cache_r)?)?
         .checked_add(p.cache_write_per_m.checked_mul(cache_w)?)?
         .checked_add(p.output_per_m.checked_mul(output_tokens)?)?;
+    // counterfactual = 同内容冷跑：三桶全部按输入价
+    let total_in = cold_in
+        .checked_add(cache_r)?
+        .checked_add(cache_w)?;
     let cf_mc = p
         .input_per_m
-        .checked_mul(input_tokens)?
+        .checked_mul(total_in)?
         .checked_add(p.output_per_m.checked_mul(output_tokens)?)?;
     Some(UsageEntry {
         input_tokens,
@@ -399,13 +416,16 @@ mod tests {
 
     #[test]
     fn priced_usage_entry_cache_math() {
-        // claude-sonnet-4：1M in（800k 命中读 + 100k 写 cache）+ 100k out
-        // actual = 300×0.1M + 30×0.8M + 375×0.1M + 1500×0.1M
-        //        = 30M+24M+37.5M+150M = 241.5M 微美分 = 242 cents（向上取整）
-        // counterfactual（冷跑）= 300×1M + 1500×0.1M = 450M 微美分 = 450 cents
+        // 互斥三桶口径：100k 冷输入 + 800k cache 读 + 100k 写 cache + 100k out
+        // claude-sonnet-4：in 300¢/M，out 1500¢/M，cache_read 30¢/M，
+        // cache_write 375¢/M
+        // actual = 300*0.1M + 30*0.8M + 375*0.1M + 1500*0.1M
+        //        = 30M + 24M + 37.5M + 150M = 241.5M mc = 242 cents（ceil）
+        // counterfactual（冷跑）= 全部 1M in × 300 + 0.1M out × 1500
+        //        = 300M + 150M = 450M mc = 450 cents
         let e = priced_usage_entry(
             "claude-sonnet-4",
-            1_000_000,
+            100_000, // 冷输入（互斥，不含 cache）
             100_000,
             Some(800_000),
             Some(100_000),
@@ -422,19 +442,18 @@ mod tests {
 
     #[test]
     fn priced_usage_entry_edges() {
-        // cache_read > input（异常上报）：钳到 input，等价全命中读
+        // 互斥桶：cache_read 独立于 input，不再钳制。
+        // 1M 冷 in（250M mc）+ 2M cache 读（125¢/M × 2 = 250M mc）
+        // = 500M mc = 500 cents
         let e = priced_usage_entry("gpt-4o", 1_000_000, 0, Some(2_000_000), None, "round").unwrap();
-        assert_eq!(e.actual_cost_cents, Some(125)); // 全按 cache 读价
-                                                    // 无 cache：actual == counterfactual
+        assert_eq!(e.actual_cost_cents, Some(500));
+        // 无 cache：actual == counterfactual
         let e = priced_usage_entry("gpt-4o", 1_000_000, 0, None, None, "round").unwrap();
         assert_eq!(e.actual_cost_cents, e.counterfactual_cost_cents);
-        // OpenAI 写 cache 不额外加价（按输入价）：cc 不改变 actual
+        // OpenAI 写 cache 不额外加价（按输入价 250¢/M）：
+        // 1M 冷 in + 0.5M 写（也 250¢/M）= 375 cents；只有冷 in = 250 cents
         let a = priced_usage_entry("gpt-4o", 1_000_000, 0, None, Some(500_000), "round").unwrap();
-        let b = priced_usage_entry("gpt-4o", 1_000_000, 0, None, None, "round").unwrap();
-        assert_eq!(
-            a.actual_cost_cents, b.actual_cost_cents,
-            "gpt 写 cache 不应额外加价"
-        );
+        assert_eq!(a.actual_cost_cents, Some(375));
         // 未知模型：None（调用方入账不计价）
         assert!(priced_usage_entry("mystery", 1, 1, None, None, "round").is_none());
     }
