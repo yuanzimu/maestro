@@ -124,6 +124,24 @@ $ maestro status
 
 设计文档都在 [docs/](docs/) 目录里（中文写的，很详细）。
 
+## 请作者喝杯咖啡 ☕
+
+Maestro 用爱发电、免费开源。如果它帮你省了时间，欢迎请作者喝杯咖啡——完全自愿：
+
+| 方式 | 适合谁 | 去哪儿 |
+|---|---|---|
+| 爱发电 | 中文用户（微信/支付宝） | [afdian.net/a/你的用户名](https://afdian.net/a/你的用户名) |
+| GitHub Sponsors | 国际用户（信用卡） | [github.com/sponsors/yuanzimu](https://github.com/sponsors/yuanzimu) |
+| 加密货币 | 链上直转、无需注册 | 见下方地址 |
+
+```text
+USDT (TRC-20):  【替换成你的 USDT-TRC20 地址】
+ETH / ERC-20:   【替换成你的 ETH 地址】
+BTC:            【替换成你的 BTC 地址】
+```
+
+> 转账前请核对地址完整无误。项目按 Apache-2.0 免费提供，不打赏也随便用。
+
 ## 开源协议
 
 Apache-2.0 —— 随便用，商用也行。

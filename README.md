@@ -126,6 +126,24 @@ Tasks
 
 Design docs are in [docs/](docs/) (Chinese, detailed).
 
+## Buy Me a Coffee ☕
+
+Maestro is free and open source, built in spare time. If it saves you time, a coffee is always appreciated — totally optional:
+
+| Channel | Best for | Link |
+|---|---|---|
+| afdian (爱发电) | Chinese users (WeChat/Alipay) | [afdian.net/a/your-username](https://afdian.net/a/your-username) |
+| GitHub Sponsors | International (credit card) | [github.com/sponsors/yuanzimu](https://github.com/sponsors/yuanzimu) |
+| Crypto | On-chain, no signup | Addresses below |
+
+```text
+USDT (TRC-20):  [REPLACE with your USDT TRC-20 address]
+ETH / ERC-20:   [REPLACE with your ETH address]
+BTC:            [REPLACE with your BTC address]
+```
+
+> Double-check the address before sending. The project stays free under Apache-2.0 — no donation required.
+
 ## License
 
 Apache-2.0 — use freely, including commercially.
