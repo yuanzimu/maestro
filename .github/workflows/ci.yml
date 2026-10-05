@@ -1,12 +1,11 @@
-# CI 矩阵（R57）：三平台「更容易测试发现问题」的基础设施。
+# CI 矩阵（R57 + Sprint C C1-8 转正）：三平台「更容易测试发现问题」的基础设施。
 #
 # 设计：
 # - build+clippy：三平台全阻塞 —— Windows/macOS 的编译兼容问题在 PR 就暴露
-# - test (linux)：全量 188 测试，阻塞（锚点平台）
-# - test (cross)：试验性（continue-on-error）——
-#   * macos：全量跑（Unix 语义一致，仅 /proc 差异已做降级），目标转正
-#   * windows：平台无关层（protocol/client/cli）+ daemon/testkit 单测面
-#     （e2e 与进程组语义门控在 cfg(unix)；Windows 完整语义待 Job Objects）
+# - test (linux)：全量测试，阻塞（锚点平台）
+# - test (windows)：全量阻塞（C1-8 转正）—— Job Objects 进程面测试 5 项
+#   已在 x64 runner 实证通过；Windows 回归成为硬门
+# - test (cross/macos)：试验性（continue-on-error），转正留 C5-3
 
 name: CI
 
@@ -47,6 +46,21 @@ jobs:
       - name: Test (full suite)
         run: cargo test --workspace --no-fail-fast
 
+  # C1-8 转正（C5-3 部分提前）：Windows 进程面测试（worker Job Objects
+  # 冻结/整组终止/两级关闭等 5 项）已在 x64 runner 实证通过（b13d665 run），
+  # 从 continue-on-error 提升为阻塞 —— Windows 回归成为硬门。
+  test-windows:
+    name: test (windows-latest, full)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test
+        # --no-fail-fast：一次暴露该平台全部失败（而非一轮修一个）
+        run: cargo test --workspace --no-fail-fast
+
+  # macOS full 仍为试验性（转正留 C5-3：需连续多轮绿后评估）
   test-cross:
     name: test (${{ matrix.name }})
     strategy:
@@ -55,9 +69,6 @@ jobs:
         include:
           - name: macos-latest, full
             os: macos-latest
-          - name: windows-latest, platform-neutral
-            os: windows-latest
-            # 平台无关层 + daemon/testkit 单测面（cfg 门控后自动跳过 Unix 专属用例）
     runs-on: ${{ matrix.os }}
     continue-on-error: true # 试验性：跨平台差距先可见，转正后移除
     steps:

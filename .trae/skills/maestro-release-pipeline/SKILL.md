@@ -70,10 +70,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "C:\dev\maestro\desktop\scri
 
 ## 已知遗留（不必每次处理）
 
-- daemon 重启后急停状态不持久化（需协议加事件类型，涉及 macOS 兼容）。根因已定位：
-  `EmergencyStopped` 事件虽已入库，但 `Core::recover` 把 `emergency` 硬编码为 `None`，
-  且无「急停解除」事件可派生恢复 —— 已排入 Sprint C 后续（需新增协议事件并三端同步）。
+- ~~daemon 重启后急停状态不持久化~~（2026-10-05 已修，a6953e2：EmergencyResumed
+  事件 + Authority.emergency_frozen 派生 + Core::recover 重建相位；若协议再加
+  新事件类型，注意 macOS Swift 端靠 switch/default 容错，旧端安全忽略）。
 - ~~急停时 git 快照偶发失败~~（v0.2.4 已修：checkpoints 锁冲突退避重试）。
 - ~~Windows 无进程组/信号，freeze 为 no-op~~（Sprint C C1 已落地 Job Objects 真冻结）。
 - C1-7 mock-cli 是否出发布包待产品决策（当前保留：演示模式内置 worker）。
 - C1-6 Authenticode 需真实证书（sign-windows.ps1 降级契约已就绪）。
+- release.yml 的 windows-11-arm job 依赖 GitHub ARM64 runner 配额（私有仓库
+  注意 larger-runner 配置；首跑 3 失败已修：mock-cli manifest-path / Linux 复用
+  build-linux.sh / apt 依赖清单）。

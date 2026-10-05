@@ -701,6 +701,8 @@ C1 + C2 + C3 + C4 全部完成 → C5 三端发版演练（一次性验收）
 | ✅ | C1-4 worker.rs Win imp | 两级关闭：CTRL_BREAK（子进程作进程组长，CREATE_NEW_PROCESS_GROUP）→ 超时 TerminateJobObject；无共享控制台时自然落二级 |
 | ✅ | C1-5 [emergency.rs](../crates/maestro-daemon/src/emergency.rs) + worker.rs | SNAPSHOT 前 `settle_workdir` 静止确认：Win 轮询目录项指纹（80ms×5），Unix 恒 true 直通；不静止 best-effort 继续 + eprintln |
 | ✅ | C1-8 worker.rs 测试面 | 5 个 cfg(windows) 进程面测试：生命周期对齐 / 冻结-写入停止-恢复 / 孙进程整组终止 / 两级关闭收敛 / 注册表语义 —— 急停关键行为首次在 Win CI 可自动验证（`test-cross` windows job 从 continue-on-error 转正的候选依据） |
+| ✅ | C1-8 后半：CI windows job 转正（2026-10-05 第二轮） | 5 项进程面测试在 GitHub **x64** runner 实证通过（b13d665 run 全绿）→ [ci.yml](../../.github/workflows/ci.yml) 拆出 `test-windows` 独立阻塞 job；macOS 仍 continue-on-error（转正留 C5-3） |
+| ✅ | C0-4 release.yml 首跑修复（2026-10-05 第二轮） | v0.2.4 tag 首跑暴露 3 失败：mock-cli 误用 `-p maestro-desktop`（不在 workspace）→ 改 `--manifest-path`；Linux 改复用 B4 [build-linux.sh](../desktop/scripts/build-linux.sh)（单一事实源）+ apt 依赖对齐 Tauri v2 官方清单（ayatana-appindicator） |
 | ✅ | C0-3 [sync-version.cjs](../desktop/scripts/sync-version.cjs) | 版本单源：tauri.conf.json 为源，一键同步 package/package-lock(2处)/Cargo.toml；幂等，替代手工四处改 |
 | ✅ | C0-2 [.env.example](../../.env.example) + [sign-windows.ps1](../desktop/scripts/sign-windows.ps1) + .gitignore | 凭据模板入库（真值 .env 已 git-ignore）；签名脚本无凭据时大声降级（UNSIGNED + exit 0）而非静默产出，契合「不静默降级」契约 |
 | ✅ | C0-4 [release.yml](../../.github/workflows/release.yml) | tag 触发骨架：Win x64+arm64 / macOS / Linux x64 矩阵构建 → 签名槽 → 产物归档 → dry-run 门；发布仍走本地流水线（C5 收口） |
@@ -714,7 +716,16 @@ C1 + C2 + C3 + C4 全部完成 → C5 三端发版演练（一次性验收）
 | ⬜ | C4 Linux 收尾 | **由 Linux 端另行开发**（SNI 托盘在 Tauri 壳由 C3 共享覆盖大半，实测项留 C4） |
 | ⬜ | C5 三端发版演练 | 依赖 C2/C4 完成后跨端总验 |
 
-验证（本轮）：daemon **103 项全绿**（含 5 个新进程面测试）、workspace 全量 **126 项 0 失败**、clippy 零告警。`test-cross` 的 windows job 现在能跑到 worker 进程面测试（此前 cfg 门控下为空转）。
+验证（第一轮）：daemon **103 项全绿**（含 5 个新进程面测试）、workspace 全量 **126 项 0 失败**、clippy 零告警。`test-cross` 的 windows job 现在能跑到 worker 进程面测试（此前 cfg 门控下为空转）。
+
+技术债收口（2026-10-05 第二轮迭代，a6953e2）：
+
+| 状态 | 交付 | 说明 |
+|---|---|---|
+| ✅ | **急停状态重启持久化**（长期遗留） | 协议新增 `EmergencyResumed` 事件（macOS Swift 端 switch/default 容错未知类型，旧端安全）；`Authority.emergency_frozen` 派生字段（apply/replay 同源）；`Core::recover` 据此重建急停相位 —— 修复「急停后 daemon 重启即忘记急停，冻结期 B12 拦截失效」；+3 测试（wire/派生/两代重启往返） |
+| ✅ | CI 转正 + release 骨架修复 | 见上表 C1-8 后半 / C0-4 行 |
+
+验证（第二轮）：daemon **105 项全绿**（+2）、protocol 13 项（+1）、workspace 0 失败、clippy/tsc 零告警。
 
 ### 10.5 模型目录：运行一次即获取免费 / 低价 token 的 API 与模型
 

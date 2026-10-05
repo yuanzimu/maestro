@@ -60,7 +60,8 @@ jobs:
         shell: pwsh
         run: |
           cargo build --release --target ${{ matrix.triple }} -p maestro-daemon --bin maestro-daemon --bin maestro-rounder
-          cargo build --release --target ${{ matrix.triple }} -p maestro-desktop --bin mock-cli
+          # mock-cli 属 desktop crate（不在 workspace 成员内）—— 按 manifest 构建
+          cargo build --release --target ${{ matrix.triple }} --manifest-path desktop/src-tauri/Cargo.toml --bin mock-cli
           New-Item -ItemType Directory -Force desktop/src-tauri/bin | Out-Null
           Copy-Item "target/${{ matrix.triple }}/release/maestro-daemon.exe" "desktop/src-tauri/bin/maestro-daemon-${{ matrix.triple }}.exe" -Force
           Copy-Item "target/${{ matrix.triple }}/release/maestro-rounder.exe" "desktop/src-tauri/bin/maestro-rounder-${{ matrix.triple }}.exe" -Force
@@ -121,16 +122,12 @@ jobs:
       - name: Install Linux GUI deps (webkit2gtk for Tauri)
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libappindicator3-dev librsvg2-dev patchelf
-      - name: Build sidecars + packages
+          sudo apt-get install -y build-essential curl wget file libxdo-dev libssl-dev \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - name: Build sidecars + packages (B4 script, single source of truth)
         run: |
-          cargo build --release --target x86_64-unknown-linux-gnu -p maestro-daemon --bin maestro-daemon --bin maestro-rounder
-          cargo build --release --target x86_64-unknown-linux-gnu -p maestro-desktop --bin mock-cli
-          mkdir -p desktop/src-tauri/bin
-          cp target/x86_64-unknown-linux-gnu/release/maestro-daemon desktop/src-tauri/bin/maestro-daemon-x86_64-unknown-linux-gnu
-          cp target/x86_64-unknown-linux-gnu/release/maestro-rounder desktop/src-tauri/bin/maestro-rounder-x86_64-unknown-linux-gnu
-          cp target/x86_64-unknown-linux-gnu/release/mock-cli desktop/src-tauri/bin/mock-cli-x86_64-unknown-linux-gnu
-          cd desktop && npm ci && npx tauri build
+          chmod +x desktop/scripts/prepare-sidecars.sh desktop/scripts/build-linux.sh
+          ./desktop/scripts/build-linux.sh
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
