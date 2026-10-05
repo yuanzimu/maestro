@@ -1,6 +1,7 @@
 # Maestro 开发计划
 
-> 版本 v2.6 · 2026-10-05
+> 版本 v2.7 · 2026-10-05
+> v2.7：新增 Sprint C 详细任务书（C0~C5：Windows Job Objects 真冻结 + Authenticode、macOS Developer ID 签名/公证/universal、Linux 托盘 SNI 收尾）+ 决策 30~32；Sprint B 收尾勾稽
 > v2.6：新增 10.5 模型目录同步工具（运行一次获取免费/低价 API+模型+填写示例）
 > v2.0：双产品矩阵 + Token 经济第一等公民 + 轻量硬约束
 > v2.1：新增 U 组体验层重大改进（8 项，源自 [UX_DEEP_DIVE.md](./UX_DEEP_DIVE.md) 第一部分）
@@ -577,6 +578,119 @@ B0 共享契约（先做，一次性）
 - B1 与 B3 完成后做一次「三端一致性走查」（同一组任务数据对照 B0-3 契约），再进入 B2/B4 的安装包验证；
 - 每个 ID 完成即在下表勾稽；测试随任务同步新增（共享前端行为测试 + Linux 安装包冒烟可纳入 CI 的 ubuntu job）。
 
+#### Sprint B 实施进度（2026-10-05，Linux 出包补齐 + 编译修复）
+
+> 远端 master 已以「改造既有组件」的等价形态落地 B1/B2/B3（活动栏 / 命令面板 / 审批门 / 结果卡 / 通知中心 / macOS B3）；本地独有的增量是 **B4 Linux 出包** 与远端审计提交遗留的编译修复。
+
+| 状态 | 交付 | 说明 |
+|---|---|---|
+| ✅ | B1/B2/B3（远端等价实现） | 活动栏 + 命令面板 + 审批门 + 结果卡 + 通知中心；macOS B3 直接落在 [main.swift](../clients/macos/Sources/MaestroGui/main.swift) / [AppKitUI.swift](../clients/macos/Sources/MaestroGui/AppKitUI.swift)；事件桥首订阅就绪门控 |
+| ✅ | B4-1 [tauri.conf.json](../desktop/src-tauri/tauri.conf.json) | `bundle.icon` 补全跨平台 PNG/ICO 清单；Linux 形态经 CLI `--bundles appimage,deb,rpm` 覆盖（顶层 targets 仍 nsis） |
+| ✅ | B4-2 [prepare-sidecars.sh](../desktop/scripts/prepare-sidecars.sh) | 先占位（Tauri build script 校验三件套齐全）再 cargo 构建 daemon（含 rounder）+ mock-cli，最后以 `-x86_64-unknown-linux-gnu` 后缀覆盖 |
+| ✅ | B4-6 [build-linux.sh](../desktop/scripts/build-linux.sh) + `npm run bundle:linux` | 一键出 AppImage / deb / rpm；产物大小与全链实测见提交说明 |
+| ✅ | 编译修复 | [core.rs](../crates/maestro-daemon/src/core.rs)：`api_steer` 与验收反思 push 的 `Result<SteeringMsg,_>` 解包；[worker.rs](../crates/maestro-daemon/src/worker.rs)：spawn 失败兜底 `SendError<Child>.0` 解包；[llm.rs](../crates/maestro-daemon/src/llm.rs)：1.99 clippy needless_question_mark |
+| ✅ | 验证 | `cargo clippy --workspace --all-targets -D warnings` 零告警；全 workspace **207 项全绿**；`desktop` tsc+vite 构建通过 |
+| ⬜ | B2-2 / B2-4 / B4-3 / B4-4 / B4-5 | Win11 Mica、WebView2 IME、Linux SNI 托盘、XDG 全局快捷键、fcitx5/xrdp 实测——并入 Sprint C 平台收尾（C3/C5） |
+
+#### Sprint C 详细任务书（2026-10-05 规划，**只写计划不写代码**——待三端分别下发）
+
+> 目标：把 Sprint B「能用」的三端做成「敢分发」——Windows 急停真冻结（Job Objects）+ 安装包签名，macOS Developer ID 签名 / 公证 / universal，Linux 托盘与安装体验收尾。
+> Sprint B 留下的技术债经调研已定位（见下「现状基线」），任务按「C0 发布基建与凭据 → C1 Windows / C2 macOS（可并行）→ C3 共享前端托盘收口 → C4 Linux 收尾 → C5 三端发版演练」组织，每条带唯一 ID。
+
+**现状基线（2026-10-05 调研核实，Sprint C 的改造起点）**
+
+| 平台 | 现状 | 缺口 |
+|---|---|---|
+| Windows 进程控制 | [worker.rs](../crates/maestro-daemon/src/worker.rs) `#[cfg(windows)] mod imp`：Child 注册表 + waiter 轮询；`freeze_group`/`unfreeze_group` 为 **no-op**；graceful=直接 TerminateProcess；无 windows-sys 直接依赖 | 急停 FREEZE 在 Win 上不静止 → [emergency.rs](../crates/maestro-daemon/src/emergency.rs) 快照前提（FS 静止）不成立；孙进程泄漏；无三级优雅关闭 |
+| Windows 安装包 | Tauri 仅 `nsis`，currentUser 免管理员；prepare-sidecars 默认 triple 为 aarch64 | 无 Authenticode → SmartScreen 告警；x64/arm64 矩阵未统一；mock-cli 未剔除 |
+| macOS 原生 | [build.sh](../clients/macos/build.sh) 手搓 .app + 内嵌三个 Rust bin + ad-hoc 签名 + DMG；单架构（uname -m）；菜单栏常驻已实现 | 无 Developer ID / hardened runtime / entitlements / notarytool / staple；DMG 未签；无 lipo universal；Bundle ID 与 Tauri 不一致 |
+| Tauri 壳 | [lib.rs](../desktop/src-tauri/src/lib.rs) 仅 setup+invoke；Cargo.toml 未启用 `tray-icon` feature | 无托盘、关窗即退（与「关窗任务照跑」承诺不符）；tools.rs 为 Windows 中心写法（.exe / `;`）；无 macOS sidecar 脚本 |
+| Linux | AppImage/deb/rpm 已可出（复用 Tauri） | 无 SNI 托盘；无 deb/rpm GPG；fcitx5/xrdp 与 X11/Wayland 快捷键未实测 |
+
+**出口断言（Sprint C 完成时必须全部成立）**
+
+1. Windows 急停走 Job Objects：FREEZE 整组（含孙进程）<100ms 静止，SNAPSHOT 期间产物不变化，恢复后任务继续；`b_emergency` 等价行为在 Windows 有自动化守护；
+2. 三端安装包均通过系统安全门：Windows Authenticode 签名（SmartScreen 无未知发布者）、macOS Developer ID 签名 + 公证 + staple（新机 `xattr` 干净、双击即开）、Linux 仓库 GPG 元数据齐备；
+3. macOS 一个 universal DMG 覆盖 arm64 + x86_64（App 与三个 sidecar 均 universal）；
+4. Tauri 壳三端托盘齐备：关窗最小化到托盘、菜单含新建/收件箱/急停/退出、未读角标，与 macOS 原生菜单栏行为等价；
+5. 全新虚拟机/容器内按 Release 说明完成「下载 → 安装 → 派活 → 急停/恢复 → 收通知 → 卸载」全链；全量测试 + clippy 保持全绿，包体约束不回退。
+
+##### C0 · 发布基建与凭据（**必须最先做，C1/C2 共同前置**）
+
+| ID | 任务 | 落点 / 产出 | 验收 |
+|---|---|---|---|
+| C0-1 | 三端发布矩阵定义：Win(x64+arm64) / macOS(universal) / Linux(x64) 的 sidecar triple 与产物清单统一成一份矩阵 | 矩阵表（仓库内文档或 CI 变量）；prepare-sidecars 两脚本默认值对齐 | 任一端构建脚本只读矩阵即可产出，triple 无硬编码分叉 |
+| C0-2 | 签名凭据管理方案：Windows 代码签名证书、macOS Developer ID Application + App-specific password/API Key（notarytool）经 CI secrets 注入，本地构建文档化 | CI secrets 清单 + 本地 `.env.example`（**不入库真值**） | 无凭据时构建给出明确降级提示（ad-hoc/未签）而非静默产出 |
+| C0-3 | 版本号单源化：tauri.conf / package / Cargo / DMG 版本统一由 `git describe --tags`（或单一脚本）注入 | 版本同步脚本 | 改一处四端版本一致，消除手工漏同步 |
+| C0-4 | 发版流水线骨架：CI 增加可选 `release` workflow（tag 触发），矩阵构建 → 签名 →（mac）公证 → 附件归档 | `.github/workflows/release.yml`（计划阶段只定结构） | dry-run 能跑通到「待签名」前各步 |
+
+##### C1 · Windows 真冻结与签名（依赖 C0，**与 C2 可并行**）
+
+| ID | 任务 | 落点 | 验收 |
+|---|---|---|---|
+| C1-1 | 新增 `windows-sys`（仅 `[target.'cfg(windows)'.dependencies]`，feature 最小集：Win32_System_JobObjects/Threading/ProcessStatus） | daemon Cargo.toml | 非 Win 构建零影响；clippy 全绿 |
+| C1-2 | Job Object 生命周期：spawn 时建（或取每 daemon 一个）kill-on-close Job，worker 及子孙进程 Assign 进 Job；句柄存入现有 Child 注册表 | worker.rs `#[cfg(windows)] imp`（门面与 emergency 调用方零改动） | 内层 CLI 派生的孙进程可被整组枚举/终止 |
+| C1-3 | 真冻结：`freeze_group` 枚举 Job 内进程逐线程挂起（NtSuspendThread 等价 win-sys 调用）；`unfreeze_group` 逆操作；记冻结代次防重复 | worker.rs Win imp | FREEZE 后 100ms 内组内无 CPU/FS 变化；恢复后进程继续 |
+| C1-4 | 优雅关闭三级化：先 CTRL_BREAK/关闭事件投递，超时再 Terminate Job；替代当前直接 Terminate | worker.rs Win imp | worker 有保存现场窗口；超时兜底确定 |
+| C1-5 | emergency 快照前提守护：FREEZE 后加「静止确认」（短轮询无新句柄/无 FS mtime 变化）再进 SNAPSHOT | emergency.rs（平台无关的可选钩子） | Win 上快照干净；Linux 行为不回退 |
+| C1-6 | NSIS/EXE Authenticode：signtool 签安装包与未签 sidecar（CI）；时间戳服务 | CI release 步骤 + 本地脚本 | 属性中可见签名者；SmartScreen 不再报未知发布者（声誉积累期另说明） |
+| C1-7 | 剔除 mock-cli 出发布包（仅 dev/testkit）；核对 x64 与 arm64 包体 **<20MB** | externalBin 条件化 + bundle 矩阵 | 两架构安装包达标、功能完整 |
+| C1-8 | Windows 进程面测试：把 emergency/孤儿回收的关键行为做成 Win 可跑的集成测试（脱离当前 e2e 的 `#![cfg(unix)]` 限制），先 CI 非阻塞、稳定后转阻塞 | testkit/e2e 平台无关化 | 冻结/恢复/整组 kill 在 CI windows job 可自动验证 |
+
+##### C2 · macOS 签名 / 公证 / universal（依赖 C0，**与 C1 可并行**）
+
+| ID | 任务 | 落点 | 验收 |
+|---|---|---|---|
+| C2-1 | 统一 Bundle ID 为 `com.yuanzimu.maestro`（与 Tauri 一致），更新 Info.plist | build.sh | 两端 identifier 一致 |
+| C2-2 | hardened runtime + entitlements（allow-jit / disable-library-validation 按内嵌 CLI 实际需要最小授权） | 新增 `Maestro.entitlements` | `codesign -dv --entitlements -` 符合预期 |
+| C2-3 | sidecar 逐二进制签名：Resources/bin 下三个 Rust bin 先各自 Developer ID 签名，再签外层 .app（签名顺序由内向外） | build.sh | bundle 内无未签可执行文件（`codesign --verify --deep` 通过） |
+| C2-4 | universal Rust sidecar：cargo 分别构建 arm64/x86_64 后 `lipo -create` 合并三件套；Swift 侧 `swift build --arch arm64 --arch x86_64`（或两构 lipo） | prepare-sidecars 增加 mac 分支 + build.sh | `file/lipo -info` 显示双架构；两架构实机/迁移测试可跑 |
+| C2-5 | 公证：`xcrun notarytool submit`（keychain profile 或 API Key）+ 等待 accepted + `xcrun stapler staple`；失败即中断并取日志 | build.sh | `stapler validate` 通过；`spctl -a -vvv` 接受 |
+| C2-6 | DMG 签名 + 公证：签名 DMG（Developer ID Application）后一并公证并 staple | build.sh | DMG 双击打开无 Gatekeeper 拦截；全新用户机 `xattr` 无隔离残留 |
+| C2-7 | ScenarioRunner 100 场景在签名/universal 包上回归（Apple Silicon 本机 + Rosetta 下 x86_64 路径各跑冒烟） | Package.swift harness | 双架构关键旅程通过 |
+
+##### C3 · 托盘与窗口收口（**三端共享，依赖 B1；可与 C1/C2 并行开发**）
+
+| ID | 任务 | 落点 | 验收 |
+|---|---|---|---|
+| C3-1 | Cargo.toml 启用 `tauri` 的 `tray-icon` feature；`TrayIconBuilder` 建托盘：菜单（显示窗口 / 新任务 / 收件箱 / 急停 / 设置 / 退出）+ 图标 + 未读角标 | src-tauri Cargo.toml / lib.rs（行为对齐 macOS main.swift 的 NSStatusItem） | 三端托盘菜单动作可用 |
+| C3-2 | 关窗最小化到托盘而非退出（daemon 已独立常驻、ensure_daemon 支持接管）；托盘双击/菜单恢复窗口 | lib.rs 窗口事件 | 关窗后任务照跑、可从托盘恢复 |
+| C3-3 | 托盘状态随事件刷新：急停态 / 待审批角标 / 恢复态文案（复用现有事件桥，不新增轮询） | lib.rs + 前端事件 | 角标与通知中心一致 |
+| C3-4 | tools.rs 跨平台路径补强：`.exe` 与 `:`/`;` 分隔按平台分支，支持 macOS triple 与 sidecar 定位 | src-tauri/src/tools.rs | 三端 sidecar 解析单测覆盖 |
+
+##### C4 · Linux 收尾（依赖 C3）
+
+| ID | 任务 | 落点 | 验收 |
+|---|---|---|---|
+| C4-1 | SNI 托盘在 GNOME/KDE 实测（AppIndicator 兼容）；无托盘宿主环境（精简 WM）给出优雅降级提示 | bundle/desktop 文件 + 实测 | GNOME/KDE 托盘可见可用；xrdp/XFCE 下不报错 |
+| C4-2 | `.desktop` 元数据收尾：Categories/StartupNotify/单实例；deb/rpm 依赖（libwebkit2gtk-4.1-0、libgtk-3）与 postinst/remove 干净 | tauri bundle linux 配置 | 菜单可启动、卸载不留残留菜单 |
+| C4-3 | 全局快捷键 XDG 实测：X11 与 Wayland 下 `Alt+M`（Wayland 无全局注册时给出设置页引导而非静默失败） | src-tauri | 两协议行为明确、有降级说明 |
+| C4-4 | fcitx5 输入法实测（含 xrdp/XFCE）：拼音组词不丢字、回车不误提交 | 实测记录 | 中文输入全链正常 |
+| C4-5 | 三形态全链复验：AppImage 免安装直跑（含无 FUSE 时 `--appimage-extract` 指引）、deb/rpm 装→派活→急停→收通知→卸载 | 实测 + CI ubuntu 冒烟 | 全链通过；产物大小记录（AppImage 自包含 WebKit 属预期，deb/rpm 轻量） |
+
+##### C5 · 三端发版演练（依赖 C1~C4 全部完成）
+
+| ID | 任务 | 落点 | 验收 |
+|---|---|---|---|
+| C5-1 | 干净环境矩阵验证：各端全新 VM/容器按 Release 页命令完成全链（下载→校验→安装→首跑 doctor→派活→急停/恢复→通知→卸载） | 发版检查表 | 三端检查表全部勾选、问题清零后才打 tag |
+| C5-2 | tag 必须指向包含全部修复的提交；Release 页内嵌三端安装命令与校验（sha256 / 签名指纹 / macOS `xattr` 说明） | Release notes | 任一用户照页可独立完成 |
+| C5-3 | CI 三平台 build+clippy 全阻塞保持；Windows/macOS 新增平台面测试从 continue-on-error 提升为阻塞（按 C1-8 稳定度推进） | ci.yml | 跨平台回归成为硬门 |
+
+**下发顺序与依赖**
+
+```
+C0 发布基建/凭据/版本单源（先做，一次性）
+   ├── C1 Windows Job Objects + Authenticode（独立）
+   ├── C2 macOS Developer ID/公证/universal（独立，与 C1 并行）
+   └── C3 托盘与窗口收口（依赖 B1，可与 C1/C2 并行）
+            └── C4 Linux 收尾（依赖 C3）
+C1 + C2 + C3 + C4 全部完成 → C5 三端发版演练（一次性验收）
+```
+
+- 关键路径在 C2：universal sidecar（C2-4）与公证（C2-5）串行且依赖 Apple 凭据，C0-2 须最早落实；
+- C1 的 unsafe FFI（线程枚举/挂起）集中在 `imp` 模块内，先以最小 feature 集引入 windows-sys，避免依赖膨胀；
+- C1/C2 各自完成后先做平台内自测，C5 才做跨端一致性与干净环境总验；每完成一个 ID 即在进度表勾稽，测试同步新增。
+
 ### 10.5 模型目录：运行一次即获取免费 / 低价 token 的 API 与模型
 
 > 解决「去哪找不要钱和便宜的模型、在客户端怎么填」的问题。
@@ -630,6 +744,9 @@ B0 共享契约（先做，一次性）
 | 27 | **【v2.5】观测走 OpenTelemetry + Langfuse，不自建观测 UI；agent 生态走 ACP** | 标准协议不锁定厂商；ACP 一次接入整个 agent 生态，避免逐 CLI 写方言 |
 | 28 | **【v2.6】免费/低价模型走「同步工具实拉目录」而非仓库内置死清单** | 免费 roster 高频轮换（旧 `:free` id 数月即失效）；OpenRouter 公开目录无需 key、按 price 筛选比 `:free` 后缀更全；工具每次实拉 + 内置直连 provider 兜底，仓库只存生成快照 |
 | 29 | **【v2.6】事件桥首订阅加「前端就绪」门控（bridge_ready）** | 回归 A 项暴露竞态：daemon 存活的接管路径下，bridge 在 setup 阶段立即 `subscribe(from_seq=1)`，全量重放瞬时爆发，早于 React `listen()` 注册的事件全部丢失（事件流空白；spawn 路径因等 daemon 就绪侥幸避开）。前端监听器注册后 invoke `bridge_ready` 再放行首订阅，从协议层消除竞态 |
+| 30 | **【v2.7】Windows 冻结选 Job Objects + 逐线程挂起，不用 NtSuspendProcess 单进程方案** | 急停语义是整组（含内层 CLI 派生的孙进程）静止；仅挂直接子进程会让快照期孙进程继续写盘，emergency 快照前提不成立。Job 统一收纳进程树，句柄挂现有 Child 注册表，`imp` 模块内闭环、门面与 emergency 调用方零改动 |
+| 31 | **【v2.7】macOS 走 Developer ID + notarytool 官方公证链，universal 以 lipo 合并产出** | ad-hoc 包在 Apple Silicon 新机被 Gatekeeper 直接拦截，无法公开分发；公证要求 bundle 内全部可执行文件（含三个 sidecar）由内向外签名，故 sidecar 先双架构构建再 lipo，一个 DMG 覆盖 Intel/Apple Silicon |
+| 32 | **【v2.7】Tauri 壳启用 tray-icon，关窗最小化到托盘（三端一致）** | daemon 已独立常驻且支持接管，但壳层关窗即退与「关窗任务照跑」承诺矛盾；托盘行为对齐 macOS 已实现的 NSStatusItem，菜单/角标三端统一，复用事件桥刷新而不新增轮询 |
 
 ## 十二、下一步
 
