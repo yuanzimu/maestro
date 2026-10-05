@@ -44,6 +44,16 @@ fn events_replay_restores_tasks() {
     let _ = d2.api(Method::TaskList, serde_json::json!({}));
     assert!(before_seq >= 1);
 
+    // 急停态跨重启保持（a6953e2 修复的 e2e 守护）：重启不再「忘记」急停 ——
+    // Frozen 中新任务只入队不启动（B12）；此前该测试靠旧 bug（重启丢急停）
+    // 才能在下方直接单任务 resume
+    let t2 = d2.create_task("frozen-queue", &work);
+    assert_eq!(
+        d2.task_state(&t2),
+        WorkerState::Queued,
+        "急停保持中，新任务应入队不启动（B12）"
+    );
+
     // steering 队列消息还在（kill -9 不丢 —— P0 验收）
     let store = maestro_daemon::persist::EventStore::open(&data_dir).unwrap();
     let all = store.replay_all();
@@ -57,9 +67,13 @@ fn events_replay_restores_tasks() {
         })
         .count();
     assert_eq!(steered, 1, "steering 事件应在事件流");
-    // 恢复后 resume（手动）应 flush 该轻推
+    // 恢复路径：急停后的规定恢复是 resume_all（Frozen 中单任务 resume 被
+    // F60 守卫 -409 拒绝）；flush 模式应把急停前积压的轻推随 respawn 投递
     let tid = tasks[0]["id"].as_str().unwrap().to_string();
-    d2.api(Method::TaskResume, serde_json::json!({ "task": tid }));
+    d2.api(
+        Method::ServerResumeAll,
+        serde_json::json!({ "steering": "flush" }),
+    );
     assert!(d2.wait_state(&TaskId::new(tid), WorkerState::Working, 5000));
     let all2 = maestro_daemon::persist::EventStore::open(&data_dir)
         .unwrap()
