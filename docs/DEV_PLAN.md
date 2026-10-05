@@ -1,6 +1,7 @@
 # Maestro 开发计划
 
-> 版本 v2.5 · 2026-10-05
+> 版本 v2.6 · 2026-10-05
+> v2.6：新增 10.5 模型目录同步工具（运行一次获取免费/低价 API+模型+填写示例）
 > v2.0：双产品矩阵 + Token 经济第一等公民 + 轻量硬约束
 > v2.1：新增 U 组体验层重大改进（8 项，源自 [UX_DEEP_DIVE.md](./UX_DEEP_DIVE.md) 第一部分）
 > v2.2：以 U 组信任旅程为主线重排 P0/P1/P2——P0 三个 UX 地基（LLM client / 多轮驱动 / 事件埋点），P1 三个 Sprint（入口信心→过程掌控→回顾成长）
@@ -576,6 +577,26 @@ B0 共享契约（先做，一次性）
 - B1 与 B3 完成后做一次「三端一致性走查」（同一组任务数据对照 B0-3 契约），再进入 B2/B4 的安装包验证；
 - 每个 ID 完成即在下表勾稽；测试随任务同步新增（共享前端行为测试 + Linux 安装包冒烟可纳入 CI 的 ubuntu job）。
 
+### 10.5 模型目录：运行一次即获取免费 / 低价 token 的 API 与模型
+
+> 解决「去哪找不要钱和便宜的模型、在客户端怎么填」的问题。
+> **同步工具**：[tools/sync-model-catalog.mjs](../tools/sync-model-catalog.mjs)（Node 22，零依赖）
+> `node tools/sync-model-catalog.mjs` 一次运行产出：
+> - [docs/model-catalog.json](./model-catalog.json)：机器可读（直连 provider / 免费 / 低价三组）
+> - [docs/MODEL_CATALOG.md](./MODEL_CATALOG.md)：**每个 API 与模型的填写示例**（BASE_URL / KEY 环境变量 / MODEL + curl 实例）
+
+数据源（2026-10-05 实测）：
+
+| 来源 | 形态 | 当前数量 |
+|---|---|---|
+| 内置直连 provider 免费层（Groq / Cerebras / Gemini / Mistral / GitHub Models / Cloudflare / SiliconFlow / ModelScope / Cohere / NVIDIA / SambaNova） | 人工核实，含注册地址与限额 | 11 家 |
+| OpenRouter 公开目录 `GET /api/v1/models`（**无需 key**，本机直连实测 466 模型） | 按 price=0 切免费 | 22 个 |
+| 同上，按输入 < $0.15/M 切低价价值模型 | 按价格排序取前 15 | 15 个 |
+
+关键事实：① OpenRouter 免费名单按 **price**（`pricing.prompt/completion` 双零）筛选比按 `:free` 后缀多出 4 个（含 `openrouter/free` 自动路由器与 2 个预览模型）——dev.to 实测 387 模型时为 21 vs 18；② 免费 roster 高频轮换（旧教程里的 `llama-3.3-70b:free` 等多已转付费），故工具不落死 `:free` id、每次实拉；③ 直连免费档与 daemon 现有 OpenAI 兼容层（llm.rs）直接对接，无需新代码。
+
+后续：GUI「设置 → worker」可一键读 `model-catalog.json` 下拉选模型（B1 任务，填好 BASE_URL/MODEL 即生效）。
+
 ## 十一、决策记录（v1→v2，含 v2.2 重排与 v2.3 增补）
 
 | # | 决策 | 理由 |
@@ -607,6 +628,7 @@ B0 共享契约（先做，一次性）
 | 25 | **【v2.5】Server 放弃 nginx 补丁，Rust 借鉴架构独立实现** | 子进程编排触碰 nginx worker 非阻塞红线；构建链/ABI 与单二进制承诺冲突；以标准 HTTP `/health`/`/metrics` 作为与 nginx 共存契约 |
 | 26 | **【v2.5】新增 Foreman 式 cost/time/turn 硬预算闸门** | 软预算只报告不阻止，失控时仍烧钱；硬闸门超限即挂起（复用 `SuspendReason::BudgetExceeded`，仅手动恢复），是「敢放手」的硬保障 |
 | 27 | **【v2.5】观测走 OpenTelemetry + Langfuse，不自建观测 UI；agent 生态走 ACP** | 标准协议不锁定厂商；ACP 一次接入整个 agent 生态，避免逐 CLI 写方言 |
+| 28 | **【v2.6】免费/低价模型走「同步工具实拉目录」而非仓库内置死清单** | 免费 roster 高频轮换（旧 `:free` id 数月即失效）；OpenRouter 公开目录无需 key、按 price 筛选比 `:free` 后缀更全；工具每次实拉 + 内置直连 provider 兜底，仓库只存生成快照 |
 
 ## 十二、下一步
 

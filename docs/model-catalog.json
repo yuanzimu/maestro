@@ -1,0 +1,553 @@
+{
+  "generated_at": "2026-10-05T02:47:40.783Z",
+  "direct_providers": [
+    {
+      "id": "groq",
+      "name": "Groq",
+      "compatible": "openai",
+      "base_url": "https://api.groq.com/openai/v1",
+      "key_env": "GROQ_API_KEY",
+      "signup": "https://console.groq.com/keys",
+      "limits": "30 RPM · 1,000 请求/天 · LPU 极低延迟",
+      "models": [
+        "llama-3.3-70b-versatile",
+        "openai/gpt-oss-120b",
+        "qwen/qwen3-coder-480b-a35b-instruct"
+      ]
+    },
+    {
+      "id": "cerebras",
+      "name": "Cerebras",
+      "compatible": "openai",
+      "base_url": "https://api.cerebras.ai/v1",
+      "key_env": "CEREBRAS_API_KEY",
+      "signup": "https://cloud.cerebras.ai",
+      "limits": "30 RPM · 约 100 万 token/天 · ~2,600 tok/s",
+      "models": [
+        "llama-3.3-70b",
+        "llama-4-scout-17b-16e-instruct"
+      ]
+    },
+    {
+      "id": "gemini",
+      "name": "Google Gemini",
+      "compatible": "openai",
+      "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+      "key_env": "GEMINI_API_KEY",
+      "signup": "https://aistudio.google.com/apikey",
+      "limits": "15 RPM · 1,500 请求/天 · 多模态 2M 上下文",
+      "models": [
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+        "gemini-2.5-pro"
+      ]
+    },
+    {
+      "id": "mistral",
+      "name": "Mistral AI",
+      "compatible": "openai",
+      "base_url": "https://api.mistral.ai/v1",
+      "key_env": "MISTRAL_API_KEY",
+      "signup": "https://console.mistral.ai",
+      "limits": "1 请求/秒 · 500K TPM · 约 10 亿 token/月",
+      "models": [
+        "mistral-small-latest",
+        "mistral-medium-latest",
+        "codestral-latest"
+      ]
+    },
+    {
+      "id": "github-models",
+      "name": "GitHub Models",
+      "compatible": "openai",
+      "base_url": "https://models.github.ai/inference",
+      "key_env": "GITHUB_PAT",
+      "signup": "https://github.com/settings/personal-access-tokens",
+      "limits": "低类 15 RPM · 150/天；fine-grained PAT 需 Models: Read",
+      "models": [
+        "openai/gpt-4.1",
+        "meta-llama/Llama-3.3-70B-Instruct",
+        "anthropic/claude-sonnet-4"
+      ]
+    },
+    {
+      "id": "cloudflare",
+      "name": "Cloudflare Workers AI",
+      "compatible": "openai",
+      "base_url": "https://api.cloudflare.com/client/v4/accounts/{ACCOUNT_ID}/ai/v1",
+      "key_env": "CLOUDFLARE_API_TOKEN",
+      "signup": "https://dash.cloudflare.com",
+      "limits": "10,000 Neurons/天 · 50+ 模型",
+      "models": [
+        "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+        "@cf/qwen/qwen3-coder-480b-a35b-instruct"
+      ]
+    },
+    {
+      "id": "siliconflow",
+      "name": "SiliconFlow 硅基流动",
+      "compatible": "openai",
+      "base_url": "https://api.siliconflow.cn/v1",
+      "key_env": "SILICONFLOW_API_KEY",
+      "signup": "https://cloud.siliconflow.cn",
+      "limits": "30 RPM · 60K TPM 永久免费档",
+      "models": [
+        "Qwen/Qwen3-8B",
+        "deepseek-ai/DeepSeek-V3.1"
+      ]
+    },
+    {
+      "id": "modelscope",
+      "name": "ModelScope 魔搭",
+      "compatible": "openai",
+      "base_url": "https://api-inference.modelscope.cn/v1",
+      "key_env": "MODELSCOPE_API_KEY",
+      "signup": "https://www.modelscope.cn/my/myaccesstoken",
+      "limits": "2,000 请求/天 · 国内友好",
+      "models": [
+        "Qwen/Qwen3-8B",
+        "Qwen/Qwen3-Coder-480B-A35B-Instruct"
+      ]
+    },
+    {
+      "id": "cohere",
+      "name": "Cohere",
+      "compatible": "openai",
+      "base_url": "https://api.cohere.ai/compatibility/v1",
+      "key_env": "COHERE_API_KEY",
+      "signup": "https://dashboard.cohere.com/api-keys",
+      "limits": "1,000 次调用/月",
+      "models": [
+        "command-r-plus-08-2024",
+        "command-a-03-2025"
+      ]
+    },
+    {
+      "id": "nvidia",
+      "name": "NVIDIA NIM",
+      "compatible": "openai",
+      "base_url": "https://integrate.api.nvidia.com/v1",
+      "key_env": "NVIDIA_API_KEY",
+      "signup": "https://build.nvidia.com",
+      "limits": "约 40 RPM · 100+ 模型（开发者会员免费）",
+      "models": [
+        "meta/llama-3.3-70b-instruct",
+        "qwen/qwen3-coder-480b-a35b-instruct"
+      ]
+    },
+    {
+      "id": "sambanova",
+      "name": "SambaNova",
+      "compatible": "openai",
+      "base_url": "https://api.sambanova.ai/v1",
+      "key_env": "SAMBANOVA_API_KEY",
+      "signup": "https://cloud.sambanova.ai",
+      "limits": "20 RPM · 20 万 token/天 · RDU 极速",
+      "models": [
+        "Meta-Llama-3.3-70B-Instruct",
+        "Qwen3-Coder-480B"
+      ]
+    }
+  ],
+  "openrouter_free": [
+    {
+      "id": "thinkingmachines/inkling-small:free",
+      "context_length": 1048576,
+      "input_per_m": 0,
+      "output_per_m": 0,
+      "modalities": [
+        "text",
+        "image",
+        "audio"
+      ],
+      "tools": true
+    },
+    {
+      "id": "thinkingmachines/inkling:free",
+      "context_length": 1048576,
+      "input_per_m": 0,
+      "output_per_m": 0,
+      "modalities": [
+        "text",
+        "image",
+        "audio"
+      ],
+      "tools": true
+    },
+    {
+      "id": "google/lyria-3-pro-preview",
+      "context_length": 1048576,
+      "input_per_m": 0,
+      "output_per_m": 0,
+      "modalities": [
+        "text",
+        "image"
+      ],
+      "tools": false
+    },
+    {
+      "id": "google/lyria-3-clip-preview",
+      "context_length": 1048576,
+      "input_per_m": 0,
+      "output_per_m": 0,
+      "modalities": [
+        "text",
+        "image"
+      ],
+      "tools": false
+    },
+    {
+      "id": "stealth/space-bunny-alpha",
+      "context_length": 1000000,
+      "input_per_m": 0,
+      "output_per_m": 0,
+      "modalities": [
+        "text",
+        "image",
+        "video"
+      ],
+      "tools": true
+    },
+    {
+      "id": "nvidia/nemotron-3.5-lightning:free",
+      "context_length": 1000000,
+      "input_per_m": 0,
+      "output_per_m": 0,
+      "modalities": [
+        "text"
+      ],
+      "tools": true
+    },
+    {
+      "id": "nvidia/nemotron-3-ultra-550b-a55b:free",
+      "context_length": 1000000,
+      "input_per_m": 0,
+      "output_per_m": 0,
+      "modalities": [
+        "text"
+      ],
+      "tools": true
+    },
+    {
+      "id": "dots-studio/dots-3-note-preview:free",
+      "context_length": 512000,
+      "input_per_m": 0,
+      "output_per_m": 0,
+      "modalities": [
+        "text",
+        "image"
+      ],
+      "tools": true
+    },
+    {
+      "id": "inclusionai/ling-3.1-flash",
+      "context_length": 262144,
+      "input_per_m": 0,
+      "output_per_m": 0,
+      "modalities": [
+        "text"
+      ],
+      "tools": true
+    },
+    {
+      "id": "apodex/apodex-1.1-mini:free",
+      "context_length": 262144,
+      "input_per_m": 0,
+      "output_per_m": 0,
+      "modalities": [
+        "text"
+      ],
+      "tools": true
+    },
+    {
+      "id": "inclusionai/ling-3.0-flash-sante:free",
+      "context_length": 262144,
+      "input_per_m": 0,
+      "output_per_m": 0,
+      "modalities": [
+        "text"
+      ],
+      "tools": true
+    },
+    {
+      "id": "qwen/qwen3.8-27b:free",
+      "context_length": 262144,
+      "input_per_m": 0,
+      "output_per_m": 0,
+      "modalities": [
+        "text",
+        "image",
+        "video"
+      ],
+      "tools": true
+    },
+    {
+      "id": "poolside/laguna-s-2.1:free",
+      "context_length": 262144,
+      "input_per_m": 0,
+      "output_per_m": 0,
+      "modalities": [
+        "text"
+      ],
+      "tools": true
+    },
+    {
+      "id": "poolside/laguna-xs-2.1:free",
+      "context_length": 262144,
+      "input_per_m": 0,
+      "output_per_m": 0,
+      "modalities": [
+        "text"
+      ],
+      "tools": true
+    },
+    {
+      "id": "google/gemma-4-26b-a4b-it:free",
+      "context_length": 262144,
+      "input_per_m": 0,
+      "output_per_m": 0,
+      "modalities": [
+        "image",
+        "text",
+        "video"
+      ],
+      "tools": true
+    },
+    {
+      "id": "google/gemma-4-31b-it:free",
+      "context_length": 262144,
+      "input_per_m": 0,
+      "output_per_m": 0,
+      "modalities": [
+        "image",
+        "text",
+        "video"
+      ],
+      "tools": true
+    },
+    {
+      "id": "nvidia/nemotron-3-super-120b-a12b:free",
+      "context_length": 262144,
+      "input_per_m": 0,
+      "output_per_m": 0,
+      "modalities": [
+        "text"
+      ],
+      "tools": true
+    },
+    {
+      "id": "cohere/north-mini-code:free",
+      "context_length": 256000,
+      "input_per_m": 0,
+      "output_per_m": 0,
+      "modalities": [
+        "text"
+      ],
+      "tools": true
+    },
+    {
+      "id": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+      "context_length": 256000,
+      "input_per_m": 0,
+      "output_per_m": 0,
+      "modalities": [
+        "text",
+        "audio",
+        "image",
+        "video"
+      ],
+      "tools": true
+    },
+    {
+      "id": "openrouter/free",
+      "context_length": 200000,
+      "input_per_m": 0,
+      "output_per_m": 0,
+      "modalities": [
+        "text",
+        "image"
+      ],
+      "tools": true
+    },
+    {
+      "id": "nvidia/nemotron-3.5-content-safety:free",
+      "context_length": 128000,
+      "input_per_m": 0,
+      "output_per_m": 0,
+      "modalities": [
+        "text",
+        "image"
+      ],
+      "tools": false
+    },
+    {
+      "id": "liquid/lfm-2.5-2.6b:free",
+      "context_length": 65536,
+      "input_per_m": 0,
+      "output_per_m": 0,
+      "modalities": [
+        "text"
+      ],
+      "tools": true
+    }
+  ],
+  "openrouter_cheap": [
+    {
+      "id": "~deepseek/deepseek-flash-latest",
+      "context_length": 1048576,
+      "input_per_m": 0.003,
+      "output_per_m": 2.4,
+      "modalities": [
+        "text",
+        "image"
+      ],
+      "tools": true
+    },
+    {
+      "id": "deepseek/deepseek-v4.1-flash",
+      "context_length": 1048576,
+      "input_per_m": 0.003,
+      "output_per_m": 2.4,
+      "modalities": [
+        "text",
+        "image"
+      ],
+      "tools": true
+    },
+    {
+      "id": "~deepseek/deepseek-v4-flash-latest",
+      "context_length": 1048576,
+      "input_per_m": 0.015,
+      "output_per_m": 1.28,
+      "modalities": [
+        "text"
+      ],
+      "tools": true
+    },
+    {
+      "id": "deepseek/deepseek-v4-flash-0731",
+      "context_length": 1048576,
+      "input_per_m": 0.015,
+      "output_per_m": 1.28,
+      "modalities": [
+        "text"
+      ],
+      "tools": true
+    },
+    {
+      "id": "ibm-granite/granite-4.0-h-micro",
+      "context_length": 131000,
+      "input_per_m": 0.017,
+      "output_per_m": 0.112,
+      "modalities": [
+        "text"
+      ],
+      "tools": false
+    },
+    {
+      "id": "openai/gpt-oss-20b",
+      "context_length": 131072,
+      "input_per_m": 0.018,
+      "output_per_m": 0.09,
+      "modalities": [
+        "text"
+      ],
+      "tools": true
+    },
+    {
+      "id": "mistralai/mistral-nemo",
+      "context_length": 131072,
+      "input_per_m": 0.019,
+      "output_per_m": 0.03,
+      "modalities": [
+        "text"
+      ],
+      "tools": true
+    },
+    {
+      "id": "inclusionai/ling-3.0-flash-vl",
+      "context_length": 262144,
+      "input_per_m": 0.021,
+      "output_per_m": 0.062,
+      "modalities": [
+        "text",
+        "image",
+        "video"
+      ],
+      "tools": true
+    },
+    {
+      "id": "inclusionai/ling-3.0-flash",
+      "context_length": 262144,
+      "input_per_m": 0.021,
+      "output_per_m": 0.063,
+      "modalities": [
+        "text"
+      ],
+      "tools": true
+    },
+    {
+      "id": "deepseek/deepseek-v4-flash",
+      "context_length": 1048576,
+      "input_per_m": 0.023,
+      "output_per_m": 1.28,
+      "modalities": [
+        "text"
+      ],
+      "tools": true
+    },
+    {
+      "id": "z-ai/glm-5.2",
+      "context_length": 1048576,
+      "input_per_m": 0.024,
+      "output_per_m": 16,
+      "modalities": [
+        "text"
+      ],
+      "tools": true
+    },
+    {
+      "id": "openai/gpt-oss-20b:batch",
+      "context_length": 131072,
+      "input_per_m": 0.024,
+      "output_per_m": 0.112,
+      "modalities": [
+        "text"
+      ],
+      "tools": true
+    },
+    {
+      "id": "nex-agi/nex-n2.5-mini",
+      "context_length": 262144,
+      "input_per_m": 0.025,
+      "output_per_m": 0.1,
+      "modalities": [
+        "text",
+        "image"
+      ],
+      "tools": false
+    },
+    {
+      "id": "openai/gpt-5-nano:batch",
+      "context_length": 400000,
+      "input_per_m": 0.025,
+      "output_per_m": 0.2,
+      "modalities": [
+        "text",
+        "image",
+        "file"
+      ],
+      "tools": true
+    },
+    {
+      "id": "meta-llama/llama-3.2-1b-instruct",
+      "context_length": 60000,
+      "input_per_m": 0.027,
+      "output_per_m": 0.201,
+      "modalities": [
+        "text"
+      ],
+      "tools": false
+    }
+  ]
+}
