@@ -133,3 +133,34 @@ jobs:
           # 卸载无残留：desktop 项与二进制随包移除
           ! find /usr/share/applications -iname 'maestro.desktop' | grep -q .
           ! ls /usr/bin/maestro-desktop /usr/bin/maestro-daemon /usr/bin/maestro-rounder 2>/dev/null
+
+  # C7 效果基准集（mock 模式）：10 任务全链跑 + 验收通过率 ≥98% 作门禁
+  # （maestro-bench 退出码 1 = 套件退化 → 本 job 失败）。确定性可复跑
+  # （无 API key、fixture 自带），套件破坏（红绿不变量破、验收退化）当轮暴露。
+  # node 任务验收需 Node ≥18（--test）；git 物化用 runner 预装。
+  benchmark:
+    name: benchmark (ubuntu, mock)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build runner + worker binaries
+        # 显式预构建（runner 主 bin / rounder / bench-worker），避免 ensure_bin
+        # 在 CI 首跑时走兜底自举
+        run: |
+          cargo build -p maestro-daemon --bin maestro-rounder
+          cargo build -p maestro-bench --bins
+      - name: Run benchmark suite (acceptance gate >= 98%)
+        run: cargo run -p maestro-bench -- --report-dir target/bench-report
+      - name: Upload benchmark report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-report
+          path: target/bench-report/
+          if-no-files-found: warn

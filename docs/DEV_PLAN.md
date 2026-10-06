@@ -795,6 +795,7 @@ C1 + C2 + C3 + C4 全部完成 → C5 三端发版演练（一次性验收）
 | ✅ | **mock 全链 runner**（[maestro-bench](../crates/maestro-bench) 新 crate） | 进程内拉起 daemon Core（真实 socket + SystemClock）+ rounder + **bench-worker**（新确定性 worker：claude 方言子集，按 MAESTRO_TASK_ID/cwd 布局定位 solution 真实落盘，2 轮收敛 DONE）；逐任务：物化 fixture（git init）→ TaskCreate → 等终态（超时 TaskCancel 兜底）→ 跑验收 argv → 收 TaskLedger + C6 LedgerSummary；报告 JSON+MD（验收通过率门禁 ≥98% 作退出码，CI 可门禁）；`--task/--suite/--report-dir/--threshold` 参数化，20→N 任务零代码扩展 |
 | ✅ | 测试面 | maestro-bench 3 测试（套件加载一致 / 红绿不变量 / 全链冒烟：done+验收 PASS+轮数+token 计量+ledger_summary）全绿；clippy -D warnings 0 告警；全量 mock 基准实跑 **10/10 PASS 验收率 100%**（每任务 2 轮、1500 in/360 out tok、C6 汇总 cache_hit_pct=28% 链路验证） |
 | ✅ | 平台 C1-7 决策落地 | 决策 33：mock-cli 定 dev-only（仓库/CI 保留，发行包剔除待实施） |
+| ✅ | **Phase 3：CI benchmark job** | ci.yml 新增 `benchmark (ubuntu, mock)`：预构建 rounder/bench-worker 后 `cargo run -p maestro-bench`，**验收通过率 ≥98% 作门禁**（runner 退出码 1 = 套件退化 → job 失败）；报告 artifact（bench-report，失败也收集）。发版触发（tag push 跑批）随 C5-2 挂 release.yml |
 
 验证（第九轮）：本地全绿；**CI 待 push 验证**（新 crate 进 workspace → 三平台 `cargo test --workspace` 直接跑红绿不变量 + 冒烟，node/cargo/git 三平台 runner 均预装）。Windows fs::copy 保留源 mtime 的坑已修（copy 后显式 set_modified，否则 cargo 按 mtime 判「源未变」跳过重编译、绿跑拿旧二进制）。
 
