@@ -10,6 +10,7 @@ use crate::tools;
 use maestro_client::MaestroClient;
 use maestro_protocol::api::Method;
 use serde_json::{json, Value};
+use std::io::Write;
 use std::process::Command;
 use tauri::{AppHandle, Manager, State};
 
@@ -245,16 +246,12 @@ pub async fn task_diff(state: State<'_, AppState>, id: String) -> Result<Value, 
         return unavailable("无 checkpoint（任务未产生快照）".into());
     };
 
-    // stat：--numstat 每行 `ins\tdel\tpath`，二进制为 `-`；quotepath=false 防
-    // CJK 文件名被转义成八进制
-    let numstat = git_out(
-        &workdir,
-        &["-c", "core.quotepath=false", "diff", "--numstat", baseline],
-    )?;
+    // stat/patch：临时 index 三步法（含 untracked、排除 .maestro/ 噪声）
+    let numstat = baseline_workdir_diff(&workdir, baseline, "numstat")?;
     let (files, ins, del) = parse_numstat(&numstat);
 
-    // patch：baseline commit → 工作区（含未提交改动）；按字节钳制 + UTF-8 边界截断
-    let patch_bytes = git_bytes(&workdir, &["diff", "--no-color", baseline])?;
+    let patch_bytes = baseline_workdir_diff(&workdir, baseline, "patch")?
+        .into_bytes();
     let truncated = patch_bytes.len() > MAX_PATCH_BYTES;
     let patch = clamp_utf8(&patch_bytes, MAX_PATCH_BYTES);
 
@@ -326,6 +323,255 @@ fn clamp_utf8(bytes: &[u8], max: usize) -> String {
     s
 }
 
+// ---- C2：hunk 级部分接受 ----
+//
+// 语义：工作区即「全部改动」（默认全接受）。用户逐 hunk 拒绝 →
+// 被拒 hunk 从工作区 reverse-apply 撤销 + 附理由自动转修正任务。
+//
+// 契约：前后端对同一 patch 文本按同一规则解析 hunk ——
+// `diff --git` 分文件、`@@` 分 hunk、全局序号 = 解析顺序（文件序 × hunk 序）。
+
+/// baseline vs 工作区（**含 untracked**）的 diff —— 临时 index 三步法：
+/// `read-tree baseline → add -A → write-tree → diff-tree`。
+/// 直接 `git diff <ref>` 只比 tracked 文件，而 baseline capture 曾
+/// `add -A` 烧入 untracked → 它们在 diff 里全部误报为「删除」（实测：
+/// demo-result.md 明明存在却 +0 −365，reverse apply 撞存活文件）。
+/// GIT_INDEX_FILE 指向临时文件，真 index 零扰动。文件名带纳秒时间戳
+/// —— 同进程并发调用（两个 task_diff 在飞）不得共享临时 index 交叉写。
+fn baseline_workdir_diff(
+    workdir: &str,
+    baseline: &str,
+    mode: &str, // "patch" | "numstat"
+) -> Result<String, String> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = std::env::temp_dir().join(format!("maestro-idx-{}-{nanos}", std::process::id()));
+    let tmp_s = tmp.to_string_lossy().into_owned();
+    let run = |args: &[&str]| -> Result<String, String> {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(workdir)
+            .args(args)
+            .env("GIT_INDEX_FILE", &tmp_s)
+            .output()
+            .map_err(|e| format!("spawn git: {e}"))?;
+        if out.status.success() {
+            Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        } else {
+            Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+        }
+    };
+    let result = (|| {
+        run(&["read-tree", baseline])?;
+        // .maestro/ 是 daemon 运行时数据（任务产物随生命周期增删）—— 排除
+        run(&["add", "-A", "--", ".", ":(exclude).maestro"])?;
+        let now_tree = run(&["write-tree"])?;
+        match mode {
+            "numstat" => run(&[
+                "-c", "core.quotepath=false", "diff-tree", "--no-commit-id",
+                "-r", "--numstat", baseline, &now_tree,
+            ]),
+            _ => run(&[
+                "diff-tree", "--no-commit-id", "-r", "-p", "--no-color",
+                baseline, &now_tree,
+            ]),
+        }
+    })();
+    let _ = std::fs::remove_file(&tmp);
+    result
+}
+
+/// patch 中单个文件段：header（diff --git … --- … +++）+ hunks（@@ 起）
+struct FileDiff {
+    header: Vec<String>,
+    hunks: Vec<String>,
+}
+
+/// 把 unified diff 文本拆成文件段。header 含首个 @@ 前的全部行
+///（diff --git / index / --- / +++ / 新文件模式行等）。
+fn split_patch(patch: &str) -> Vec<FileDiff> {
+    let mut files: Vec<FileDiff> = Vec::new();
+    let mut cur: Option<FileDiff> = None;
+    for line in patch.lines() {
+        if line.starts_with("diff --git ") {
+            if let Some(f) = cur.take() {
+                files.push(f);
+            }
+            cur = Some(FileDiff { header: vec![line.to_string()], hunks: Vec::new() });
+        } else if let Some(f) = cur.as_mut() {
+            if line.starts_with("@@") {
+                f.hunks.push(String::new());
+            }
+            if f.hunks.is_empty() {
+                // @@ 之前都属 header（含二进制文件的 GIT binary patch 段）
+                f.header.push(line.to_string());
+            } else if let Some(last) = f.hunks.last_mut() {
+                last.push_str(line);
+                last.push('\n');
+            }
+        }
+    }
+    if let Some(f) = cur {
+        files.push(f);
+    }
+    files
+}
+
+/// 按全局 hunk 索引拼「拒绝子 patch」：每个含被拒 hunk 的文件保留
+/// 其 header + 被拒 hunk 正文。序号顺序与 split_patch 一致。
+fn build_reject_patch(patch: &str, reject: &[usize]) -> Result<String, String> {
+    if reject.is_empty() {
+        return Err("未选择任何要拒绝的 hunk".into());
+    }
+    let wanted: std::collections::BTreeSet<usize> = reject.iter().copied().collect();
+    let mut out = String::new();
+    let mut idx = 0usize;
+    let mut picked = 0usize;
+    for f in split_patch(patch) {
+        // 文件内被拒的 hunk（按出现顺序）
+        let chosen: Vec<&String> = f
+            .hunks
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| wanted.contains(&(idx + i)))
+            .map(|(_, h)| h)
+            .collect();
+        idx += f.hunks.len();
+        if chosen.is_empty() {
+            continue;
+        }
+        for l in &f.header {
+            out.push_str(l);
+            out.push('\n');
+        }
+        for h in chosen {
+            out.push_str(h);
+            picked += 1;
+        }
+    }
+    if picked != wanted.len() {
+        return Err(format!(
+            "hunk 索引越界：选中 {} 段，实际找到 {} 段（diff 可能已变化，请刷新）",
+            wanted.len(),
+            picked
+        ));
+    }
+    Ok(out)
+}
+
+/// 被拒 hunk 的修正任务 prompt（正文钳制，防巨 diff 打爆上下文）
+fn followup_prompt(task_title: &str, patch: &str, reject: &[usize], reason: &str) -> String {
+    let mut out = format!(
+        "修正任务（源自「{task_title}」被拒绝的改动段）：\n拒绝理由：{reason}\n请按理由重新实现以下改动：\n"
+    );
+    let mut idx = 0usize;
+    let mut picked = 0usize;
+    for f in split_patch(patch) {
+        // 文件路径：+++ b/（b 侧）；删除文件 b 侧为 /dev/null → 回退 --- a/
+        let path = f
+            .header
+            .iter()
+            .find_map(|l| l.strip_prefix("+++ b/"))
+            .or_else(|| {
+                f.header.iter().find_map(|l| l.strip_prefix("--- a/"))
+            })
+            .unwrap_or("(未知文件)");
+        for (i, h) in f.hunks.iter().enumerate() {
+            if reject.contains(&(idx + i)) {
+                let head = h.lines().next().unwrap_or("").to_string();
+                out.push_str(&format!("\n--- {path} {head}\n"));
+                out.push_str(&clamp_utf8(h.as_bytes(), 2_048));
+                out.push('\n');
+                picked += 1;
+            }
+        }
+        idx += f.hunks.len();
+    }
+    if picked == 0 {
+        out.push_str("\n（无具体段落 —— 请按拒绝理由整体复查）");
+    }
+    out
+}
+
+/// task_diff_revert：拒绝所选 hunk —— 从工作区 reverse-apply 撤销 +
+/// 附理由自动转修正任务（同 workdir）一条龙。
+///
+/// `patch` 为**前端展示的 diff 原文**（用户勾选即基于它）：不能在提交时
+/// 重新拉取 —— 查看与提交之间工作区若被并发改动（另一任务写同 workdir），
+/// 重拉的 patch 里同序号可能是别的 hunk → 静默撤销错误内容（apply 照样
+/// 成功，无报错）。以所见原文为准：过期则 git apply --reverse 原子失败，
+/// 大声报错让用户重开 diff。
+#[tauri::command]
+pub async fn task_diff_revert(
+    state: State<'_, AppState>,
+    id: String,
+    hunks: Vec<usize>,
+    reason: String,
+    patch: String,
+) -> Result<Value, String> {
+    if reason.trim().is_empty() {
+        return Err("拒绝理由不能为空".into());
+    }
+    // workdir 定位与 task_diff 一致（apply 目标目录）
+    let task = call(&state, Method::TaskGet, json!({ "task": id }))?;
+    let title = task["title"].as_str().unwrap_or("").to_string();
+    let workdir = task["workdir"].as_str().unwrap_or_default().to_string();
+    if workdir.is_empty() {
+        return Err("任务无 workdir（无可拒绝的变更）".into());
+    }
+    if patch.trim().is_empty() {
+        return Err("diff 内容为空（请重新展开变更明细）".into());
+    }
+
+    // 1. 拼拒绝子 patch（所见原文上的索引；越界/勾空在此报错）
+    let sub = build_reject_patch(&patch, &hunks)?;
+
+    // 2. reverse-apply 撤销（stdin 传 patch；--whitespace=nowarn 防 CJK 尾空格噪声）
+    let apply = Command::new("git")
+        .arg("-C")
+        .arg(&workdir)
+        .args(["apply", "--reverse", "--whitespace=nowarn", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("spawn git apply: {e}"))?;
+    apply
+        .stdin
+        .as_ref()
+        .unwrap()
+        .write_all(sub.as_bytes())
+        .map_err(|e| format!("write patch: {e}"))?;
+    let out = apply.wait_with_output().map_err(|e| format!("wait git: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git apply --reverse 失败（工作区可能已变化）：\n{}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+
+    // 3. 转修正任务（同 workdir；prompt 附被拒 hunk + 理由）
+    let prompt = followup_prompt(&title, &patch, &hunks, reason.trim());
+    let followup = call(
+        &state,
+        Method::TaskCreate,
+        json!({
+            "title": format!("修正: {title}"),
+            "prompt": prompt,
+            "workdir": workdir,
+        }),
+    )?;
+
+    let reverted_files = split_patch(&sub).len();
+    Ok(json!({
+        "reverted_files": reverted_files,
+        "reverted_hunks": hunks.len(),
+        "followup_task": followup["task"]["id"],
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,5 +590,61 @@ mod tests {
         assert!(s.contains("截断"));
         // 未超限原样返回
         assert_eq!(clamp_utf8(b"abc", 10), "abc");
+    }
+
+    fn sample_patch() -> &'static str {
+        "diff --git a/src/a.rs b/src/a.rs\nindex 111..222 100644\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,3 +1,4 @@\n ctx\n-old\n+new\n+added\n@@ -10,2 +11,2 @@\n x\n-y\n+z\ndiff --git a/README.md b/README.md\nindex 333..444 100644\n--- a/README.md\n+++ b/README.md\n@@ -1,1 +1,1 @@\n-hi\n+hello\n"
+    }
+
+    #[test]
+    fn split_patch_files_and_hunks() {
+        let files = split_patch(sample_patch());
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].hunks.len(), 2);
+        assert_eq!(files[1].hunks.len(), 1);
+        // header 到首个 @@ 为止（不含 @@）
+        assert!(files[0].header.iter().all(|l| !l.starts_with("@@")));
+        assert!(files[0].header.iter().any(|l| l.starts_with("+++ b/")));
+        // hunk 正文以 @@ 开头且带尾换行
+        assert!(files[0].hunks[0].starts_with("@@ -1,3 +1,4 @@\n"));
+        assert!(files[0].hunks[1].ends_with('\n'));
+    }
+
+    #[test]
+    fn build_reject_picks_cross_file_hunks() {
+        let p = sample_patch();
+        // 全局序号：a.rs#0 a.rs#1 README#2
+        let sub = build_reject_patch(p, &[1, 2]).unwrap();
+        // 两个文件各取其 header
+        assert_eq!(sub.matches("diff --git").count(), 2);
+        // hunk 头行计数（"@@ … @@" 头行本身含两个 @@ 字面量，须按行首统计）
+        let hunk_heads = sub.lines().filter(|l| l.starts_with("@@")).count();
+        assert_eq!(hunk_heads, 2);
+        assert!(sub.contains("@@ -10,2 +11,2 @@"));
+        assert!(sub.contains("@@ -1,1 +1,1 @@"));
+        // 未选中的 a.rs#0 不得混入
+        assert!(!sub.contains("@@ -1,3 +1,4 @@"));
+    }
+
+    #[test]
+    fn build_reject_out_of_range_and_empty() {
+        let p = sample_patch();
+        assert!(build_reject_patch(p, &[]).is_err());
+        let err = build_reject_patch(p, &[9]).unwrap_err();
+        assert!(err.contains("越界"));
+        // 同 hunk 重复序号按去重计
+        let sub = build_reject_patch(p, &[0, 0]).unwrap();
+        let hunk_heads = sub.lines().filter(|l| l.starts_with("@@")).count();
+        assert_eq!(hunk_heads, 1);
+    }
+
+    #[test]
+    fn followup_prompt_lists_rejected_hunks() {
+        let p = sample_patch();
+        let s = followup_prompt("标题", p, &[2], "风格不对");
+        assert!(s.contains("拒绝理由：风格不对"));
+        assert!(s.contains("README.md"));
+        assert!(s.contains("@@ -1,1 +1,1 @@"));
+        assert!(!s.contains("a.rs"));
     }
 }

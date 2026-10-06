@@ -127,6 +127,13 @@ export interface DiffSummary {
   truncated?: boolean;
 }
 
+/// task_diff_revert 返回：被拒 hunk 已从工作区撤销 + 修正任务已建
+export interface DiffRevertResult {
+  reverted_files: number;
+  reverted_hunks: number;
+  followup_task: string;
+}
+
 /// 引擎状态（daemon_status command 返回）
 export interface DaemonStatus {
   running: boolean;

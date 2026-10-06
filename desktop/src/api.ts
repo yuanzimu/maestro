@@ -5,6 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   CheckpointItem,
   DaemonStatus,
+  DiffRevertResult,
   DiffSummary,
   EmergencyStopResult,
   InboxItem,
@@ -68,6 +69,16 @@ export const rollbackCheckpoint = (task: string, to: string) =>
 // U5 结果卡：变更明细（baseline checkpoint → 工作区，按需加载）
 export const taskDiff = (id: string) =>
   invoke<DiffSummary>("task_diff", { id });
+
+// C2 hunk 级部分接受：拒绝所选 hunk（撤销 + 自动转修正任务一条龙）。
+// patch 必须传「用户所见」的 diff 原文 —— 后端按它拼拒绝子 patch 并
+// reverse-apply；所见原文与工作区不一致时 git apply 原子失败（防静默错撤）
+export const taskDiffRevert = (
+  id: string,
+  hunks: number[],
+  reason: string,
+  patch: string
+) => invoke<DiffRevertResult>("task_diff_revert", { id, hunks, reason, patch });
 
 export const getSettings = () => invoke<Settings>("get_settings");
 export const saveSettings = (settings: Settings) =>

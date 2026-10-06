@@ -736,6 +736,16 @@ C1 + C2 + C3 + C4 全部完成 → C5 三端发版演练（一次性验收）
 
 验证（第三轮）：daemon **105 项全绿**、desktop 4 项（+2）、tsc 0 错；CI push 门（c47fe49）全绿。
 
+第四轮迭代（2026-10-05，C2 hunk 级部分接受）：
+
+| 状态 | 交付 | 说明 |
+|---|---|---|
+| ✅ | **C2 inline diff + hunk 级部分接受**（Sprint C 主干，[commands.rs](../desktop/src-tauri/src/commands.rs) + [ResultCard.tsx](../desktop/src/components/ResultCard.tsx)） | 前后端同契约解析 patch（`diff --git` 分文件 / `@@` 分 hunk / 全局序号）；`task_diff_revert` 一条龙：被拒 hunk 拼子 patch → `git apply --reverse` 撤销 → 同 workdir 自动转修正任务（prompt 附被拒段落 + 理由，2KB/hunk 钳制）；UI 逐 hunk 勾选 + 理由必填 + 拒绝后 diff 自动重载 |
+| ✅ | **untracked diff 误报修复**（U5 遗留 bug） | 根因：baseline capture `add -A` 烧入 untracked，而 `git diff <ref>` 只比 tracked → untracked 文件全部误报「删除」（demo-result.md 存在却 +0 −365，reverse apply 撞存活文件）→ 临时 index 三步法（read-tree baseline → add -A → write-tree → diff-tree），真 index 零扰动；同时排除 `.maestro/` 运行时噪声 |
+| ✅ | 测试面 | desktop 8 单测（+4：split_patch/build_reject 跨文件与越界/followup_prompt）+ GUI 全链路实测脚本 [uitest-c2.cjs](../desktop/scripts/uitest-c2.cjs)（建任务→done→勾选 hunk→拒绝→toast+修正任务卡+diff 重载全 PASS）；done 判定修 `.st.done` class（narrative「第 N 轮完成」含「完成」二字致假阳性） |
+
+验证（第四轮）：desktop 8 项全绿、tsc 0 错、GUI C2 全链路 PASS（零页面错误）。
+
 ### 10.5 模型目录：运行一次即获取免费 / 低价 token 的 API 与模型
 
 > 解决「去哪找不要钱和便宜的模型、在客户端怎么填」的问题。
