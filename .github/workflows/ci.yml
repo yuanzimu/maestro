@@ -108,6 +108,10 @@ jobs:
       - name: Install & verify
         run: |
           DEB="$(find desktop/src-tauri/target/release/bundle/deb -name '*.deb' | head -1)"
+          # realpath 转绝对路径：无 ./ 前缀的相对路径会被 apt 按「包名/版本」
+          # 语法解析（最后斜杠=版本分隔符）→ "Unable to locate package <目录>"。
+          # 本机预演用 $(pwd)/ 前缀未暴露，CI find 返回相对路径首跑即挂（37459589464）
+          DEB="$(realpath "$DEB")"
           echo "installing $DEB"
           sudo apt-get install -y "$DEB"
           # .desktop 元数据（C4-2）：Categories / StartupNotify 落包
