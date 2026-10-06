@@ -903,6 +903,25 @@ impl Core {
             worker: Some(params.worker.clone()),
             usage,
         });
+        // C3 断点续跑锚点：轮完成即快照（= 下一轮起点，含 .maestro session）。
+        // 失败任务 resume 时回滚到最近锚点：已完成轮保留、失败轮半成品随
+        // clean -fd 清除。滚动 GC 最近 3 个（baseline/AcceptancePassed 为
+        // pinned 不受影响）；capture 失败不阻塞轮循环（缺锚点时 resume 退
+        // baseline 或不回滚直接续跑）。
+        {
+            let workdir = std::path::Path::new(&t.task.workdir);
+            if crate::checkpoints::capture(
+                workdir,
+                &params.task,
+                params.round,
+                CpReason::RoundStart,
+                self.ctx.clock.as_ref(),
+            )
+            .is_ok()
+            {
+                let _ = crate::checkpoints::gc(workdir, &params.task, 3);
+            }
+        }
         // 硬预算闸门（v2.5）：本轮入账后聚合花费/耗时，超限即冻结 + 挂起。
         // 挂起后直接返回，worker 已被 SIGSTOP 静止（现场完整，仅手动恢复）。
         if let Some(limit) = self.budget_violation(&params.task) {
@@ -1156,6 +1175,48 @@ impl Core {
             });
             self.try_start_queued();
             return self.ok(req, serde_json::json!({ "requeued": true }));
+        }
+        // C3 v1 断点续跑：failed → 回滚到最近轮锚点（round_start；首轮失败
+        // 退 baseline）后重新入队。锚点快照含 .maestro session，回滚即恢复
+        // 「上一完成轮」完整现场（失败轮半成品清除；pre_rollback 安全垫
+        // 保证可撤销）；respawn 的 rounder 从 session 续接（LLM 记得已完成
+        // 轮），只重做失败轮 —— 已完成部分保留。
+        if t.state == WorkerState::Failed {
+            if !self.slots_free() || self.workdir_occupied(&t.task.workdir) {
+                return self.err(req, -409, "no free slot for respawn");
+            }
+            let workdir = std::path::Path::new(&t.task.workdir);
+            // 最近 round_start 锚点；无（首轮失败 / 锚点 capture 曾失败）退 baseline
+            let anchor = crate::checkpoints::list(workdir, task)
+                .into_iter()
+                .filter(|c| {
+                    matches!(c.reason, Some(CpReason::RoundStart) | Some(CpReason::Baseline))
+                })
+                .max_by_key(|c| c.seq);
+            let mut rolled_back = false;
+            if let Some(cp) = anchor {
+                // restore 失败不阻塞续跑（无锚点语义：worker 自行清理失败轮残留）
+                rolled_back = crate::checkpoints::restore(
+                    workdir,
+                    task,
+                    &CheckpointRef::new(cp.full_ref.clone()),
+                    self.ctx.clock.as_ref(),
+                )
+                .is_ok();
+            }
+            self.ctx.publish(Event::TaskRequeued {
+                task: task.clone(),
+                from_kind: None,
+            });
+            self.try_start_queued();
+            return self.ok(
+                req,
+                serde_json::json!({
+                    "requeued": true,
+                    "resumed_from": "failed",
+                    "rolled_back": rolled_back,
+                }),
+            );
         }
         if t.state != WorkerState::Suspended {
             return self.err(req, -409, "task not suspended");
@@ -1882,5 +1943,201 @@ mod tests {
         let memory = std::fs::read_to_string(wd.join("MAESTRO_MEMORY.md")).unwrap();
         assert!(memory.contains("[👍] t-1"));
         assert!(memory.contains("（无备注）"));
+    }
+
+    // -------------------------------------------------------------------------
+    // C3 断点续跑 v1
+    // -------------------------------------------------------------------------
+
+    /// 测试用 git 仓库 workdir（checkpoint 依赖 git plumbing）
+    fn git_wd(tmp: &std::path::Path) -> std::path::PathBuf {
+        let wd = tmp.join("wd");
+        std::fs::create_dir_all(&wd).unwrap();
+        let g = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&wd)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        g(&["init", "-q"]);
+        g(&["config", "user.email", "t@t"]);
+        g(&["config", "user.name", "t"]);
+        g(&["commit", "--allow-empty", "-q", "-m", "init"]);
+        wd
+    }
+
+    /// spawn 必败的配置（worker_program 指向不存在的二进制）—— 单测只验证
+    /// requeue/回滚语义，spawn 机制另有覆盖；必败让三平台行为确定一致。
+    fn cfg_spawn_fail(dir: &std::path::Path) -> CoreConfig {
+        let mut cfg = cfg_for(dir);
+        cfg.worker_program = "maestro-test-no-such-binary".into();
+        cfg
+    }
+
+    /// 建任务 + 起跑（直接 publish，绕过 api_task_create 的真实 spawn）
+    fn mk_working_task(c: &mut Core, id: &str, workdir: &std::path::Path) {
+        c.ctx.publish(Event::TaskCreated {
+            task: Task {
+                id: TaskId::new(id),
+                title: "t".into(),
+                workdir: workdir.display().to_string(),
+                created_at: 0,
+            },
+            prompt: "p".into(),
+        });
+        c.ctx.publish(Event::TaskStarted {
+            task: TaskId::new(id),
+            worker: WorkerId::new("w-1"),
+        });
+    }
+
+    fn round_report_ok(c: &mut Core, id: &str, round: u32) {
+        let resp = c.handle_api(Request {
+            id: "r".into(),
+            method: Method::TaskRoundReport,
+            params: serde_json::json!({
+                "task": id, "worker": "w-1", "round": round,
+                "input_tokens": 10, "output_tokens": 5,
+            }),
+        });
+        assert!(
+            matches!(resp, Response::Ok { .. }),
+            "round_report({round}) 应成功"
+        );
+    }
+
+    /// C3 锚点：每轮 round_report 落 RoundStart checkpoint，滚动 GC 最近 3 个
+    #[test]
+    fn round_report_captures_round_start_anchor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wd = git_wd(tmp.path());
+        let clock = Arc::new(SystemClock);
+        let mut c = Core::new(cfg_spawn_fail(tmp.path()), clock.clone());
+        let t = TaskId::new("t-1");
+        mk_working_task(&mut c, "t-1", &wd);
+
+        for r in 1..=5 {
+            round_report_ok(&mut c, "t-1", r);
+        }
+        let cps = crate::checkpoints::list(&wd, &t);
+        let rs: Vec<_> = cps.iter().filter(|c| c.reason == Some(CpReason::RoundStart)).collect();
+        assert_eq!(rs.len(), 3, "滚动 GC 后应只剩最近 3 个锚点: {cps:?}");
+        assert_eq!(
+            rs.iter().map(|c| c.seq).max().unwrap(),
+            cps.iter().map(|c| c.seq).max().unwrap(),
+            "最近锚点应为全任务最新 checkpoint"
+        );
+    }
+
+    /// C3 断点续跑主径：failed → resume 回滚到最近轮锚点（已完成轮工作 +
+    /// .maestro session 一并恢复），失败轮半成品清除，任务重新入队。
+    #[test]
+    fn resume_failed_rolls_back_to_anchor_and_requeues() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wd = git_wd(tmp.path());
+        let clock = Arc::new(SystemClock);
+        let mut c = Core::new(cfg_spawn_fail(tmp.path()), clock.clone());
+        let t = TaskId::new("t-1");
+        mk_working_task(&mut c, "t-1", &wd);
+
+        // 第 1 轮完成：a.txt=v1 + session=sid-1 → round_report 落锚点
+        std::fs::write(wd.join("a.txt"), "v1").unwrap();
+        let sdir = wd.join(".maestro").join(crate::taskstate::dir_name("t-1"));
+        std::fs::create_dir_all(&sdir).unwrap();
+        std::fs::write(sdir.join("session"), "sid-1").unwrap();
+        round_report_ok(&mut c, "t-1", 1);
+
+        // 第 2 轮失败：留下半成品（a.txt 改坏 + junk.txt + session 漂移）
+        std::fs::write(wd.join("a.txt"), "v2-broken").unwrap();
+        std::fs::write(wd.join("junk.txt"), "half-done").unwrap();
+        std::fs::write(sdir.join("session"), "sid-2-broken").unwrap();
+        c.ctx.publish(Event::TaskFailed {
+            task: t.clone(),
+            worker: WorkerId::new("w-1"),
+            error: "boom".into(),
+        });
+
+        // 断点续跑：resume 放行 failed
+        let resp = c.handle_api(Request {
+            id: "r".into(),
+            method: Method::TaskResume,
+            params: serde_json::json!({ "task": "t-1" }),
+        });
+        let Response::Ok { result, .. } = resp else {
+            panic!("failed 任务 resume 应放行（C3 v1）");
+        };
+        assert_eq!(result["resumed_from"], "failed");
+        assert_eq!(result["rolled_back"], true, "有锚点应已回滚");
+
+        // 失败轮半成品已清除，第 1 轮成果完整保留
+        assert_eq!(
+            std::fs::read_to_string(wd.join("a.txt")).unwrap(),
+            "v1",
+            "已修改文件应回滚到锚点内容"
+        );
+        assert!(!wd.join("junk.txt").exists(), "失败轮 untracked 半成品应被 clean -fd 清除");
+        assert_eq!(
+            std::fs::read_to_string(sdir.join("session")).unwrap(),
+            "sid-1",
+            "session 应回滚到锚点（上一完成轮），respawn 从此续接"
+        );
+
+        // 重新入队已入账（事件流为证；spawn 必败会再次 TaskFailed，不影响本断言）
+        let envs = c
+            .event_store_handle()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .replay_all();
+        assert!(
+            envs.iter()
+                .any(|e| matches!(&e.event, Event::TaskRequeued { task, from_kind: None } if task == &t)),
+            "应发布 TaskRequeued（from_kind=None）"
+        );
+    }
+
+    /// C3 边界：非 git workdir（无锚点可用）→ 不回滚但照常重新入队
+    #[test]
+    fn resume_failed_without_anchor_still_requeues() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wd = tmp.path().join("wd");
+        std::fs::create_dir_all(&wd).unwrap();
+        let clock = Arc::new(SystemClock);
+        let mut c = Core::new(cfg_spawn_fail(tmp.path()), clock.clone());
+        let t = TaskId::new("t-1");
+        mk_working_task(&mut c, "t-1", &wd);
+        c.ctx.publish(Event::TaskFailed {
+            task: t.clone(),
+            worker: WorkerId::new("w-1"),
+            error: "boom".into(),
+        });
+
+        let resp = c.handle_api(Request {
+            id: "r".into(),
+            method: Method::TaskResume,
+            params: serde_json::json!({ "task": "t-1" }),
+        });
+        let Response::Ok { result, .. } = resp else {
+            panic!("无锚点也应放行续跑（worker 自行清理残留）");
+        };
+        assert_eq!(result["rolled_back"], false);
+        let envs = c
+            .event_store_handle()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .replay_all();
+        assert!(
+            envs.iter()
+                .any(|e| matches!(&e.event, Event::TaskRequeued { task, .. } if task == &t)),
+            "无锚点也应重新入队"
+        );
     }
 }

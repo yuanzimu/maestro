@@ -756,6 +756,16 @@ C1 + C2 + C3 + C4 全部完成 → C5 三端发版演练（一次性验收）
 
 验证（第五轮）：daemon **106 项全绿**（+1）、desktop 8 项全绿零警告、tsc 0 错、GUI C5 反馈流 9/9 PASS。
 
+第六轮迭代（2026-10-06，C3 断点续跑 v1）：
+
+| 状态 | 交付 | 说明 |
+|---|---|---|
+| ✅ | **C3 断点续跑 v1**（U6，[core.rs](../crates/maestro-daemon/src/core.rs)） | 轮完成即落 `RoundStart` 锚点（含 .maestro session；滚动 GC 最近 3 个，pinned 不受影响）；`api_resume` 放行 Failed：回滚到最近锚点（无则退 baseline；restore 自带 pre_rollback 安全垫可撤销）→ `TaskRequeued` 重新入队 → respawn 的 rounder 从 session 续接（LLM 记得已完成轮），**只重做失败轮、已完成部分保留**；无锚点（非 git workdir）不回滚照常续跑。GUI 零改动——failed 卡既有「▶ 重跑」按钮从 409 拒绝变为真正可用 |
+| ✅ | 测试面 | daemon +3：锚点滚动 GC / 主径回滚（失败轮半成品清除 + session 恢复到上一完成轮 + TaskRequeued 入账）/ 无锚点边界；daemon **109 项全绿**、workspace 0 失败、clippy 零告警 |
+| ✅ | 事故沉淀 | Actions 配额预检脚本 + SKILL 步骤 0（spending limit 掐断 CI 零日志秒失败的实证）；仓库转公开后 CI 免费不限量 |
+
+验证（第六轮）：daemon 109 全绿（+3）、clippy 0 告警；CI 待 push 验证（e2e 盲区：rounder 续接语义需 ubuntu/macOS e2e 收尾确认）。
+
 ### 10.5 模型目录：运行一次即获取免费 / 低价 token 的 API 与模型
 
 > 解决「去哪找不要钱和便宜的模型、在客户端怎么填」的问题。
