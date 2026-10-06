@@ -23,6 +23,18 @@ description: "Maestro Windows 客户端的同步-审计-构建-测试-发布闭�
 - **PowerShell 5.1 坑**：不支持 `&&`/heredoc；脚本必须 **ASCII-only**（无 BOM，中文注释会被按 GBK 误读吞换行）；commit message 用 `-F <file>`，不要内联多行。
 - **Wire 协议**：daemon 是**裸 TCP + 换行 JSON**，不是 HTTP（PowerShell `Invoke-RestMethod`/Node `http` 都会报协议错）；测试用 Node `net` 直连。
 
+## 步骤 0：Actions 额度预检（跑任何 dry-run / 触发 CI 前）
+
+私有仓库 Actions 按倍率计费（Linux 1x / Windows 2x / **macOS 10x**），免费版每月仅含 2000 分钟；烧尽且 spending limit 为 0 时 job **全部零日志秒失败**（2026-10-06 实证，annotation 报 "spending limit needs to be increased"）。一次三平台 dry-run ≈ 100~200 计费分钟。
+
+```powershell
+& "C:\Users\a1234\node-v22.14.0-win-arm64\node.exe" tools\check-actions-quota.cjs
+```
+
+- 退出码 1 = 额度不足，**先停手**：到 Billing & plans 提高 spending limit / 结清欠费，或临时转公开仓库（公共仓库免费），再重跑。
+- 估算模式比实际偏低约两成（实证：估算 1601 时已被掐）——数字贴阈值时按不足处理，可 `--min-left 400` 提高门槛。
+- 令牌加 `admin:billing` scope 后自动切 billing API 权威模式（当前 404 = 缺 scope）。
+
 ## 步骤 1：同步远程
 
 ```powershell
