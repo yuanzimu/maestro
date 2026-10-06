@@ -229,6 +229,53 @@ pub async fn probe_worker(state: State<'_, AppState>) -> Result<Value, String> {
     }))
 }
 
+// ---- C4-1/C4-3：托盘与全局快捷键状态（挂载后查询；setup 期 emit 会早于
+//      React listen() 注册而丢失 —— bridge_ready 同款教训）----
+
+/// 三态：None = 未注册（setup 未跑完）；Some(Ok) / Some(Err)
+fn shortcut_error() -> &'static std::sync::Mutex<Option<Option<String>>> {
+    static E: std::sync::OnceLock<std::sync::Mutex<Option<Option<String>>>> =
+        std::sync::OnceLock::new();
+    E.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+pub fn set_shortcut_ok() {
+    *shortcut_error().lock().unwrap() = Some(None);
+}
+
+pub fn set_shortcut_degraded(msg: String) {
+    *shortcut_error().lock().unwrap() = Some(Some(msg));
+}
+
+/// 托盘是否可用（C4-1）：不可用时关窗 = 退出（daemon 独立进程，任务照跑）。
+/// 前端挂载后查询一次，给用户降级提示。
+#[tauri::command]
+pub async fn tray_status() -> Result<Value, String> {
+    Ok(json!({ "available": crate::tray::is_available() }))
+}
+
+/// Alt+M 注册结果。设置页据此展示：
+/// - registered：显示可用
+/// - !registered + wayland：引导用系统自定义快捷键（应用级注册在 Wayland 无协议支持）
+/// - !registered + 其他错误：显示错误原文（排障）
+#[tauri::command]
+pub async fn shortcut_status() -> Result<Value, String> {
+    let guard = shortcut_error().lock().unwrap().clone();
+    let (registered, error) = match guard {
+        Some(None) => (true, None),
+        Some(Some(e)) => (false, Some(e)),
+        None => (false, None), // setup 未及注册（理论不可达：setup 先于任何 command）
+    };
+    let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some()
+        || std::env::var_os("XDG_SESSION_TYPE").map(|v| v == "wayland").unwrap_or(false);
+    Ok(json!({
+        "shortcut": "Alt+M",
+        "registered": registered,
+        "error": error,
+        "wayland": wayland,
+    }))
+}
+
 // ---- U5 结果卡：变更明细（task_diff）----
 
 /// diff 钳制上限：结果卡 inline 展示，超长截断（完整内容看工作区 git）

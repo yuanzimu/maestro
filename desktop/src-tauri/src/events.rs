@@ -90,17 +90,17 @@ pub fn spawn_poller(app: tauri::AppHandle) {
                 .ok();
             let tasks = client
                 .call("poll-tasks", Method::TaskList, serde_json::json!({}))
-                .and_then(|v| Ok(v["tasks"].clone()))
+                .map(|v| v["tasks"].clone())
                 .unwrap_or(serde_json::json!([]));
             let inbox = client
                 .call("poll-inbox", Method::InboxList, serde_json::json!({}))
-                .and_then(|v| Ok(v["items"].clone()))
+                .map(|v| v["items"].clone())
                 .unwrap_or(serde_json::json!([]));
             // C3-3：未读数进托盘收件箱项（复用本就存在的 5s 轮询，不新增）
             crate::tray::set_unread(&app, inbox.as_array().map(|a| a.len()).unwrap_or(0));
             let workers = client
                 .call("poll-workers", Method::WorkerList, serde_json::json!({}))
-                .and_then(|v| Ok(v["workers"].clone()))
+                .map(|v| v["workers"].clone())
                 .unwrap_or(serde_json::json!([]));
             // 注意：不动 last_seq —— 它是事件桥的消费游标，poller 乱推进会
             // 导致 bridge 重连时跳过未消费事件（sync 快照已兜住 UI 状态）

@@ -21,6 +21,20 @@ export default function App() {
   stateRef.current = state;
 
   useEffect(() => {
+    // C4-1 降级提示：无托盘宿主（精简 WM）时告知关窗语义变化（引擎照跑）。
+    // setup 阶段 emit 的事件早于 React listen() 注册会丢 —— 改为挂载后主动查询
+    api.trayStatus().then(
+      (t) => {
+        if (!t.available) {
+          dispatch({
+            type: "toast",
+            kind: "err",
+            text: "未检测到系统托盘：关闭窗口将退出指挥台（引擎与任务继续运行，重开窗口自动接上现场）",
+          });
+        }
+      },
+      () => undefined
+    );
     const un = listen<{ action: string }>("maestro://tray", (e) => {
       const st = stateRef.current;
       switch (e.payload.action) {

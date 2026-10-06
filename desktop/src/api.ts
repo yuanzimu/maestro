@@ -18,6 +18,8 @@ import type {
   TaskSummary,
   WorkerItem,
   WorkerProbe,
+  ShortcutStatus,
+  TrayStatus,
 } from "./types";
 
 export const getDaemonStatus = () =>
@@ -98,3 +100,9 @@ export const saveSettings = (settings: Settings) =>
   invoke<void>("save_settings", { settings });
 
 export const probeWorker = () => invoke<WorkerProbe>("probe_worker");
+
+// C4-3：Alt+M 注册结果（设置页展示 + Wayland 引导）
+export const shortcutStatus = () => invoke<ShortcutStatus>("shortcut_status");
+
+// C4-1：托盘可用性（挂载后查询一次，降级提示）
+export const trayStatus = () => invoke<TrayStatus>("tray_status");

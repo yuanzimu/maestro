@@ -44,6 +44,15 @@
         "installMode": "currentUser",
         "languages": ["SimpChinese", "English"]
       }
+    },
+    "linux": {
+      "deb": {
+        "desktopTemplate": "./bundle/linux/desktop-template.desktop"
+      },
+      "rpm": {
+        "depends": ["libwebkit2gtk-4.1-0", "gtk3"],
+        "desktopTemplate": "./bundle/linux/desktop-template.desktop"
+      }
     }
   }
 }

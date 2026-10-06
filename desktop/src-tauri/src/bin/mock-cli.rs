@@ -30,8 +30,8 @@ fn main() {
                 }
             }
             "--resume" => {
-                if i + 1 < args.len() {
-                    resume = Some(args[i + 1].clone());
+                resume = (i + 1 < args.len()).then(|| args[i + 1].clone());
+                if resume.is_some() {
                     i += 1;
                 }
             }
@@ -94,7 +94,7 @@ fn main() {
         r#"{{"type":"system","subtype":"init","session_id":"{sid}","model":"{model}"}}"#
     );
     // 工具调用（U3 叙事素材：RoundProgress.tools_used）
-    let tool = if no_output { "Think" } else if round % 2 == 0 { "Edit" } else { "Write" };
+    let tool = if no_output { "Think" } else if round.is_multiple_of(2) { "Edit" } else { "Write" };
     let _ = writeln!(
         out,
         r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","name":"{tool}","id":"tu_{round}"}}]}}}}"#

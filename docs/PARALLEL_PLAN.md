@@ -13,6 +13,7 @@
 | C0 发布基建 + C1 Windows 真冻结（平台面） | windows-sys Job Objects 真冻结/整组终止/两级关闭 + CI windows test 转正 + release.yml dry-run 三平台全绿 |
 | C3 托盘（平台面，三端共享） | tray.rs：菜单六项 + 关窗到托盘 + 事件驱动角标 |
 | 版本 v0.2.4 安装包 + CCR 网关 + 模型目录 | 见 Release 与 docs/MODEL_CATALOG.md |
+| Linux 端 C4 代码面（C4-1/2/3 降级与集成 + CI deb 冒烟） | XDG 数据目录修复、托盘 Result 化 + 关窗降级分支、单实例、.desktop 模板 + deb/rpm depends、Alt+M + Wayland 设置页引导、ci.yml bundle-smoke-linux；实测面（GNOME/KDE、fcitx5、三形态全链）留手动清单 —— DEV_PLAN 第七轮 |
 | 测试基线 | workspace 全量 0 失败；CI 三平台 6 job 全绿（37409164137） |
 
 ## 二、三端任务分配

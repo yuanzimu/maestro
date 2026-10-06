@@ -5,16 +5,40 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// 应用数据根：`%APPDATA%\maestro-desktop\`（dev 构建加 `-dev` 隔离）
+/// 应用数据根（C4-1 前置，Linux XDG 修复）：
+/// - Windows：`%APPDATA%\maestro-desktop\`
+/// - Linux：`$XDG_DATA_HOME/maestro-desktop`，未设则 `~/.local/share/maestro-desktop`
+///   （原实现只有 APPDATA 分支，Linux 上落到系统临时目录 —— 磁盘清理会
+///   清空事件库，正是 data_dir 注释里点名要避开的场景）
+/// - macOS：`~/Library/Application Support/maestro-desktop`
+///
+/// dev 构建加 `-dev` 隔离。
 pub fn app_root() -> PathBuf {
-    let base = std::env::var("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::temp_dir());
     let name = if cfg!(debug_assertions) {
         "maestro-desktop-dev"
     } else {
         "maestro-desktop"
     };
+    if cfg!(target_os = "macos") {
+        let base = std::env::var_os("HOME")
+            .map(|h| PathBuf::from(h).join("Library/Application Support"))
+            .unwrap_or_else(std::env::temp_dir);
+        return base.join(name);
+    }
+    if cfg!(windows) {
+        let base = std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        return base.join(name);
+    }
+    // Linux（及其余 Unix）：XDG Base Directory
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share"))
+        })
+        .unwrap_or_else(std::env::temp_dir);
     base.join(name)
 }
 

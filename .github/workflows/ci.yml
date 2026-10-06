@@ -78,3 +78,54 @@ jobs:
       - name: Test
         # --no-fail-fast：一次暴露该平台全部失败（而非一轮修一个）
         run: cargo test --workspace --no-fail-fast
+
+  # C5-3 前置（Linux C4-2 冒烟）：deb 安装包「装得上、桌面项正确、卸得干净」。
+  # 只在 push master 跑（PR 走 build+clippy 已覆盖编译面；bundle 全链耗时较长）。
+  # AppImage 全链（无 FUSE 提取指引）与 rpm 实机验证属 C4-5 手动实测范围。
+  bundle-smoke-linux:
+    name: bundle smoke (ubuntu, deb)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            desktop/src-tauri
+      - name: Install GUI build deps (webkit2gtk 4.1)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf
+      - name: Build deb bundle
+        run: |
+          cd desktop
+          npm ci
+          ./scripts/build-linux.sh deb
+      - name: Install & verify
+        run: |
+          DEB="$(find desktop/src-tauri/target/release/bundle/deb -name '*.deb' | head -1)"
+          echo "installing $DEB"
+          sudo apt-get install -y "$DEB"
+          # .desktop 元数据（C4-2）：Categories / StartupNotify 落包
+          DESKTOP="$(find /usr/share/applications -iname 'maestro.desktop' | head -1)"
+          echo "desktop file: $DESKTOP"
+          test -n "$DESKTOP"
+          grep -q '^StartupNotify=true$' "$DESKTOP"
+          grep -q '^Categories=.*Development' "$DESKTOP"
+          # 主二进制可执行（版本自检，不起 GUI —— runner 无显示服务器）。
+          # 主程序名 = cargo 产物名 maestro-desktop（productName 只进包名/菜单）
+          test -x /usr/bin/maestro-desktop && /usr/bin/maestro-desktop --version
+          # sidecar 裸名同目录落包（tools.rs resolve_tool 第二候选命中）
+          test -x /usr/bin/maestro-daemon && test -x /usr/bin/maestro-rounder
+          # 依赖解析干净（deb depends 声明有效性）
+          dpkg -s maestro | grep -E '^Status: install ok installed$'
+      - name: Uninstall & verify clean
+        run: |
+          sudo dpkg -r maestro
+          # 卸载无残留：desktop 项与二进制随包移除
+          ! find /usr/share/applications -iname 'maestro.desktop' | grep -q .
+          ! ls /usr/bin/maestro-desktop /usr/bin/maestro-daemon /usr/bin/maestro-rounder 2>/dev/null

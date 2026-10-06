@@ -1,7 +1,7 @@
 [package]
 name = "maestro-desktop"
 version = "0.2.4"
-description = "Maestro 桌面指挥台（Windows 客户端）"
+description = "Maestro 桌面指挥台"
 edition = "2021"
 license = "Apache-2.0"
 default-run = "maestro-desktop"
@@ -16,6 +16,10 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 # tray-icon（Sprint C C3-1）：托盘常驻 —— 关窗最小化、菜单动作、状态角标
 tauri = { version = "2", features = ["tray-icon"] }
+# 单实例（C4-2）：二次启动唤起既有窗口（Linux 桌面菜单重复点击常态）
+tauri-plugin-single-instance = "2"
+# 全局快捷键（C4-3）：Alt+M 唤起/藏窗口；Wayland 无协议 → 降级引导
+tauri-plugin-global-shortcut = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 maestro-protocol = { path = "../../crates/maestro-protocol" }

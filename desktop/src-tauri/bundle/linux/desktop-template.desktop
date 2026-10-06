@@ -1,0 +1,12 @@
+# C4-2 .desktop 元数据收尾：Categories/StartupNotify/Comment 显式声明。
+# 变量为 tauri-bundler Handlebars 约定：name/comment/exec/icon。
+# 单实例由应用内 tauri-plugin-single-instance 保证（.desktop 无对应规范字段）。
+[Desktop Entry]
+Type=Application
+Name={{name}}
+Exec={{exec}}
+Terminal=false
+StartupNotify=true
+Categories=Utility;Development;
+Comment={{comment}}
+Icon={{icon}}

@@ -122,8 +122,10 @@ mod tests {
             assert_eq!(path_entries("/usr/bin"), vec!["/usr/bin"]);
         } else {
             assert_eq!(path_entries("a:b::c"), vec!["a", "b", "c"]);
-            // Windows 形态在 Unix 是单一路径（含分号），不误拆
-            assert_eq!(path_entries("C:\\bin"), vec!["C:\\bin"]);
+            // Windows 分号列表在 Unix 是单一路径，不误拆。样例须不含盘符
+            // 冒号 —— `C:\...` 的冒号在 Unix 恰是分隔符必被拆（此前该断言
+            // 只在 Windows 分支跑过，Linux 首跑即挂）
+            assert_eq!(path_entries("\\\\srv\\share;\\\\srv2\\sh2"), vec!["\\\\srv\\share;\\\\srv2\\sh2"]);
         }
     }
 }

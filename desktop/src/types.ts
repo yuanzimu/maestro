@@ -181,3 +181,18 @@ export interface WorkerProbe {
   mock_path: string;
   data_dir: string;
 }
+
+/// C4-3 全局快捷键状态（shortcut_status command 返回）：
+/// Wayland 下应用级注册无协议支持 → registered=false + 引导文案
+export interface ShortcutStatus {
+  shortcut: string;
+  registered: boolean;
+  error: string | null;
+  wayland: boolean;
+}
+
+/// C4-1 托盘可用性（tray_status command 返回）：
+/// 不可用时关窗 = 退出（daemon 独立进程，任务照跑）
+export interface TrayStatus {
+  available: boolean;
+}

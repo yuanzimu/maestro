@@ -715,7 +715,7 @@ C1 + C2 + C3 + C4 全部完成 → C5 三端发版演练（一次性验收）
 | ✅ | C3-1~C3-3 [tray.rs](../desktop/src-tauri/src/tray.rs) + [lib.rs](../desktop/src-tauri/src/lib.rs) + [events.rs](../desktop/src-tauri/src/events.rs) | tray-icon feature 托盘常驻：菜单六项 + 左键恢复；关窗 = prevent_close + hide（任务照跑）；急停态/未读数随事件桥与既有 poller 刷新（无新增轮询），菜单动作经 `maestro://tray` 交前端复用确认流 |
 | ✅ | C3-4 [tools.rs](../desktop/src-tauri/src/tools.rs) | 后缀/PATH 分隔符/claude 候选按平台分支（triple 候选在前）；dev 布局双候选目录探测；+2 单测 |
 | ⬜ | C2 全部（macOS 签名/公证/universal） | 需 Apple 凭据 + Mac 侧执行（C0-2 模板已含 notarytool 三元组占位）；**由 macOS 端另行开发** |
-| ⬜ | C4 Linux 收尾 | **由 Linux 端另行开发**（SNI 托盘在 Tauri 壳由 C3 共享覆盖大半，实测项留 C4） |
+| 🔶 | C4 Linux 收尾 | **代码面已交付**（第七轮，2026-10-06）：XDG 数据目录 / 托盘优雅降级 / 单实例 / .desktop 元数据 + deb/rpm 依赖 / Alt+M + Wayland 引导 / CI deb 冒烟（详见「第七轮迭代」小节）；**实测面留 Linux 端手动清单**：GNOME/KDE SNI 实测（C4-1）、X11/Wayland Alt+M 实测（C4-3）、fcitx5（C4-4）、三形态全链（C4-5） |
 | ⬜ | C5 三端发版演练 | 依赖 C2/C4 完成后跨端总验 |
 
 验证（第一轮）：daemon **103 项全绿**（含 5 个新进程面测试）、workspace 全量 **126 项 0 失败**、clippy 零告警。`test-cross` 的 windows job 现在能跑到 worker 进程面测试（此前 cfg 门控下为空转）。
@@ -786,6 +786,22 @@ C1 + C2 + C3 + C4 全部完成 → C5 三端发版演练（一次性验收）
 | ✅ | 测试面 | daemon +2（聚合与 30 天窗口双场景：SystemClock 真实 ts 全在窗口内 / 远未来 FixedClock via recover 全在窗口外；空账本 null 安全）→ **114 全绿**；clippy 0 告警；desktop 8 单测 + tsc 0 错；GUI [uitest-c6.cjs](../desktop/scripts/uitest-c6.cjs)：完成 toast 带花费 + 徽标行为（0% 时正确隐藏）PASS |
 
 验证（第八轮）：daemon 114 全绿、clippy 0 告警、desktop 8 + tsc 0 错、GUI C6 PASS；CI 待 push 验证（e2e 盲区惯例）。
+
+第七轮迭代（2026-10-06，Linux 端 C4 收尾·代码面）：
+
+| 状态 | 交付 | 说明 |
+|---|---|---|
+| ✅ | **C4-1 前置：XDG 数据目录**（[state.rs](../desktop/src-tauri/src/state.rs)） | `app_root()` 原只有 APPDATA 分支，Linux 落系统临时目录（磁盘清理清空事件库，正是注释点名要避开的场景）→ 三平台分支：Win APPDATA / Linux `$XDG_DATA_HOME`→`~/.local/share` / mac `Application Support` |
+| ✅ | **C4-1 优雅降级**（[tray.rs](../desktop/src-tauri/src/tray.rs) + lib.rs） | build 全链 Result 化（原 `.expect` 在无 DBus/SNI 宿主 = 启动即崩）；失败 eprintln + `maestro://tray-degraded` 事件；`is_available()` 关窗分支：无托盘不拦截关闭（daemon 独立 sidecar，任务照跑承诺不破）；前端挂载后 `tray_status` 查询给降级 toast（setup 期 emit 早于 React listen 会丢——bridge_ready 同款教训）。裸 Xvfb（无 SNI 宿主）实测：启动无 panic |
+| ✅ | **C4-2 .desktop 元数据 + deb/rpm 依赖**（tauri.conf linux 段 + desktop 模板） | deb `depends` 由 bundler **自动注入**（libwebkit2gtk-4.1-0/libgtk-3-0/libayatana-appindicator3-1——手动声明会重复，实测后移除）；rpm 无自动注入 → 显式 `depends`（gtk3 等）；[desktop-template.desktop](../desktop/src-tauri/bundle/linux/desktop-template.desktop)：Categories=Utility;Development + StartupNotify；单实例走插件（见下行）；main.rs `--version` 短路（headless CI/SSH 探针，否则 GTK init 即挂）。**deb/rpm 双包本机实证**（6.53 MiB）：deb 装→元数据断言→GUI 全链（/usr/bin 布局拉起 daemon + XDG 数据目录落盘）→卸载无残留；rpm requires/文件清单核验 |
+| ✅ | **C4-2 单实例**（tauri-plugin-single-instance） | 二次启动唤起既有窗口（Linux 桌面菜单重复点击常态；也是托盘静默不可见时窗口找回路径——与 Alt+M 互为兜底） |
+| ✅ | **C4-3 Alt+M 全局快捷键 + Wayland 引导**（lib.rs + commands.rs + SettingsDialog） | tauri-plugin-global-shortcut `on_shortcut` 注册失败可捕获（不静默）：`shortcut_status` command 返回 registered/error/wayland 三元信息；设置页「全局快捷键」区块：已注册展示可用，Wayland 未注册给「系统设置→键盘→自定义快捷键绑定 maestro-desktop」引导（deb/rpm 安装形态的命令名），其他错误展示原文；Xvfb（X11）下 GUI 常驻无报错 |
+| ✅ | **CI deb 冒烟**（[ci.yml](../../.github/workflows/ci.yml) bundle-smoke-linux，C5-3 前置） | push master 触发：build-linux.sh 出 deb → apt 安装 → .desktop 元数据断言（StartupNotify/Categories）+ `/usr/bin/maestro-desktop --version` + sidecar 落包断言 + dpkg 状态 → 卸载后无残留；**断言集已在本机全量预演通过**。AppImage 无 FUSE 指引与 rpm 实机装跑留 C4-5 手动实测 |
+| ✅ | 既有跨平台 bug 修复 | tools.rs `path_split_filters_empty` 的 Unix 分支断言 `C:\bin` 不拆——盘符冒号在 Unix 恰是分隔符**必拆**（该断言此前只在 Windows 跑过，Linux 首跑即挂）→ 改无盘符冒号的 UNC 样例；顺带修 clippy 1.99 新 lint 4 处（events.rs bind_instead_of_map ×3、mock-cli collapsible_if/is_multiple_of ×2，desktop 不在 workspace、CI 未覆盖到，本地 -D warnings 全绿） |
+
+Linux 实测面剩余清单（手动）：GNOME/KDE SNI 托盘可见性（C4-1）、X11/Wayland Alt+M 双协议（C4-3）、fcitx5/xrdp 中文输入（C4-4）、AppImage 直跑与无 FUSE 指引、rpm 实机装→派活→急停→卸载（C4-5）。deb 形态的装→GUI→daemon 拉起→卸载已在本机全链实证。
+
+验证（第七轮，Linux 本机）：desktop 8 项全绿（跨平台断言修复后）、workspace 126 项 0 失败、desktop/workspace clippy -D warnings 零告警、tsc 0 错、Xvfb GUI 冒烟无 panic、`--version` headless 探针 exit 0、deb/rpm 双包实出（各 6.53 MiB）且 deb 全链（安装→元数据断言→GUI→/usr/bin daemon 拉起→XDG 数据目录→卸载无残留）与 CI 冒烟断言集本机预演全 PASS。
 
 ### 10.5 模型目录：运行一次即获取免费 / 低价 token 的 API 与模型
 
