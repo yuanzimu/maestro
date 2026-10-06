@@ -1,0 +1,10 @@
+id = "csv-column"
+title = "实现 csv_column：按列名抽取 CSV 列"
+kind = "feature"
+prompt = """
+仓库 index.js 的 csv_column(csv, name) 目前直接 throw 未实现。请实现：
+首行为表头，返回该列名下的全部数据行（数组）；列不存在时返回 null。
+字段按英文逗切分（v0 不处理引号转义）。tests 已写好
+（验收命令：node --test test.js）。
+"""
+accept = ["node", "--test", "test.js"]

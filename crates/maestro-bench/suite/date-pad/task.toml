@@ -1,0 +1,9 @@
+id = "date-pad"
+title = "修复 format_date 的月/日零填充"
+kind = "issue"
+prompt = """
+仓库 index.js 的 format_date(d) 输出的月与日没有零填充（如 2026-3-5，
+期望 2026-03-05）。请补齐两位零填充，保持 tests 全部通过
+（验收命令：node --test test.js）。
+"""
+accept = ["node", "--test", "test.js"]

@@ -1,0 +1,9 @@
+id = "sum-range"
+title = "修复 sum_upto 的差一错误"
+kind = "issue"
+prompt = """
+仓库 src/lib.rs 的 sum_upto(n) 语义应为「0 到 n 的整数和（含 n）」，
+当前返回 0 到 n-1 的和（差一错误）。请修复并保持 tests/fix.rs 全部
+通过（验收命令：cargo test）。
+"""
+accept = ["cargo", "test"]

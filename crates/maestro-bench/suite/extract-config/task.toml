@@ -1,0 +1,10 @@
+id = "extract-config"
+title = "重构：抽取统一的 load_config，消除双份解析"
+kind = "refactor"
+prompt = """
+仓库 src/lib.rs 中 load_server_config 与 load_client_config 存在完全
+重复的 "host=.../port=..." 解析逻辑。请抽取统一的 pub fn load_config
+（行为保持不变，两个旧函数保留并委托到新函数），保持 tests/fix.rs
+全部通过（验收命令：cargo test）。
+"""
+accept = ["cargo", "test"]

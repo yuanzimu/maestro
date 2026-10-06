@@ -1,0 +1,25 @@
+[package]
+name = "maestro-bench"
+description = "C7 效果基准集：mock 模式确定性 runner + 验收报告（真实 provider 模式留后续）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+default-run = "maestro-bench"
+
+[dependencies]
+maestro-protocol.workspace = true
+maestro-daemon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bin]]
+name = "maestro-bench"
+path = "src/main.rs"
+
+[[bin]]
+name = "bench-worker"
+path = "src/bin/bench-worker.rs"

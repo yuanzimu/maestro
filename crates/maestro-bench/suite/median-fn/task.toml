@@ -1,0 +1,9 @@
+id = "median-fn"
+title = "实现 median：数值序列的中位数"
+kind = "feature"
+prompt = """
+仓库 src/lib.rs 的 median(vals) 目前是 todo!() 占位。请实现：非空序列
+返回中位数（奇数长度取中间值；偶数长度取中间两数平均），空切片
+panic 并带清晰信息。tests/fix.rs 已写好（验收命令：cargo test）。
+"""
+accept = ["cargo", "test"]

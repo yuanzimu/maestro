@@ -1,0 +1,9 @@
+id = "port-parse"
+title = "修复 parse_port 的 panic：非法输入应返回 Err"
+kind = "issue"
+prompt = """
+仓库 src/lib.rs 的 parse_port(s) 对非法输入直接 unwrap/panic（如 "abc"
+或 "99999"）。请改为返回 Err（带人话错误信息），合法端口照常 Ok，
+保持 tests/fix.rs 全部通过（验收命令：cargo test）。
+"""
+accept = ["cargo", "test"]

@@ -14,6 +14,9 @@
 | C3 托盘（平台面，三端共享） | tray.rs：菜单六项 + 关窗到托盘 + 事件驱动角标 |
 | 版本 v0.2.4 安装包 + CCR 网关 + 模型目录 | 见 Release 与 docs/MODEL_CATALOG.md |
 | Linux 端 C4 代码面（C4-1/2/3 降级与集成 + CI deb 冒烟） | XDG 数据目录修复、托盘 Result 化 + 关窗降级分支、单实例、.desktop 模板 + deb/rpm depends、Alt+M + Wayland 设置页引导、ci.yml bundle-smoke-linux；实测面（GNOME/KDE、fcitx5、三形态全链）留手动清单 —— DEV_PLAN 第七轮 |
+| macOS 端 universal 双架构出包 + 签名链无凭据部分 + 新事件认知 | 见 928d74c |
+| C6 缓存三件套 + 省 token 报告（功能 C6） | ledger_summary 双口径 API + 完成通知带花费/节省 + 30 天省钱徽标，daemon 114 测试全绿，CI 37417546943 全绿（fac520e） |
+| C7 基准集 v0（功能 C7 Phase 1+2） | crates/maestro-bench：10 任务套件（6 Rust + 4 Node）+ 红绿不变量自校验 + mock 全链 runner（daemon+rounder+bench-worker）+ JSON/MD 报告，10/10 PASS 验收率 100% |
 | 测试基线 | workspace 全量 0 失败；CI 三平台 6 job 全绿（37409164137） |
 
 ## 二、三端任务分配
@@ -86,4 +89,4 @@
 |---|---|---|
 | Windows 代码签名证书（Authenticode） | win 平台 C1-6 | 采购证书 → .env 真值 |
 | Apple Developer Program + Developer ID + notarytool 凭据 | mac 平台 C2 全链 | 加入开发者计划、生成证书与 App-specific password |
-| mock-cli 发布语义 | win 平台 C1-7 | 产品决策：保留演示模式 / dev-only / 移除 |
+| ~~mock-cli 发布语义~~ **已决策（2026-10-06）：dev-only** | ~~win 平台 C1-7~~ | 决策 33：仓库/CI 保留、发行包剔除（release 外部二进制清单调整待实施 + 包体复测） |

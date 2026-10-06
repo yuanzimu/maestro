@@ -1,0 +1,9 @@
+id = "escape-backslash"
+title = "修复 escape 遗漏反斜杠转义"
+kind = "issue"
+prompt = """
+仓库 src/lib.rs 的 escape(s) 目前只转义双引号，漏了反斜杠本身 ——
+含反斜杠的输入转义后不可逆。请补全（反斜杠与双引号都要转义），
+保持 tests/fix.rs 全部通过（验收命令：cargo test）。
+"""
+accept = ["cargo", "test"]

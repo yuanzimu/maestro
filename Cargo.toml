@@ -7,6 +7,7 @@ members = [
     "crates/maestro-cli",
     "crates/maestro-testkit",
     "crates/maestro-e2e",
+    "crates/maestro-bench",
 ]
 exclude = ["reference/herdr", "desktop/src-tauri"]
 
@@ -32,6 +33,7 @@ nix = { version = "0.29", features = ["signal", "process", "fs"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 clap = { version = "4", features = ["derive"] }
 ureq = { version = "2", features = ["json"] }
+toml = "0.8"
 
 [profile.release]
 lto = "thin"

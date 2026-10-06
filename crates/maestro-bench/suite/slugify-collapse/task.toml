@@ -1,0 +1,9 @@
+id = "slugify-collapse"
+title = "修复 slugify：多空格折叠与首尾空白"
+kind = "issue"
+prompt = """
+仓库 index.js 的 slugify(s) 用 / /g 逐个空格替换，连续空格会产生
+连续连字符，首尾空白也会带出首尾连字符。请改为：折叠连续空白为
+单个连字符、去除首尾连字符（验收命令：node --test test.js）。
+"""
+accept = ["node", "--test", "test.js"]

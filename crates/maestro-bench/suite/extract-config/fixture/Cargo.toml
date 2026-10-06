@@ -1,0 +1,9 @@
+# 独立 workspace 根：防止被 maestro 主工作区吞并（fixture 仅为基准素材）
+[workspace]
+
+[package]
+name = "extract-config"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]

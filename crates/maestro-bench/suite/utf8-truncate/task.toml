@@ -1,0 +1,9 @@
+id = "utf8-truncate"
+title = "修复 truncate_chars 的 UTF-8 边界 panic"
+kind = "issue"
+prompt = """
+仓库 src/lib.rs 的 truncate_chars(s, n) 按字节切片（s[..n]），遇到多字节
+字符边界会 panic。请修复为按字符数安全截断，保持 tests/fix.rs 全部通过
+（验收命令：cargo test）。
+"""
+accept = ["cargo", "test"]

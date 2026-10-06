@@ -1,0 +1,10 @@
+id = "validators-dedupe"
+title = "重构：抽取统一 validate(value, kind)"
+kind = "refactor"
+prompt = """
+仓库 index.js 的 is_email 与 is_phone 各写了一套 trim + 正则校验骨架。
+请抽取统一的 validate(value, kind)（kind 为 "email" | "phone"），
+旧函数保留并委托到新函数，保持 tests 全部通过
+（验收命令：node --test test.js）。
+"""
+accept = ["node", "--test", "test.js"]

@@ -785,7 +785,18 @@ C1 + C2 + C3 + C4 全部完成 → C5 三端发版演练（一次性验收）
 | ✅ | 缓存三件套 | ① prompt 前缀稳定化：由 C4 天然达成（compose_spawn_prompt 同文件同内容字节级一致 → provider 端 prompt cache 可命中）；② 会话缓存统计：cache_hit_pct（cache_read 占输入比）入报告；③ 结果缓存：v1 不做独立实现——mock-cli 用量下收益不可证实，留待 C7 基准集用真实 provider 数据评估 |
 | ✅ | 测试面 | daemon +2（聚合与 30 天窗口双场景：SystemClock 真实 ts 全在窗口内 / 远未来 FixedClock via recover 全在窗口外；空账本 null 安全）→ **114 全绿**；clippy 0 告警；desktop 8 单测 + tsc 0 错；GUI [uitest-c6.cjs](../desktop/scripts/uitest-c6.cjs)：完成 toast 带花费 + 徽标行为（0% 时正确隐藏）PASS |
 
-验证（第八轮）：daemon 114 全绿、clippy 0 告警、desktop 8 + tsc 0 错、GUI C6 PASS；CI 待 push 验证（e2e 盲区惯例）。
+验证（第八轮）：daemon 114 全绿、clippy 0 告警、desktop 8 + tsc 0 错、GUI C6 PASS；CI 三平台 6 job 全绿（37417546943，含 ubuntu/macOS e2e）。
+
+第九轮迭代（2026-10-06，C7 效果基准集 v0（Phase 1+2））：
+
+| 状态 | 交付 | 说明 |
+|---|---|---|
+| ✅ | **基准任务套件**（[crates/maestro-bench/suite](../crates/maestro-bench/suite)） | 10 任务 manifest 化（task.toml：id/title/kind/prompt/accept argv/timeout）：6 issue（UTF-8 边界 panic / 端口解析 panic / 差一错误 / 反斜杠转义 / slugify / 日期补零）+ 2 refactor（统一配置解析 / 统一校验器）+ 2 feature（median / csv_column）；Rust fixture 零依赖独立 workspace（`[workspace]` 标记防主工作区吞并）、Node fixture 走 `node --test`；**红绿不变量**：fixture 初态验收必红、应用 solution 后必绿（`tests/suite_integrity.rs` 离线自校验，任务集自身可证伪） |
+| ✅ | **mock 全链 runner**（[maestro-bench](../crates/maestro-bench) 新 crate） | 进程内拉起 daemon Core（真实 socket + SystemClock）+ rounder + **bench-worker**（新确定性 worker：claude 方言子集，按 MAESTRO_TASK_ID/cwd 布局定位 solution 真实落盘，2 轮收敛 DONE）；逐任务：物化 fixture（git init）→ TaskCreate → 等终态（超时 TaskCancel 兜底）→ 跑验收 argv → 收 TaskLedger + C6 LedgerSummary；报告 JSON+MD（验收通过率门禁 ≥98% 作退出码，CI 可门禁）；`--task/--suite/--report-dir/--threshold` 参数化，20→N 任务零代码扩展 |
+| ✅ | 测试面 | maestro-bench 3 测试（套件加载一致 / 红绿不变量 / 全链冒烟：done+验收 PASS+轮数+token 计量+ledger_summary）全绿；clippy -D warnings 0 告警；全量 mock 基准实跑 **10/10 PASS 验收率 100%**（每任务 2 轮、1500 in/360 out tok、C6 汇总 cache_hit_pct=28% 链路验证） |
+| ✅ | 平台 C1-7 决策落地 | 决策 33：mock-cli 定 dev-only（仓库/CI 保留，发行包剔除待实施） |
+
+验证（第九轮）：本地全绿；**CI 待 push 验证**（新 crate 进 workspace → 三平台 `cargo test --workspace` 直接跑红绿不变量 + 冒烟，node/cargo/git 三平台 runner 均预装）。Windows fs::copy 保留源 mtime 的坑已修（copy 后显式 set_modified，否则 cargo 按 mtime 判「源未变」跳过重编译、绿跑拿旧二进制）。
 
 第七轮迭代（2026-10-06，Linux 端 C4 收尾·代码面）：
 
@@ -859,6 +870,7 @@ Linux 实测面剩余清单（手动）：GNOME/KDE SNI 托盘可见性（C4-1�
 | 30 | **【v2.7】Windows 冻结选 Job Objects + 逐线程挂起，不用 NtSuspendProcess 单进程方案** | 急停语义是整组（含内层 CLI 派生的孙进程）静止；仅挂直接子进程会让快照期孙进程继续写盘，emergency 快照前提不成立。Job 统一收纳进程树，句柄挂现有 Child 注册表，`imp` 模块内闭环、门面与 emergency 调用方零改动 |
 | 31 | **【v2.7】macOS 走 Developer ID + notarytool 官方公证链，universal 以 lipo 合并产出** | ad-hoc 包在 Apple Silicon 新机被 Gatekeeper 直接拦截，无法公开分发；公证要求 bundle 内全部可执行文件（含三个 sidecar）由内向外签名，故 sidecar 先双架构构建再 lipo，一个 DMG 覆盖 Intel/Apple Silicon |
 | 32 | **【v2.7】Tauri 壳启用 tray-icon，关窗最小化到托盘（三端一致）** | daemon 已独立常驻且支持接管，但壳层关窗即退与「关窗任务照跑」承诺矛盾；托盘行为对齐 macOS 已实现的 NSStatusItem，菜单/角标三端统一，复用事件桥刷新而不新增轮询 |
+| 33 | **【v2.8】mock-cli 定为 dev-only：保留在仓库与 CI（演示/基准 mock 模式），不进发行包** | 演示模式与 C7 基准 mock 模式都依赖确定性 worker；发行包剔除（release 外部二进制清单待实施）后包体 <20MB 达标且不向用户暴露假费用口径（平台 C1-7 决策落地，用户 2026-10-06 确认） |
 
 ## 十二、下一步
 
