@@ -645,7 +645,7 @@ impl Core {
     }
 
     /// 结果反馈（U7 v1）：FeedbackRecorded 事件（入库+广播，source of truth）
-    /// + append workdir/MAESTRO_MEMORY.md 项目记忆（C4 prompt 注入锚点）。
+    /// 与追加写 workdir/MAESTRO_MEMORY.md 项目记忆（C4 prompt 注入锚点）。
     /// 先写文件后 publish：文件失败即返回错误（反馈未落账，可重试），
     /// 避免事件入账但记忆缺失的半态。
     fn api_task_feedback(&mut self, req: &Request, params: TaskFeedbackParams) -> Response {
