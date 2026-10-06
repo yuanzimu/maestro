@@ -53,6 +53,7 @@ pub fn run() {
             commands::steer_task,
             commands::get_ledger,
             commands::task_feedback,
+            commands::get_ledger_summary,
             commands::list_workers,
             commands::list_inbox,
             commands::emergency_stop,

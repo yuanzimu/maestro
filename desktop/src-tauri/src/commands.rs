@@ -145,6 +145,12 @@ pub async fn task_feedback(
     )
 }
 
+/// C6 省 token 报告：全量 + 30 天双口径汇总（daemon 事件流聚合）
+#[tauri::command]
+pub async fn get_ledger_summary(state: State<'_, AppState>) -> Result<Value, String> {
+    call(&state, Method::LedgerSummary, json!({}))
+}
+
 #[tauri::command]
 pub async fn list_workers(state: State<'_, AppState>) -> Result<Value, String> {
     call(&state, Method::WorkerList, json!({}))

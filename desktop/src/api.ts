@@ -11,6 +11,7 @@ import type {
   InboxItem,
   LedgerSummary,
   RollbackResult,
+  SavingsSummary,
   Settings,
   TaskCreateResult,
   TaskDetail,
@@ -87,6 +88,10 @@ export const taskFeedback = (id: string, positive: boolean, reason?: string) =>
     positive,
     reason: reason || null,
   });
+
+// C6 省 token 报告：全量 + 30 天双口径汇总
+export const getSavingsSummary = () =>
+  invoke<SavingsSummary>("get_ledger_summary");
 
 export const getSettings = () => invoke<Settings>("get_settings");
 export const saveSettings = (settings: Settings) =>

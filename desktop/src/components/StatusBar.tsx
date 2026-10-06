@@ -8,6 +8,8 @@ import type { EmergencyStopResult } from "../types";
 export default function StatusBar() {
   const { state, dispatch } = useStore();
   const [stopping, setStopping] = useState(false);
+  // C6 省 token 徽标：30 天口径（全量在 title 提示里不喧宾夺主）
+  const savings30d = state.savings?.last_30d ?? null;
 
   const counts: Record<string, number> = {};
   for (const id of state.taskOrder) {
@@ -46,6 +48,14 @@ export default function StatusBar() {
         <b>{(counts.blocked ?? 0) + (counts.suspended ?? 0)}</b> · 完成 <b>{counts.done ?? 0}</b> · 失败{" "}
         <b>{(counts.failed ?? 0) + (counts.cancelled ?? 0)}</b>
       </span>
+      {savings30d && savings30d.saved_pct !== null && savings30d.saved_pct > 0 && (
+        <span
+          className="hint"
+          title={`30 天缓存命中率 ${savings30d.cache_hit_pct ?? 0}% · 反事实口径：同内容冷跑直连牌价`}
+        >
+          💰 30 天省 <b>{savings30d.saved_pct}%</b>（{savings30d.saved_cents}¢）
+        </span>
+      )}
       <button className="primary" onClick={() => dispatch({ type: "dialog", dialog: "new-task" })}>
         ＋ 新建任务
       </button>

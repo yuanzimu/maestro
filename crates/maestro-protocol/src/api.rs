@@ -66,6 +66,8 @@ pub enum Method {
     TaskLedger,
     /// 结果反馈（U7 v1）：👍/👎 + 理由 → FeedbackRecorded 事件 + 项目记忆
     TaskFeedback,
+    /// 省 token 报告（C6）：全量 + 最近 30 天双口径汇总（节省/缓存命中率）
+    LedgerSummary,
 
     // ---- worker ----
     WorkerList,

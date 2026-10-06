@@ -431,6 +431,8 @@ impl Core {
                     None => self.err(&req, -400, "missing task"),
                 }
             }
+            // C6 省 token 报告：无参数，全事件流聚合（全量 + 30 天滚动窗口）
+            Method::LedgerSummary => self.api_ledger_summary(&req),
             Method::TaskFeedback => {
                 // 👎 必填理由：负面反馈无理由 = 无法沉淀教训
                 let params: TaskFeedbackParams = match serde_json::from_value(req.params.clone())
@@ -1046,6 +1048,97 @@ impl Core {
                 "counterfactual_cost_cents": counterfactual_cents,
                 "saved_cents": saved_cents,
                 "compactions": compactions,
+            }),
+        )
+    }
+
+    /// C6 省 token 报告（U8 呈现口径）：事件流单遍聚合全部任务的账本，
+    /// 全量 + 最近 30 天滚动窗口双口径（窗口语义 = 「近期省了多少」，
+    /// 避免引入日历算法；月度汇总的意图 30 天窗口完全覆盖）。
+    /// - saved_pct = 节省 / 反事实（口径同 priced_usage_entry 的 counterfactual）
+    /// - cache_hit_pct = cache 读 / 全部输入 token（三桶互斥口径）
+    ///   —— prompt 前缀稳定化（C4 记忆注入字节级稳定）+ 会话缓存（rounder
+    ///   --resume）的命中实证，两者是 saved_pct 的主要来源
+    fn api_ledger_summary(&mut self, req: &Request) -> Response {
+        #[derive(Default, Clone, Copy)]
+        struct Agg {
+            entries: u64,
+            tasks_completed: u64,
+            input_tokens: u64,
+            output_tokens: u64,
+            cache_read_tokens: u64,
+            cache_creation_tokens: u64,
+            actual_cents: u64,
+            counterfactual_cents: u64,
+        }
+        let add = |a: &mut Agg, u: &UsageEntry| {
+            a.entries += 1;
+            a.input_tokens += u.input_tokens;
+            a.output_tokens += u.output_tokens;
+            a.cache_read_tokens += u.cache_read_tokens.unwrap_or(0);
+            a.cache_creation_tokens += u.cache_creation_tokens.unwrap_or(0);
+            a.actual_cents += u.actual_cost_cents.unwrap_or(0);
+            a.counterfactual_cents += u.counterfactual_cost_cents.unwrap_or(0);
+        };
+        let agg_json = |a: Agg| {
+            let saved = a.counterfactual_cents.saturating_sub(a.actual_cents);
+            let all_in = a.input_tokens + a.cache_read_tokens + a.cache_creation_tokens;
+            // checked 链防溢出；除零在 div 的 None 分支自然落 null
+            let saved_pct = saved
+                .checked_mul(100)
+                .and_then(|v| v.checked_div(a.counterfactual_cents));
+            let cache_hit_pct = a
+                .cache_read_tokens
+                .checked_mul(100)
+                .and_then(|v| v.checked_div(all_in));
+            serde_json::json!({
+                "entries": a.entries,
+                "tasks_completed": a.tasks_completed,
+                "input_tokens": a.input_tokens,
+                "output_tokens": a.output_tokens,
+                "cache_read_tokens": a.cache_read_tokens,
+                "cache_creation_tokens": a.cache_creation_tokens,
+                "actual_cost_cents": a.actual_cents,
+                "counterfactual_cost_cents": a.counterfactual_cents,
+                "saved_cents": saved,
+                "saved_pct": saved_pct,
+                "cache_hit_pct": cache_hit_pct,
+            })
+        };
+        let events = self
+            .store
+            .as_ref()
+            .map(|s| s.lock().unwrap().replay_all())
+            .unwrap_or_default();
+        let window_start = self
+            .ctx
+            .now_ms()
+            .saturating_sub(30 * 86_400_000);
+        let (mut all, mut recent) = (Agg::default(), Agg::default());
+        for env in &events {
+            let in_window = env.ts >= window_start;
+            match &env.event {
+                Event::LedgerEntry { usage, .. } => {
+                    add(&mut all, usage);
+                    if in_window {
+                        add(&mut recent, usage);
+                    }
+                }
+                Event::TaskCompleted { .. } => {
+                    all.tasks_completed += 1;
+                    if in_window {
+                        recent.tasks_completed += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.ok(
+            req,
+            serde_json::json!({
+                "all_time": agg_json(all),
+                "last_30d": agg_json(recent),
+                "window_days": 30,
             }),
         )
     }
@@ -2314,5 +2407,110 @@ mod tests {
         let si = full.find("轻推XYZ").expect("轻推应在");
         let bi = full.find("TASK-BODY-正文").expect("正文应在");
         assert!(mi < si && si < bi, "顺序应为 记忆<轻推<正文: {full}");
+    }
+
+    /// C6 ledger_summary：聚合正确性（saved_pct/cache_hit_pct）+ 30 天窗口。
+    /// 注意 Envelope ts 取真实墙钟（Envelope::new → now_ms()，不走注入
+    /// Clock）—— 窗口测试用「SystemClock = 事件全在窗口内」与
+    /// 「远未来 FixedClock = 事件全在窗口外」双场景覆盖。
+    #[test]
+    fn ledger_summary_aggregates_and_windows() {
+        struct FixedClock(u64);
+        impl maestro_protocol::Clock for FixedClock {
+            fn now_ms(&self) -> u64 {
+                self.0
+            }
+            fn sleep_until(&self, _d: u64) {}
+        }
+
+        let usage = |in_tok, cache_r, actual, cf| UsageEntry {
+            input_tokens: in_tok,
+            output_tokens: 100,
+            cache_read_tokens: Some(cache_r),
+            cache_creation_tokens: None,
+            path: Some("round".into()),
+            discount: None,
+            counterfactual_cost_cents: Some(cf),
+            actual_cost_cents: Some(actual),
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut c = Core::new(cfg_for(tmp.path()), Arc::new(SystemClock));
+        c.ctx.publish(Event::LedgerEntry {
+            task: TaskId::new("t-1"),
+            worker: None,
+            usage: usage(1000, 0, 500, 1000),
+        });
+        c.ctx.publish(Event::TaskCompleted {
+            task: TaskId::new("t-1"),
+            worker: WorkerId::new("w-1"),
+            summary: "ok".into(),
+        });
+        c.ctx.publish(Event::LedgerEntry {
+            task: TaskId::new("t-2"),
+            worker: None,
+            usage: usage(900, 100, 400, 1000),
+        });
+        c.ctx.publish(Event::TaskCompleted {
+            task: TaskId::new("t-2"),
+            worker: WorkerId::new("w-2"),
+            summary: "ok".into(),
+        });
+
+        // 场景 1：SystemClock —— 事件 ts（真实现在）全部落在 30 天窗口内
+        let resp = c.handle_api(Request {
+            id: "r".into(),
+            method: Method::LedgerSummary,
+            params: serde_json::json!({}),
+        });
+        let Response::Ok { result, .. } = resp else {
+            panic!("ledger_summary 应成功");
+        };
+        // 全量：500+400=900 actual，2000 cf，省 1100/2000 = 55%
+        assert_eq!(result["all_time"]["entries"], 2);
+        assert_eq!(result["all_time"]["tasks_completed"], 2);
+        assert_eq!(result["all_time"]["actual_cost_cents"], 900);
+        assert_eq!(result["all_time"]["saved_cents"], 1100);
+        assert_eq!(result["all_time"]["saved_pct"], 55);
+        // cache 命中：全部输入 1000+900+0+100 = 2000，cache 读 100 → 5%
+        assert_eq!(result["all_time"]["cache_hit_pct"], 5);
+        // 窗口内：真实 ts 全在窗口 → 与全量一致
+        assert_eq!(result["last_30d"]["entries"], 2);
+        assert_eq!(result["last_30d"]["saved_pct"], 55);
+        assert_eq!(result["window_days"], 30);
+
+        // 场景 2：远未来时钟 —— window_start 远超真实事件 ts → 全部窗口外。
+        // recover 重开同目录持久化流（事件 ts 保留入库原值）
+        let far = u64::MAX / 2;
+        let (mut c3, _) = Core::recover(cfg_for(tmp.path()), Arc::new(FixedClock(far)));
+        let resp = c3.handle_api(Request {
+            id: "r".into(),
+            method: Method::LedgerSummary,
+            params: serde_json::json!({}),
+        });
+        let Response::Ok { result, .. } = resp else {
+            panic!("ledger_summary 应成功");
+        };
+        assert_eq!(result["all_time"]["entries"], 2, "全量不受窗口影响");
+        assert_eq!(result["last_30d"]["entries"], 0, "远未来时钟下事件应全在窗口外");
+        assert_eq!(result["last_30d"]["tasks_completed"], 0);
+    }
+
+    /// C6 边界：空账本 saved_pct / cache_hit_pct 为 null（除零防护）
+    #[test]
+    fn ledger_summary_empty_is_null_safe() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut c = Core::new(cfg_for(tmp.path()), Arc::new(SystemClock));
+        let resp = c.handle_api(Request {
+            id: "r".into(),
+            method: Method::LedgerSummary,
+            params: serde_json::json!({}),
+        });
+        let Response::Ok { result, .. } = resp else {
+            panic!("空账本也应 200");
+        };
+        assert_eq!(result["all_time"]["entries"], 0);
+        assert!(result["all_time"]["saved_pct"].is_null());
+        assert!(result["all_time"]["cache_hit_pct"].is_null());
     }
 }

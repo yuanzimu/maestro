@@ -19,10 +19,12 @@ import type {
   Envelope,
   InboxItem,
   ServerStatus,
+  SavingsSummary,
   TaskSummary,
   WorkerItem,
 } from "../types";
 import { applyEventToTask } from "./events";
+import * as api from "../api";
 
 const MAX_EVENTS = 500;
 
@@ -37,6 +39,8 @@ export interface AppState {
   selectedTask: string | null;
   dialog: null | "new-task" | "settings" | "inbox";
   toast: { text: string; kind: "ok" | "err" } | null;
+  /** C6 省 token 报告（低频轮询更新；null = 尚未拉到） */
+  savings: SavingsSummary | null;
 }
 
 type Action =
@@ -47,7 +51,8 @@ type Action =
   | { type: "dialog"; dialog: AppState["dialog"] }
   | { type: "toast"; text: string; kind: "ok" | "err" }
   | { type: "clear-toast" }
-  | { type: "clear-emergency" };
+  | { type: "clear-emergency" }
+  | { type: "savings"; summary: SavingsSummary };
 
 const initial: AppState = {
   daemon: {
@@ -67,6 +72,7 @@ const initial: AppState = {
   selectedTask: null,
   dialog: null,
   toast: null,
+  savings: null,
 };
 
 function upsertTask(state: AppState, id: string, patch: Partial<TaskSummary>) {
@@ -174,6 +180,8 @@ function reducer(state: AppState, a: Action): AppState {
       return { ...state, toast: null };
     case "clear-emergency":
       return { ...state, emergency: null };
+    case "savings":
+      return { ...state, savings: a.summary };
     default:
       return state;
   }
@@ -191,9 +199,33 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     // 事件桥
-    const un1 = listen<Envelope>("maestro://event", (e) =>
-      dispatch({ type: "event", env: e.payload })
-    );
+    const un1 = listen<Envelope>("maestro://event", (e) => {
+      dispatch({ type: "event", env: e.payload });
+      // C6 通知带节省数据：完成通知附「花费 X¢ 省 Y%」（任务级账本口径；
+      // daemon 不在线等失败静默——通知是锦上添花不阻塞主流程）
+      if (e.payload.event.type === "task_completed") {
+        const id = e.payload.event.task as string;
+        api
+          .getLedger(id)
+          .then((l) => {
+            const pct =
+              l.counterfactual_cost_cents > 0
+                ? Math.round(
+                    (l.saved_cents / l.counterfactual_cost_cents) * 100
+                  )
+                : null;
+            dispatch({
+              type: "toast",
+              kind: "ok",
+              text:
+                pct !== null && pct > 0
+                  ? `任务完成 · 花费 ${l.actual_cost_cents}¢ · 省 ${pct}%`
+                  : `任务完成 · 花费 ${l.actual_cost_cents}¢`,
+            });
+          })
+          .catch(() => {});
+      }
+    });
     // 兜底轮询（Rust 侧 5s 推 server_status + task_list 快照）
     const un2 = listen<{ status: ServerStatus | null; tasks: TaskSummary[]; inbox: InboxItem[]; workers: WorkerItem[]; managed?: boolean }>(
       "maestro://sync",
@@ -224,6 +256,18 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       return () => clearTimeout(t);
     }
   }, [state.toast]);
+
+  // C6 省 token 报告：mount 拉一次 + 60s 低频轮询（daemon 离线静默重试）
+  useEffect(() => {
+    const pull = () =>
+      api.getSavingsSummary().then(
+        (s) => dispatch({ type: "savings", summary: s }),
+        () => {}
+      );
+    pull();
+    const t = setInterval(pull, 60_000);
+    return () => clearInterval(t);
+  }, []);
 
   return (
     <StoreCtx.Provider value={{ state, dispatch }}>

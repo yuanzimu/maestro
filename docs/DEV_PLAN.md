@@ -775,7 +775,17 @@ C1 + C2 + C3 + C4 全部完成 → C5 三端发版演练（一次性验收）
 | ✅ | **C4 三级记忆 v1（记忆优先）**（[core.rs](../crates/maestro-daemon/src/core.rs)） | spawn 统一 choke point `compose_spawn_prompt` 注入：用户级 `~/.maestro/memory.md` + 项目级 `<workdir>/MAESTRO_MEMORY.md`（C5 反馈落盘处），每层尾部 8KB（UTF-8 边界安全截断，append-only 尾部 = 最近记忆）；任务级 = session 续接（已有，不重复注入）。顺序 = 记忆 > 轻推 > 正文（记忆是背景上下文，轻推紧贴指令）；两层皆缺零开销；读失败不阻塞 spawn。**反馈→记忆→续跑闭环生效**：C3 respawn 自动带上 👎 教训 |
 | ✅ | 三端并行开发启动 | 仓库转 public（CI 免费不限量）；[PARALLEL_PLAN.md](./PARALLEL_PLAN.md) 分工与协作契约上线；81 休眠 fork 归档归类 |
 
-验证（第七轮）：daemon **112 全绿**（+3：read_tail UTF-8 边界 / memory_prefix 分层 / compose 顺序）；CI 待 push 验证（e2e 盲区惯例）。
+验证（第七轮）：daemon **112 全绿**（+3：read_tail UTF-8 边界 / memory_prefix 分层 / compose 顺序）；CI 三平台 6 job 全绿（37411266796，含 ubuntu/macOS e2e）。
+
+第八轮迭代（2026-10-06，C6 缓存三件套 + 省 token 报告）：
+
+| 状态 | 交付 | 说明 |
+|---|---|---|
+| ✅ | **省 token 报告**（[core.rs](../crates/maestro-daemon/src/core.rs) + [StatusBar.tsx](../desktop/src/components/StatusBar.tsx)） | 协议新增 `ledger_summary`（只追加）；daemon `api_ledger_summary` 事件流单遍聚合（LedgerEntry + TaskCompleted），双口径：`all_time` 全量 + `last_30d` 滚动窗口，含 actual/counterfactual/saved_cents/saved_pct/cache_hit_pct（checked 除法，零除与空账本返回 null 不炸）；前端任务完成 toast「花费 X¢ · 省 Y%」+ 顶栏 30 天省钱徽标（saved_pct>0 才显示，60s 轮询刷新） |
+| ✅ | 缓存三件套 | ① prompt 前缀稳定化：由 C4 天然达成（compose_spawn_prompt 同文件同内容字节级一致 → provider 端 prompt cache 可命中）；② 会话缓存统计：cache_hit_pct（cache_read 占输入比）入报告；③ 结果缓存：v1 不做独立实现——mock-cli 用量下收益不可证实，留待 C7 基准集用真实 provider 数据评估 |
+| ✅ | 测试面 | daemon +2（聚合与 30 天窗口双场景：SystemClock 真实 ts 全在窗口内 / 远未来 FixedClock via recover 全在窗口外；空账本 null 安全）→ **114 全绿**；clippy 0 告警；desktop 8 单测 + tsc 0 错；GUI [uitest-c6.cjs](../desktop/scripts/uitest-c6.cjs)：完成 toast 带花费 + 徽标行为（0% 时正确隐藏）PASS |
+
+验证（第八轮）：daemon 114 全绿、clippy 0 告警、desktop 8 + tsc 0 错、GUI C6 PASS；CI 待 push 验证（e2e 盲区惯例）。
 
 ### 10.5 模型目录：运行一次即获取免费 / 低价 token 的 API 与模型
 

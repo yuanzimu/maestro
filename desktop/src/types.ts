@@ -74,6 +74,27 @@ export interface LedgerSummary {
   compactions: number;
 }
 
+// C6 省 token 报告：单口径聚合（all_time / last_30d 共用形状）
+export interface SavingsBucket {
+  entries: number;
+  tasks_completed: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
+  actual_cost_cents: number;
+  counterfactual_cost_cents: number;
+  saved_cents: number;
+  saved_pct: number | null;
+  cache_hit_pct: number | null;
+}
+
+export interface SavingsSummary {
+  all_time: SavingsBucket;
+  last_30d: SavingsBucket;
+  window_days: number;
+}
+
 export interface CheckpointItem {
   seq: number;
   reason: string;
