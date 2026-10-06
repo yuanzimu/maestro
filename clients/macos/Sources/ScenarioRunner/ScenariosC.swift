@@ -420,6 +420,16 @@ func registerH_Checkpoints() {
         let before = try d.api.call("checkpoint_list", params: ["task": id])
         let baseline = ((before["checkpoints"] as? [[String: Any]])?.first { ($0["reason"] as? String) == "baseline" })?["ref"] as? String
         guard let baselineRef = baseline else { throw TestFailure(message: "无 baseline ref") }
+        // Swift 模型解析（B10 时光机用的就是 CheckpointInfo）
+        let rawModels = before["checkpoints"] as? [[String: Any]] ?? []
+        let models = rawModels.compactMap(CheckpointInfo.from)
+        try expect(models.count == rawModels.count, "全部检查点应可解析为 CheckpointInfo")
+        let baselineModel = models.first { $0.reason == "baseline" }
+        try expect(baselineModel != nil, "应解析出 baseline 模型")
+        try expect(baselineModel?.isPinned == true, "baseline 应 pinned")
+        try expect(baselineModel?.round != nil, "baseline 应带 round（新 additive 字段）")
+        try expect((baselineModel?.ts ?? 0) > 0, "baseline 应带 ts（>0）")
+
         let rb = try d.api.call("checkpoint_rollback", params: ["task": id, "to": baselineRef])
         let pre = rb["pre_rollback"] as? String ?? ""
         try expect(pre.hasPrefix("refs/maestro/cp/"), "pre_rollback 安全垫应存在: \(rb)")
@@ -427,6 +437,11 @@ func registerH_Checkpoints() {
         let after = try d.api.call("checkpoint_list", params: ["task": id])
         let refs = ((after["checkpoints"] as? [[String: Any]])?.compactMap { $0["ref"] as? String }) ?? []
         try expect(refs.contains(pre), "pre_rollback 应入检查点清单")
+
+        // 撤销回滚：再回滚到 pre_rollback 安全垫 → 产物恢复（对应时光机「撤销回滚」）
+        _ = try d.api.call("checkpoint_rollback", params: ["task": id, "to": pre])
+        try expect(w.appendingPathComponent("mock-result.md").isFileExists,
+                  "撤销回滚后产物应恢复（回到安全垫）")
     }
 
     s.add(75, "H", "rollback 到不存在的 ref → 报错不崩") {

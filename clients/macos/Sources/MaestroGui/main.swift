@@ -34,6 +34,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var btnPause: NSButton!
     private var btnResume: NSButton!
     private var btnCancel: NSButton!
+    private var btnTimeline: NSButton!
 
     private var selectedTaskID: String?
     private var selectedInboxID: String?
@@ -49,6 +50,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // 命令面板：非 run-modal 独立窗口，必须由 AppDelegate 强持有，
     // 否则局部变量释放后 tableView 的 target（unsafe_unretained）变野指针 → 点击崩溃
     private var palette: CommandPaletteController?
+
+    // Checkpoint 时光机窗口：同样需要强持有（窗口 delegate 为 weak）
+    private var timeline: CheckpointTimelineController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildWindow()
@@ -285,6 +289,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         btnCancel = NSButton(title: "取消任务", target: self, action: #selector(cancelClicked))
         actionRow.addArrangedSubview(btnPause)
         actionRow.addArrangedSubview(btnResume)
+        btnTimeline = NSButton(title: "时光机", target: self, action: #selector(timelineClicked))
+        actionRow.addArrangedSubview(btnTimeline)
         let gap = NSView()
         gap.setContentHuggingPriority(.init(1), for: .horizontal)
         actionRow.addArrangedSubview(gap)
@@ -754,6 +760,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         palette = p
         AppLog.ui("打开 ⌘K 命令面板")
         p.show()
+    }
+
+    /// Checkpoint 时光机（B10）
+    @objc private func timelineClicked() {
+        guard let id = selectedTaskID else {
+            AppLog.ui("时光机 未选任务，忽略")
+            return
+        }
+        if let existing = timeline {
+            AppLog.ui("时光机 已打开，聚焦现有窗口")
+            existing.makeKey()
+            return
+        }
+        let title = state.tasks.first { $0.id == id }?.title ?? id
+        let c = CheckpointTimelineController(
+            state: state, taskID: id, taskTitle: title,
+            onClose: { [weak self] in
+                AppLog.ui("时光机 窗口关闭，释放持有")
+                self?.timeline = nil
+            })
+        timeline = c
+        AppLog.ui("打开时光机 任务 \(id)")
+        c.show()
     }
 
     @objc private func steerSendClicked() {

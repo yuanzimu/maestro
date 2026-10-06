@@ -193,6 +193,48 @@ public final class AppState {
         act("恢复全部") { api in _ = try api.call("server_resume_all", params: ["steering": "flush"]) }
     }
 
+    // MARK: - Checkpoint 时光机（B10）
+
+    /// 加载任务的 checkpoint 时间线（后台线程，完成回主线程回调）
+    public func loadCheckpoints(task: String,
+                                completion: @escaping (Result<[CheckpointInfo], SimpleError>) -> Void) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            do {
+                let r = try self.api.call("checkpoint_list", params: ["task": task])
+                let arr = (r["checkpoints"] as? [[String: Any]]) ?? []
+                let cps = arr.compactMap(CheckpointInfo.from)
+                AppLog.ui("时光机 加载任务 \(task) → \(cps.count) 个检查点")
+                DispatchQueue.main.async { completion(.success(cps)) }
+            } catch {
+                AppLog.ui("时光机 加载失败: \(error)")
+                DispatchQueue.main.async { completion(.failure(SimpleError("\(error)"))) }
+            }
+        }
+    }
+
+    /// 回滚到指定 checkpoint。成功返回 pre_rollback 安全垫（供"撤销回滚"）。
+    public func rollbackCheckpoint(task: String, to ref: String,
+                                   completion: @escaping (Result<String, SimpleError>) -> Void) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            AppLog.ui("时光机 回滚任务 \(task) → \(ref)")
+            do {
+                let r = try self.api.call("checkpoint_rollback",
+                                         params: ["task": task, "to": ref])
+                let pre = r["pre_rollback"] as? String ?? ""
+                AppLog.ui("时光机 回滚完成，安全垫 \(pre)")
+                DispatchQueue.main.async {
+                    completion(.success(pre))
+                    self.refresh()
+                }
+            } catch {
+                AppLog.ui("时光机 回滚失败: \(error)")
+                DispatchQueue.main.async { completion(.failure(SimpleError("\(error)"))) }
+            }
+        }
+    }
+
     // MARK: - Daemon 生命周期
 
     public func startDaemon(force: Bool = false) {

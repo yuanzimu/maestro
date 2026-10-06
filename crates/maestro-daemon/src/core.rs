@@ -552,9 +552,19 @@ impl Core {
                                 let out: Vec<serde_json::Value> = cps
                                     .iter()
                                     .map(|c| {
+                                        // 追加 meta 字段（additive）：时间线显示轮次与时间。
+                                        // meta 解析失败时为 null，旧客户端忽略这些字段。
+                                        let (round, ts) = c
+                                            .meta
+                                            .as_ref()
+                                            .map(|m| (serde_json::json!(m.round),
+                                                      serde_json::json!(m.ts)))
+                                            .unwrap_or((serde_json::Value::Null,
+                                                        serde_json::Value::Null));
                                         serde_json::json!({
                                             "seq": c.seq, "reason": c.reason,
                                             "ref": c.full_ref, "commit": c.commit,
+                                            "round": round, "ts": ts,
                                         })
                                     })
                                     .collect();
