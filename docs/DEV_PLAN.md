@@ -766,7 +766,16 @@ C1 + C2 + C3 + C4 全部完成 → C5 三端发版演练（一次性验收）
 | ✅ | 测试面 | daemon +3：锚点滚动 GC / 主径回滚（失败轮半成品清除 + session 恢复到上一完成轮 + TaskRequeued 入账）/ 无锚点边界；daemon **109 项全绿**、workspace 0 失败、clippy 零告警 |
 | ✅ | 事故沉淀 | Actions 配额预检脚本 + SKILL 步骤 0（spending limit 掐断 CI 零日志秒失败的实证）；仓库转公开后 CI 免费不限量 |
 
-验证（第六轮）：daemon 109 全绿（+3）、clippy 0 告警；CI 待 push 验证（e2e 盲区：rounder 续接语义需 ubuntu/macOS e2e 收尾确认）。
+验证（第六轮）：daemon 109 全绿（+3）、clippy 0 告警；CI 三平台 6 job 全绿（37409164137，含 ubuntu/macOS e2e——rounder 续接语义 CI 收尾确认）。
+
+第七轮迭代（2026-10-06，C4 三级记忆 v1）：
+
+| 状态 | 交付 | 说明 |
+|---|---|---|
+| ✅ | **C4 三级记忆 v1（记忆优先）**（[core.rs](../crates/maestro-daemon/src/core.rs)） | spawn 统一 choke point `compose_spawn_prompt` 注入：用户级 `~/.maestro/memory.md` + 项目级 `<workdir>/MAESTRO_MEMORY.md`（C5 反馈落盘处），每层尾部 8KB（UTF-8 边界安全截断，append-only 尾部 = 最近记忆）；任务级 = session 续接（已有，不重复注入）。顺序 = 记忆 > 轻推 > 正文（记忆是背景上下文，轻推紧贴指令）；两层皆缺零开销；读失败不阻塞 spawn。**反馈→记忆→续跑闭环生效**：C3 respawn 自动带上 👎 教训 |
+| ✅ | 三端并行开发启动 | 仓库转 public（CI 免费不限量）；[PARALLEL_PLAN.md](./PARALLEL_PLAN.md) 分工与协作契约上线；81 休眠 fork 归档归类 |
+
+验证（第七轮）：daemon **112 全绿**（+3：read_tail UTF-8 边界 / memory_prefix 分层 / compose 顺序）；CI 待 push 验证（e2e 盲区惯例）。
 
 ### 10.5 模型目录：运行一次即获取免费 / 低价 token 的 API 与模型
 

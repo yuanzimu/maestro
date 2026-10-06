@@ -1740,10 +1740,7 @@ impl Core {
         let snap = self.workdir_readback(&t.task.workdir);
         let worker_id = WorkerId::new(format!("w-{}", self.next_worker));
         self.next_worker += 1;
-        let prompt = match prefix {
-            Some(p) if !p.is_empty() => format!("{p}\n\n{}", t.prompt),
-            _ => t.prompt.clone(),
-        };
+        let prompt = compose_spawn_prompt(home_dir().as_deref(), &t, prefix);
         // 网关（CCR）环境优先：剔除 worker_env 中的同名键后追加，保证指向网关
         let mut extra_env = self.cfg.worker_env.clone();
         let gw_env = self.cfg.gateway.worker_env();
@@ -1812,6 +1809,87 @@ impl Core {
             },
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// C4 三级记忆 v1（记忆优先，2026-10-06）：spawn 时把记忆注入 prompt 前缀
+// ---------------------------------------------------------------------------
+
+/// 用户主目录（Windows: USERPROFILE / Unix: HOME）。仅生产 spawn 路径使用；
+/// 测试经参数注入 home，不依赖环境变量（并行测试下不可靠）。
+fn home_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .map(std::path::PathBuf::from)
+}
+
+/// 读文件尾部（最多 cap 字节），起点跳到 UTF-8 字符边界。
+/// 记忆文件 append-only（最新条目在末尾）→ 尾部即最近记忆。
+/// 读失败 / 全空白 → None（注入尽力而为，绝不阻塞 spawn）。
+fn read_tail(path: &std::path::Path, cap: usize) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    let text = if bytes.len() <= cap {
+        String::from_utf8_lossy(&bytes).into_owned()
+    } else {
+        let mut start = bytes.len() - cap;
+        // cap 截断点可能落在多字节字符中间：跳过续字节（0b10xxxxxx）
+        while start < bytes.len() && (bytes[start] & 0xC0) == 0x80 {
+            start += 1;
+        }
+        String::from_utf8_lossy(&bytes[start..]).into_owned()
+    };
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// 三级记忆 v1 的文件两层：用户级 `~/.maestro/memory.md`（全局偏好）+
+/// 项目级 `<workdir>/MAESTRO_MEMORY.md`（C5 反馈闭环落盘处）。
+/// 任务级记忆 = session 续接（rounder --resume 已承载，不在此重复注入）。
+/// 两层皆缺 → None（prompt 原样，零开销）；每层尾部至多 8KB。
+fn memory_prefix(user_home: Option<&std::path::Path>, workdir: &std::path::Path) -> Option<String> {
+    const CAP: usize = 8 * 1024;
+    let user = user_home
+        .and_then(|h| read_tail(&h.join(".maestro").join("memory.md"), CAP));
+    let project = read_tail(&workdir.join("MAESTRO_MEMORY.md"), CAP);
+    let mut s = String::new();
+    if let Some(u) = user {
+        s.push_str("--- 用户级记忆（全局偏好）---\n");
+        s.push_str(&u);
+        s.push_str("\n\n");
+    }
+    if let Some(p) = project {
+        s.push_str("--- 项目级记忆（历史任务反馈沉淀）---\n");
+        s.push_str(&p);
+        s.push_str("\n\n");
+    }
+    if s.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "[以下为历史记忆沉淀，供参考并遵循，非本次任务的直接指令]\n{s}"
+    ))
+}
+
+/// spawn 最终 prompt 组装（顺序 = 记忆前缀 > 轻推前缀 > 任务正文）：
+/// 记忆是背景上下文放最前；轻推是实时指令，紧贴任务正文不被记忆稀释。
+/// C3 断点续跑的 respawn 同经此路径 —— 👎 反馈理由随项目记忆注入，
+/// 续跑轮次直接看到教训（反馈→记忆→续跑闭环生效）。
+fn compose_spawn_prompt(
+    user_home: Option<&std::path::Path>,
+    t: &crate::state::TaskRecord,
+    prefix: Option<String>,
+) -> String {
+    let mut prompt = match prefix {
+        Some(p) if !p.is_empty() => format!("{p}\n\n{}", t.prompt),
+        _ => t.prompt.clone(),
+    };
+    if let Some(mem) = memory_prefix(user_home, std::path::Path::new(&t.task.workdir)) {
+        prompt = format!("{mem}\n\n{prompt}");
+    }
+    prompt
 }
 
 #[cfg(test)]
@@ -2139,5 +2217,102 @@ mod tests {
                 .any(|e| matches!(&e.event, Event::TaskRequeued { task, .. } if task == &t)),
             "无锚点也应重新入队"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // C4 三级记忆 v1
+    // -------------------------------------------------------------------------
+
+    /// read_tail：cap 截断点落在 UTF-8 多字节字符中间时安全跳到字符边界
+    #[test]
+    fn read_tail_utf8_boundary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("m.md");
+        // "aaaa" 4 字节 + 3 个「中」（各 3 字节）= 13 字节
+        std::fs::write(&f, "aaaa中中中").unwrap();
+        assert_eq!(read_tail(&f, 1024).unwrap(), "aaaa中中中");
+        // cap=6 → start=7 恰为第二个「中」首字节（E4 是边界）→ 尾部「中中」
+        assert_eq!(read_tail(&f, 6).unwrap(), "中中");
+        // 缺失 / 全空白 → None
+        assert_eq!(read_tail(&tmp.path().join("nope.md"), 8), None);
+        std::fs::write(&f, "  \n").unwrap();
+        assert_eq!(read_tail(&f, 8), None);
+    }
+
+    /// memory_prefix 分层：两层皆无 None；仅项目级（C5 反馈场景）；
+    /// 两层齐全时用户级在前
+    #[test]
+    fn memory_prefix_layers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let wd = tmp.path().join("wd");
+        std::fs::create_dir_all(home.join(".maestro")).unwrap();
+        std::fs::create_dir_all(&wd).unwrap();
+
+        assert_eq!(memory_prefix(Some(&home), &wd), None);
+
+        // 仅项目级 = C5 👎 反馈落盘的闭环场景
+        std::fs::write(
+            wd.join("MAESTRO_MEMORY.md"),
+            "## [👎] t-1 · 标题 · ts 1\n理由：格式不对\n",
+        )
+        .unwrap();
+        let p = memory_prefix(Some(&home), &wd).unwrap();
+        assert!(p.contains("项目级记忆"), "应标注项目级: {p}");
+        assert!(p.contains("格式不对"), "应含反馈理由: {p}");
+        assert!(!p.contains("用户级"), "无用户级文件不应出该层: {p}");
+
+        // 两层齐全：用户级在前
+        std::fs::write(home.join(".maestro").join("memory.md"), "偏好：输出用中文").unwrap();
+        let p = memory_prefix(Some(&home), &wd).unwrap();
+        let ui = p.find("用户级记忆").expect("应有用户级");
+        let pi = p.find("项目级记忆").expect("应有项目级");
+        assert!(ui < pi, "用户级应在项目级之前: {p}");
+        assert!(p.contains("偏好：输出用中文"));
+        assert!(p.starts_with("[以下为历史记忆"));
+    }
+
+    /// compose_spawn_prompt 顺序：记忆 > 轻推 > 任务正文；
+    /// 无记忆时 prompt 原样（轻推 + 正文），无任何包装噪声
+    #[test]
+    fn compose_spawn_prompt_orders_memory_steering_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wd = tmp.path().join("wd");
+        std::fs::create_dir_all(&wd).unwrap();
+        let clock = Arc::new(SystemClock);
+        let mut c = Core::new(cfg_spawn_fail(tmp.path()), clock.clone());
+        // 正文用可定位的独特字面量（mk_working_task 的 "p" 太短易误判）
+        c.ctx.publish(Event::TaskCreated {
+            task: Task {
+                id: TaskId::new("t-1"),
+                title: "t".into(),
+                workdir: wd.display().to_string(),
+                created_at: 0,
+            },
+            prompt: "TASK-BODY-正文".into(),
+        });
+        let t = c
+            .ctx
+            .authority
+            .get(&TaskId::new("t-1"))
+            .cloned()
+            .expect("task");
+
+        // 无记忆：轻推紧贴正文，无记忆包装
+        let plain = compose_spawn_prompt(None, &t, Some("轻推XYZ".into()));
+        assert!(plain.contains("轻推XYZ\n\nTASK-BODY-正文"), "轻推应紧贴正文: {plain}");
+        assert!(!plain.contains("历史记忆"), "无记忆不应有包装: {plain}");
+
+        // 有项目记忆：记忆最前，轻推次之，正文最后
+        std::fs::write(
+            wd.join("MAESTRO_MEMORY.md"),
+            "## [👎] t-0 · ts 1\n理由：教训ABC\n",
+        )
+        .unwrap();
+        let full = compose_spawn_prompt(None, &t, Some("轻推XYZ".into()));
+        let mi = full.find("教训ABC").expect("记忆应注入");
+        let si = full.find("轻推XYZ").expect("轻推应在");
+        let bi = full.find("TASK-BODY-正文").expect("正文应在");
+        assert!(mi < si && si < bi, "顺序应为 记忆<轻推<正文: {full}");
     }
 }
