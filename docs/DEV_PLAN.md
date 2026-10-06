@@ -746,6 +746,16 @@ C1 + C2 + C3 + C4 全部完成 → C5 三端发版演练（一次性验收）
 
 验证（第四轮）：desktop 8 项全绿、tsc 0 错、GUI C2 全链路 PASS（零页面错误）。
 
+第五轮迭代（2026-10-06，C5 反馈闭环 U7 v1）：
+
+| 状态 | 交付 | 说明 |
+|---|---|---|
+| ✅ | **C5 反馈闭环**（U7 v1，[core.rs](../crates/maestro-daemon/src/core.rs) + [ResultCard.tsx](../desktop/src/components/ResultCard.tsx)） | 协议新增 `task.feedback`（👍/👎 + 理由，👎 必填双保险：daemon 400 + 前端禁用）；daemon `api_task_feedback`：写 `workdir/MAESTRO_MEMORY.md`（标题/理由压平单行防 markdown 注入）+ publish `FeedbackRecorded`；**先写文件后发事件**防「事件入账但记忆缺失」半态；前端结果卡三态反馈区（未反馈/👎 理由输入/已反馈），已反馈从事件流恢复（重开详情不失） |
+| ✅ | 测试面 | daemon +1 测试（负面 400 / 未知任务 404 / 事件入库 replay 验证 / 记忆文件内容与换行压平断言）；GUI 全链路脚本 [uitest-c5.cjs](../desktop/scripts/uitest-c5.cjs)：👎 必填→提交→toast+已反馈态+记忆落盘、👍 直发→（无备注）落盘、重开详情事件流恢复，9 项全 PASS（零页面错误） |
+| ✅ | 清理 | desktop 移除 C2 遗留 dead code `git_bytes`（release 构建零警告） |
+
+验证（第五轮）：daemon **106 项全绿**（+1）、desktop 8 项全绿零警告、tsc 0 错、GUI C5 反馈流 9/9 PASS。
+
 ### 10.5 模型目录：运行一次即获取免费 / 低价 token 的 API 与模型
 
 > 解决「去哪找不要钱和便宜的模型、在客户端怎么填」的问题。

@@ -15,7 +15,8 @@ use crate::worker::{self, SpawnSpec, WorkerMeta};
 use maestro_protocol::api::{
     CheckpointRollbackParams, CheckpointRollbackResult, EmergencyStopParams, Method, Request,
     Response, ResumeAllParams, RpcError, ServerStatusResult, SteeringMode, TaskCreateParams,
-    TaskCreateResult, TaskRoundReportParams, TaskSteerAckParams, TaskSteerParams,
+    TaskCreateResult, TaskFeedbackParams, TaskRoundReportParams, TaskSteerAckParams,
+    TaskSteerParams,
 };
 use maestro_protocol::events::{Event, Task, UsageEntry};
 use maestro_protocol::types::*;
@@ -430,6 +431,18 @@ impl Core {
                     None => self.err(&req, -400, "missing task"),
                 }
             }
+            Method::TaskFeedback => {
+                // 👎 必填理由：负面反馈无理由 = 无法沉淀教训
+                let params: TaskFeedbackParams = match serde_json::from_value(req.params.clone())
+                {
+                    Ok(p) => p,
+                    Err(e) => return self.err(&req, -400, &format!("bad params: {e}")),
+                };
+                if !params.positive && params.reason.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                    return self.err(&req, -400, "negative feedback requires a reason");
+                }
+                self.api_task_feedback(&req, params)
+            }
             Method::TaskSteerPoll => {
                 let task_id = req
                     .params
@@ -629,6 +642,60 @@ impl Core {
             id: req.id.clone(),
             result: serde_json::json!({ "resumed": resumed }),
         }
+    }
+
+    /// 结果反馈（U7 v1）：FeedbackRecorded 事件（入库+广播，source of truth）
+    /// + append workdir/MAESTRO_MEMORY.md 项目记忆（C4 prompt 注入锚点）。
+    /// 先写文件后 publish：文件失败即返回错误（反馈未落账，可重试），
+    /// 避免事件入账但记忆缺失的半态。
+    fn api_task_feedback(&mut self, req: &Request, params: TaskFeedbackParams) -> Response {
+        let Some(t) = self.ctx.authority.get(&params.task).cloned() else {
+            return self.err(req, -404, "task not found");
+        };
+        let reason = params
+            .reason
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+
+        // 项目记忆（人可读 append-only 日志）。标题/理由压平单行 ——
+        // 标题含换行会伪造条目结构（markdown 注入）
+        let flat = |s: &str| s.replace(['\n', '\r'], " ");
+        let memory = std::path::Path::new(&t.task.workdir).join("MAESTRO_MEMORY.md");
+        let ts = self.ctx.now_ms();
+        let entry = format!(
+            "\n## {} {} · {} · ts {}\n{}\n",
+            if params.positive { "[👍]" } else { "[👎]" },
+            t.task.id.as_str(),
+            flat(&t.task.title),
+            ts,
+            reason
+                .as_deref()
+                .map(|r| format!("理由：{}", flat(r)))
+                .unwrap_or_else(|| {
+                    if params.positive { "（无备注）" } else { "（未提供）" }.to_string()
+                }),
+        );
+        let write = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&memory)
+            .and_then(|mut f| {
+                use std::io::Write;
+                f.write_all(entry.as_bytes())
+            });
+        if let Err(e) = write {
+            return self.err(req, -500, &format!("项目记忆写入失败（{e}）"));
+        }
+
+        // 事件（发布即应用 + 持久化 + 广播）
+        self.ctx.publish(Event::FeedbackRecorded {
+            task: params.task.clone(),
+            positive: params.positive,
+            reason,
+        });
+        self.ok(req, serde_json::json!({ "recorded": true }))
     }
 
     fn api_task_create(&mut self, req: &Request) -> Response {
@@ -1737,5 +1804,83 @@ mod tests {
             EmergencyPhase::None,
             "resume_all 后重启，emergency 应派生为 None"
         );
+    }
+
+    /// U7 v1 反馈闭环：task_feedback 落事件 + 项目记忆（换行压平防
+    /// markdown 注入）；负面无理由 400；未知任务 404。
+    #[test]
+    fn feedback_records_event_and_memory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let clock = Arc::new(SystemClock);
+        let mut c = Core::new(cfg_for(tmp.path()), clock.clone());
+
+        // 建任务（authority 需有记录；workdir 用独立子目录）
+        let wd = tmp.path().join("wd");
+        std::fs::create_dir_all(&wd).unwrap();
+        c.ctx.publish(Event::TaskCreated {
+            task: Task {
+                id: TaskId::new("t-1"),
+                title: "标题\n带换行".into(),
+                workdir: wd.display().to_string(),
+                created_at: 0,
+            },
+            prompt: "p".into(),
+        });
+
+        let fb = |c: &mut Core, params: serde_json::Value| {
+            c.handle_api(Request {
+                id: "r".into(),
+                method: Method::TaskFeedback,
+                params,
+            })
+        };
+
+        // 负面无理由 → 400（教训无法沉淀）
+        assert!(matches!(
+            fb(&mut c, serde_json::json!({"task": "t-1", "positive": false})),
+            Response::Err { .. }
+        ));
+        // 未知任务 → 404
+        assert!(matches!(
+            fb(&mut c, serde_json::json!({"task": "t-x", "positive": true})),
+            Response::Err { .. }
+        ));
+
+        // 负面带理由 → ok；事件 + 记忆落盘
+        assert!(matches!(
+            fb(
+                &mut c,
+                serde_json::json!({"task": "t-1", "positive": false, "reason": "格式\n不对"})
+            ),
+            Response::Ok { .. }
+        ));
+
+        // 事件：最后一条 FeedbackRecorded（发布即入库）
+        let envs = c
+            .event_store_handle()
+            .expect("event store")
+            .lock()
+            .unwrap()
+            .replay_all();
+        assert!(matches!(
+            envs.last().map(|e| &e.event),
+            Some(Event::FeedbackRecorded { positive: false, .. })
+        ));
+
+        // 记忆：条目落 MAESTRO_MEMORY.md，标题/理由换行已压平
+        let memory = std::fs::read_to_string(wd.join("MAESTRO_MEMORY.md")).unwrap();
+        assert!(memory.contains("[👎] t-1"));
+        assert!(memory.contains("标题 带换行"));
+        assert!(memory.contains("理由：格式 不对"));
+        assert!(!memory.contains("标题\n带换行"));
+
+        // 👍 无理由 → ok（理由可选）
+        assert!(matches!(
+            fb(&mut c, serde_json::json!({"task": "t-1", "positive": true})),
+            Response::Ok { .. }
+        ));
+        let memory = std::fs::read_to_string(wd.join("MAESTRO_MEMORY.md")).unwrap();
+        assert!(memory.contains("[👍] t-1"));
+        assert!(memory.contains("（无备注）"));
     }
 }

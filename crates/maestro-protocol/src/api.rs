@@ -64,6 +64,8 @@ pub enum Method {
     TaskRoundReport,
     /// 账本：任务的轮数/耗时/成本汇总（token 经济口径）
     TaskLedger,
+    /// 结果反馈（U7 v1）：👍/👎 + 理由 → FeedbackRecorded 事件 + 项目记忆
+    TaskFeedback,
 
     // ---- worker ----
     WorkerList,
@@ -132,6 +134,16 @@ pub enum SteeringMode {
 pub struct TaskSteerParams {
     pub task: TaskId,
     pub message: String,
+}
+
+/// `task.feedback` 参数（U7 v1 结果卡 👍/👎）
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TaskFeedbackParams {
+    pub task: TaskId,
+    pub positive: bool,
+    /// 👎 必填理由（落项目记忆供后续任务参考）；👍 可选
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 /// `task.steer_poll` 结果项 / `task.steer_ack` 参数共用 seq 口径

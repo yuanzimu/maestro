@@ -80,6 +80,14 @@ export const taskDiffRevert = (
   patch: string
 ) => invoke<DiffRevertResult>("task_diff_revert", { id, hunks, reason, patch });
 
+// U7 v1 反馈闭环：结果卡 👍/👎 + 理由（👎 必填）→ 事件 + 项目记忆
+export const taskFeedback = (id: string, positive: boolean, reason?: string) =>
+  invoke<{ recorded: boolean }>("task_feedback", {
+    id,
+    positive,
+    reason: reason || null,
+  });
+
 export const getSettings = () => invoke<Settings>("get_settings");
 export const saveSettings = (settings: Settings) =>
   invoke<void>("save_settings", { settings });

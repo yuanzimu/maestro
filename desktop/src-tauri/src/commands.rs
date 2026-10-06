@@ -130,6 +130,21 @@ pub async fn get_ledger(state: State<'_, AppState>, id: String) -> Result<Value,
     call(&state, Method::TaskLedger, json!({ "task": id }))
 }
 
+/// U7 v1 反馈闭环：结果卡 👍/👎 + 理由 → daemon 落事件 + 项目记忆
+#[tauri::command]
+pub async fn task_feedback(
+    state: State<'_, AppState>,
+    id: String,
+    positive: bool,
+    reason: Option<String>,
+) -> Result<Value, String> {
+    call(
+        &state,
+        Method::TaskFeedback,
+        json!({ "task": id, "positive": positive, "reason": reason }),
+    )
+}
+
 #[tauri::command]
 pub async fn list_workers(state: State<'_, AppState>) -> Result<Value, String> {
     call(&state, Method::WorkerList, json!({}))
@@ -275,20 +290,6 @@ fn git_out(workdir: &str, args: &[&str]) -> Result<String, String> {
         .map_err(|e| format!("spawn git: {e}"))?;
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-    } else {
-        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
-    }
-}
-
-fn git_bytes(workdir: &str, args: &[&str]) -> Result<Vec<u8>, String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(workdir)
-        .args(args)
-        .output()
-        .map_err(|e| format!("spawn git: {e}"))?;
-    if out.status.success() {
-        Ok(out.stdout)
     } else {
         Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
     }

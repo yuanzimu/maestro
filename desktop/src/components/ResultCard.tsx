@@ -65,6 +65,10 @@ export default function ResultCard({
   const [busy, setBusy] = useState(false);
   const [reject, setReject] = useState<Set<number>>(new Set());
   const [reason, setReason] = useState("");
+  // U7 反馈流：fbNegative = null 收起 / false 展开 👎 理由输入
+  const [fbNegative, setFbNegative] = useState<boolean | null>(null);
+  const [fbReason, setFbReason] = useState("");
+  const [fbBusy, setFbBusy] = useState(false);
 
   // hooks 必须全部先于条件早退（否则非终态→终态翻转时
   // "Rendered more hooks than during the previous render" 崩整面板）
@@ -75,6 +79,11 @@ export default function ResultCard({
 
   // 非终态不渲染（运行中任务看事件时间线即可）
   if (!TERMINAL.has(task.state)) return null;
+
+  // 已反馈：事件流为准（FeedbackRecorded 已入库）——重开详情恢复状态
+  const feedback = events.find(
+    (e) => e.event.type === "feedback_recorded" && e.event.task === task.id
+  )?.event;
 
   // 终态信息以事件流为权威源，narrative 兜底（事件可能被截断/错过）
   const last = (type: string) =>
@@ -157,6 +166,27 @@ export default function ResultCard({
     }
   };
 
+  // U7 反馈：👍 直发（理由可选）；👎 必填理由（后端 400 校验双保险）
+  const submitFeedback = async (positive: boolean, fbReasonText?: string) => {
+    if (fbBusy) return;
+    if (!positive && !fbReasonText?.trim()) return;
+    setFbBusy(true);
+    try {
+      await api.taskFeedback(task.id, positive, fbReasonText?.trim());
+      dispatch({
+        type: "toast",
+        kind: "ok",
+        text: positive ? "已记录 👍" : "已记录 👎（理由入项目记忆）",
+      });
+      setFbNegative(null);
+      setFbReason("");
+    } catch (e) {
+      dispatch({ type: "toast", kind: "err", text: String(e) });
+    } finally {
+      setFbBusy(false);
+    }
+  };
+
   return (
     <section className="result-card">
       <div className="rc-head">
@@ -183,6 +213,57 @@ export default function ResultCard({
           <span>轮数</span>
         </div>
       </div>
+
+      {/* U7 反馈闭环：已反馈从事件流恢复；👍 直发 / 👎 必填理由 */}
+      <div className="rc-feedback">
+        {feedback ? (
+          <span className="dim">
+            已反馈 {feedback.positive ? "👍" : "👎"}
+            {feedback.reason ? `：${String(feedback.reason).slice(0, 40)}` : ""}
+          </span>
+        ) : fbNegative === false ? (
+          <>
+            <textarea
+              className="rc-reason"
+              placeholder="👎 拒绝理由（必填，将沉淀到项目记忆，指导后续任务）…"
+              value={fbReason}
+              onChange={(e) => setFbReason(e.target.value)}
+              rows={2}
+            />
+            <div className="rc-fb-btns">
+              <button
+                className="ghost rc-reject-btn"
+                disabled={fbBusy || !fbReason.trim()}
+                onClick={() => submitFeedback(false, fbReason)}
+              >
+                {fbBusy ? "提交中…" : "提交 👎"}
+              </button>
+              <button className="ghost" onClick={() => setFbNegative(null)}>
+                取消
+              </button>
+            </div>
+          </>
+        ) : (
+          <div className="rc-fb-btns">
+            <span className="dim">这个结果如何？</span>
+            <button
+              className="ghost rc-fb-good"
+              disabled={fbBusy}
+              onClick={() => submitFeedback(true)}
+            >
+              👍 好
+            </button>
+            <button
+              className="ghost rc-reject-btn"
+              disabled={fbBusy}
+              onClick={() => setFbNegative(false)}
+            >
+              👎 不好
+            </button>
+          </div>
+        )}
+      </div>
+
       <button className="ghost rc-diff-btn" disabled={busy} onClick={toggle}>
         {busy ? "diff 计算中…" : open ? "收起变更明细" : "查看变更明细（diff）"}
       </button>
