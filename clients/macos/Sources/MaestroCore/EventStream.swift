@@ -39,6 +39,35 @@ public struct MaestroEvent: Identifiable {
 
     /// 从 payload 里挑最有人话价值的一句
     public var detailText: String {
+        switch type {
+        // 反馈：👍/👎 + 理由
+        case "feedback_recorded":
+            let pos = payload["positive"] as? Bool ?? false
+            if let reason = payload["reason"] as? String, !reason.isEmpty {
+                return (pos ? "👍 " : "👎 ") + String(reason.prefix(80))
+            }
+            return pos ? "👍 满意" : "👎 不满意"
+        // 急停解除：恢复的任务数
+        case "emergency_resumed":
+            let n = (payload["resumed"] as? [Any])?.count ?? 0
+            return n == 0 ? "无冻结任务" : "恢复 \(n) 个任务"
+        // 急停冻结：worker 数
+        case "emergency_stopped":
+            if let workers = payload["workers"] as? [Any] { return "冻结 \(workers.count) 个 worker" }
+        // 上下文压缩
+        case "context_compacted":
+            if let r = payload["round"] as? Int { return "第 \(r) 轮后已压缩" }
+        // 断点续跑重排队
+        case "task_requeued":
+            if let r = payload["round"] as? Int { return "回到第 \(r) 轮锚点重跑" }
+        // 批次失败
+        case "batch_failed":
+            if let n = payload["failed_items"] as? Int {
+                let base = "\(n) 项失败"
+                return (payload["reason"] as? String).map { "\(base)：\($0)" } ?? base
+            }
+        default: break
+        }
         for key in ["summary", "message", "error", "milestone", "reason", "cause", "output", "model"] {
             if let s = payload[key] as? String, !s.isEmpty {
                 return String(s.prefix(90))
@@ -66,6 +95,7 @@ public struct MaestroEvent: Identifiable {
         "resume_attempt": "恢复尝试",
         "auto_recovery_exhausted": "自动恢复耗尽",
         "emergency_stopped": "🛑 急停",
+        "emergency_resumed": "✅ 急停解除",
         "emergency_snapshotted": "急停快照",
         "steering_dropped": "轻推被丢弃",
         "steering_queued": "轻推已排队",
@@ -80,6 +110,8 @@ public struct MaestroEvent: Identifiable {
         "context_compacted": "上下文压缩",
         "rounds_exhausted": "轮数耗尽",
         "provider_switched": "切换供应商",
+        "batch_marked_suspended": "批次挂起",
+        "batch_failed": "批次失败",
     ]
 }
 

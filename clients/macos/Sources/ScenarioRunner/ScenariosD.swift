@@ -6,6 +6,22 @@ func registerI_Protocol() {
     let s = Suite.shared
 
     s.add(77, "I", "未知方法 → -400（协议双轨制不炸）") {
+        // 静态断言：协议侧全部已知事件类型在 mac 客户端都有人话标签（无 unknown 噪声）
+        let knownProtocolEvents = [
+            "task_created", "task_started", "task_completed", "task_failed",
+            "task_cancelled", "task_requeued", "worker_spawned", "worker_died",
+            "goal_progress", "acceptance_gate_passed", "acceptance_gate_failed",
+            "suspended", "resumed", "resume_attempt", "auto_recovery_exhausted",
+            "emergency_stopped", "emergency_resumed", "emergency_snapshotted",
+            "steering_dropped", "steering_queued", "steering_delivered",
+            "checkpoint_created", "checkpoint_rolled_back", "narrative_snapshot",
+            "feedback_recorded", "ledger_entry", "round_progress", "cost_drift",
+            "context_compacted", "rounds_exhausted", "provider_switched",
+            "batch_marked_suspended", "batch_failed",
+        ]
+        let missing = knownProtocolEvents.filter { MaestroEvent.typeNames[$0] == nil }
+        try expect(missing.isEmpty, "以下事件缺人话标签: \(missing)")
+
         let d = try spawnDaemon(dataDir: Env.freshDir("i77"))
         defer { stopDaemon(d) }
         let resp = try rawRPC(socketPath: d.api.apiSocketPath,

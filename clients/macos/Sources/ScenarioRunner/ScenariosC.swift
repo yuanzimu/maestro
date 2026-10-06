@@ -17,6 +17,11 @@ func registerF_Emergency() {
         try expect(!evs.isEmpty, "未见 emergency_stopped 事件")
         let resume = try d.api.call("server_resume_all", params: ["steering": "flush"])
         try expect((resume["resumed"] as? [Any])?.isEmpty == true, "空载 resume 应空列表")
+        // 即使空载（无 resumed 事件），也必须收到 emergency_resumed 权威解除标记
+        let resumedEv = try collect(sub, deadline: 6) { $0.type == "emergency_resumed" }
+        try expect(!resumedEv.isEmpty, "应收到 emergency_resumed 事件")
+        try expect((resumedEv.first?.payload["resumed"] as? [Any])?.isEmpty == true,
+                  "空载 emergency_resumed.resumed 应为空")
         sub.stop()
     }
 
@@ -59,6 +64,7 @@ func registerF_Emergency() {
         let cli = try mockCLI("slow58", MockCLI.slow)
         let d = try spawnDaemon(dataDir: Env.freshDir("f58"), worker: .rounder(cli: cli, maxRounds: nil, roundGapMs: nil), env: fastEnv)
         defer { stopDaemon(d, killHard: true) }
+        let sub = try liveSub(d)
         let r = try d.createTask(title: "解冻对象", workdir: Env.freshDir("f58-work").path)
         let id = (r["task"] as? [String: Any])?["id"] as! String
         _ = try d.waitTask(id, state: "working", timeout: 15)
@@ -66,6 +72,12 @@ func registerF_Emergency() {
         _ = try d.waitTask(id, state: "suspended", timeout: 10)
         let resume = try d.api.call("server_resume_all", params: ["steering": "flush"])
         try expect((resume["resumed"] as? [String])?.contains(id) == true, "应在 resumed 名单: \(resume)")
+        // 非空载：emergency_resumed.resumed 应含该任务
+        let resumedEv = try collect(sub, deadline: 6) { $0.type == "emergency_resumed" }
+        try expect(!resumedEv.isEmpty, "应收到 emergency_resumed 事件")
+        try expect((resumedEv.first?.payload["resumed"] as? [String])?.contains(id) == true,
+                  "emergency_resumed.resumed 应含 \(id)")
+        sub.stop()
         _ = try d.waitTask(id, state: "working", timeout: 10)
         _ = try d.api.call("task_cancel", params: ["task": id])
     }
@@ -115,11 +127,22 @@ func registerF_Emergency() {
         stopDaemon(d, killHard: true)
         d = try spawnDaemon(dataDir: dir, worker: .rounder(cli: cli, maxRounds: nil, roundGapMs: nil), env: fastEnv)
         defer { stopDaemon(d, killHard: true) }
+        let sub = try liveSub(d)
         let t = try d.task(id)
         try expect(t?.state == "suspended", "重启后应保持挂起，实际 \(t?.state ?? "?")")
-        let resume = try d.api.call("task_resume", params: ["task": id])
-        try expect((resume["resumed"] as? Bool) == true, "恢复应成功: \(resume)")
-        _ = try d.waitTask(id, state: "working", timeout: 10)
+        // 急停状态已持久化：重启后仍冻结，单任务 resume 被 -409 引导走 resume_all
+        _ = try expectRPC(-409, contains: "resume_all") {
+            try d.api.call("task_resume", params: ["task": id])
+        }
+        _ = try d.api.call("server_resume_all", params: ["steering": "flush"])
+        // 原 worker 已随重启死亡 → 走 dead_suspended respawn；id 出现在
+        // EmergencyResumed.resumed，任务重新变 working
+        let resumedEv = try collect(sub, deadline: 8) { $0.type == "emergency_resumed" }
+        try expect(!resumedEv.isEmpty, "应收到 emergency_resumed 事件")
+        try expect((resumedEv.first?.payload["resumed"] as? [String])?.contains(id) == true,
+                  "emergency_resumed.resumed 应含 \(id)")
+        sub.stop()
+        _ = try d.waitTask(id, state: "working", timeout: 12)
         _ = try d.api.call("task_cancel", params: ["task": id])
     }
 

@@ -139,6 +139,13 @@ public final class AppState {
                     self.isEmergencyStopped = false
                     AppLog.emergency("收到 resumed(via=resume_all) 事件 → isEmergencyStopped=false")
                 }
+                // emergency_resumed 是 resume_all 完成的权威标记（空冻结时不会有 resumed
+                // 事件，只有它能解除状态）
+                if event.type == "emergency_resumed" {
+                    let n = (event.payload["resumed"] as? [Any])?.count ?? 0
+                    self.isEmergencyStopped = false
+                    AppLog.emergency("收到 emergency_resumed（恢复 \(n) 个任务）→ isEmergencyStopped=false")
+                }
             }
         }
         stream.start()
