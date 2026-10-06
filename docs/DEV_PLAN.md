@@ -596,6 +596,8 @@ B0 共享契约（先做，一次性）
 
 > 目标：把 Sprint B「能用」的三端做成「敢分发」——Windows 急停真冻结（Job Objects）+ 安装包签名，macOS Developer ID 签名 / 公证 / universal，Linux 托盘与安装体验收尾。
 > Sprint B 留下的技术债经调研已定位（见下「现状基线」），任务按「C0 发布基建与凭据 → C1 Windows / C2 macOS（可并行）→ C3 共享前端托盘收口 → C4 Linux 收尾 → C5 三端发版演练」组织，每条带唯一 ID。
+>
+> **📖 2026-10-06 起三端并行开发**：mac / windows / linux 三端任务分配、协作规则（分支/CI 硬门/协议双轨制/冲突区）与里程碑见 [PARALLEL_PLAN.md](./PARALLEL_PLAN.md)——各端开工前先读。
 
 **现状基线（2026-10-05 调研核实，Sprint C 的改造起点）**
 
