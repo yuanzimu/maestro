@@ -19,20 +19,38 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 /// Alt+M 全局快捷键（C4-3）：X11/Windows 可注册；Wayland 无全局注册协议
 /// → 注册失败不静默，emit 降级事件由设置页给系统自定义快捷键引导。
 /// 结果记入 shortcut_error 供 shortcut_status command 查询。
+///
+/// C4-3 复检修复（global-hotkey 0.8 源码实证）：Linux 后端**仅 X11**
+/// （x11rb XGrabKey，无 Wayland 实现）。Wayland 会话下若存在 XWayland，
+/// 注册会「成功」但 Wayland 合成器只在键盘焦点位于某 X11 窗口时才让
+/// grab 生效 —— 本应用（GTK3 默认 Wayland 后端）聚焦时收不到键，
+/// 误报「已注册」比不注册更糟 → 前置检测，Wayland 会话直接降级引导。
 fn register_alt_m(app: &tauri::AppHandle) {
-    let res = app.global_shortcut().on_shortcut("Alt+M", |app, _s, event| {
-        if event.state == ShortcutState::Pressed {
-            crate::tray::toggle_window(app);
-        }
-    });
+    if commands::is_wayland_session() {
+        let msg = "Wayland 会话：应用级全局快捷键不可靠（仅 X11 窗口聚焦时可能生效），请用系统自定义快捷键绑定 maestro-desktop";
+        eprintln!("[maestro] Alt+M 跳过注册: {msg}");
+        commands::set_shortcut_degraded(msg.to_string());
+        let _ = app.emit(
+            "maestro://shortcut-degraded",
+            serde_json::json!({ "message": msg }),
+        );
+        return;
+    }
+    let res = app
+        .global_shortcut()
+        .on_shortcut("Alt+M", |app, _s, event| {
+            if event.state == ShortcutState::Pressed {
+                crate::tray::toggle_window(app);
+            }
+        });
     match res {
         Ok(()) => {
-            crate::commands::set_shortcut_ok();
+            commands::set_shortcut_ok();
         }
         Err(e) => {
             let msg = e.to_string();
             eprintln!("[maestro] Alt+M 注册失败: {msg}");
-            crate::commands::set_shortcut_degraded(msg.clone());
+            commands::set_shortcut_degraded(msg.clone());
             let _ = app.emit(
                 "maestro://shortcut-degraded",
                 serde_json::json!({ "message": msg }),
@@ -56,7 +74,10 @@ pub fn run() {
             app.manage(st);
             // 引擎拉起失败只发事件不打断启动（UI 常驻、引擎可后起 —— 与 ui.rs 同原则）
             if let Err(e) = daemon::ensure_daemon(&handle) {
-                let _ = handle.emit("maestro://daemon-error", serde_json::json!({ "message": e }));
+                let _ = handle.emit(
+                    "maestro://daemon-error",
+                    serde_json::json!({ "message": e }),
+                );
             }
             events::spawn_bridge(handle.clone());
             events::spawn_poller(handle.clone());

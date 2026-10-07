@@ -246,6 +246,26 @@ pub async fn probe_worker(state: State<'_, AppState>) -> Result<Value, String> {
 // ---- C4-1/C4-3：托盘与全局快捷键状态（挂载后查询；setup 期 emit 会早于
 //      React listen() 注册而丢失 —— bridge_ready 同款教训）----
 
+/// Wayland 会话判定（C4-3，lib.rs register_alt_m 与本文件共用）：
+/// WAYLAND_DISPLAY 或 XDG_SESSION_TYPE=wayland 任一命中即真。
+/// global-hotkey 0.8 Linux 后端仅 X11 —— Wayland 会话下注册到 XWayland
+/// 会「成功」但仅 X11 窗口聚焦时触发，故检测命中即跳过注册（防误报）。
+pub fn is_wayland_session() -> bool {
+    wayland_from(
+        std::env::var_os("WAYLAND_DISPLAY"),
+        std::env::var_os("XDG_SESSION_TYPE"),
+    )
+}
+
+/// 判定逻辑（纯函数，可测）：display 非空即真；session_type == "wayland" 即真
+fn wayland_from(
+    wayland_display: Option<std::ffi::OsString>,
+    session_type: Option<std::ffi::OsString>,
+) -> bool {
+    wayland_display.filter(|v| !v.is_empty()).is_some()
+        || session_type.map(|v| v == "wayland").unwrap_or(false)
+}
+
 /// 三态：None = 未注册（setup 未跑完）；Some(Ok) / Some(Err)
 fn shortcut_error() -> &'static std::sync::Mutex<Option<Option<String>>> {
     static E: std::sync::OnceLock<std::sync::Mutex<Option<Option<String>>>> =
@@ -280,8 +300,7 @@ pub async fn shortcut_status() -> Result<Value, String> {
         Some(Some(e)) => (false, Some(e)),
         None => (false, None), // setup 未及注册（理论不可达：setup 先于任何 command）
     };
-    let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some()
-        || std::env::var_os("XDG_SESSION_TYPE").map(|v| v == "wayland").unwrap_or(false);
+    let wayland = is_wayland_session();
     Ok(json!({
         "shortcut": "Alt+M",
         "registered": registered,
@@ -656,6 +675,23 @@ pub async fn task_diff_revert(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// C4-3：Wayland 会话判定（双环境源任一命中即真；纯函数）
+    #[test]
+    fn wayland_session_detection_sources() {
+        // WAYLAND_DISPLAY 非空 → Wayland（即使 session_type 说是 x11）
+        assert!(wayland_from(Some("wayland-0".into()), None));
+        assert!(wayland_from(Some("wayland-0".into()), Some("x11".into())));
+        // XDG_SESSION_TYPE=wayland → Wayland（无 wayland display 变量时）
+        assert!(wayland_from(None, Some("wayland".into())));
+        // 双空 / x11 → 不是
+        assert!(!wayland_from(None, None));
+        assert!(!wayland_from(None, Some("x11".into())));
+        assert!(
+            !wayland_from(Some("".into()), Some("x11".into())),
+            "空 display 不算"
+        );
+    }
 
     #[test]
     fn numstat_parses_and_skips_binary() {

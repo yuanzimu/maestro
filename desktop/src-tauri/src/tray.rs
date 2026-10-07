@@ -19,7 +19,10 @@
 //! 线程模型：menu/tray 的 muda 底层在 Windows 要求 UI 线程操作 —— 所有
 //! 菜单变更经 run_on_main_thread 代理；事件桥/poller 线程安全调用。
 
-use std::sync::{atomic::{AtomicBool, Ordering}, Mutex, OnceLock};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Mutex, OnceLock,
+};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager};
@@ -83,8 +86,11 @@ fn build_inner(app: &AppHandle) -> Result<(), String> {
     let emergency = mk(ID_EMERGENCY, "⛔ 急停")?;
     let settings = mk(ID_SETTINGS, "设置")?;
     let quit = mk(ID_QUIT, "退出")?;
-    let menu = Menu::with_items(app, &[&show, &new_task, &inbox, &emergency, &settings, &quit])
-        .map_err(|e| format!("托盘菜单创建失败: {e}"))?;
+    let menu = Menu::with_items(
+        app,
+        &[&show, &new_task, &inbox, &emergency, &settings, &quit],
+    )
+    .map_err(|e| format!("托盘菜单创建失败: {e}"))?;
 
     let icon = app
         .default_window_icon()
@@ -103,14 +109,16 @@ fn build_inner(app: &AppHandle) -> Result<(), String> {
             // 其余动作交前端：复用既有确认流（急停 confirm / 恢复 flush 语义）
             // 与导航 dispatch，托盘不另起一套业务逻辑
             action => {
-                let _ = app.emit(
-                    "maestro://tray",
-                    serde_json::json!({ "action": action }),
-                );
+                let _ = app.emit("maestro://tray", serde_json::json!({ "action": action }));
             }
         })
         .on_tray_icon_event(|tray, event| {
-            if let tauri::tray::TrayIconEvent::Click { button: tauri::tray::MouseButton::Left, button_state: tauri::tray::MouseButtonState::Up, .. } = event {
+            if let tauri::tray::TrayIconEvent::Click {
+                button: tauri::tray::MouseButton::Left,
+                button_state: tauri::tray::MouseButtonState::Up,
+                ..
+            } = event
+            {
                 show_window(tray.app_handle());
             }
         })
@@ -132,8 +140,14 @@ pub fn show_window(app: &AppHandle) {
 
 /// Alt+M 全局快捷键（C4-3）：可见→藏（驻留后台），隐藏/最小化→唤起。
 /// 与托盘左键共用恢复路径；无托盘环境这是主要唤回手段之一（另一个是单实例）。
+/// 最小化先判（C4-3 复检修）：X11 iconic 窗口 is_visible 可能为 true，
+/// 不先判会把「想唤起最小化窗口」错误执行成 hide。
 pub fn toggle_window(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
+        if w.is_minimized().unwrap_or(false) {
+            show_window(app);
+            return;
+        }
         match w.is_visible() {
             Ok(true) => {
                 let _ = w.hide();
@@ -155,13 +169,13 @@ pub fn set_emergency(app: &AppHandle, frozen: bool) {
         } else {
             "⛔ 急停"
         });
-        let _ = inner
-            .tray_by_id("main")
-            .map(|tray| tray.set_tooltip(Some(if frozen {
+        let _ = inner.tray_by_id("main").map(|tray| {
+            tray.set_tooltip(Some(if frozen {
                 "Maestro 指挥台 —— 全局急停中"
             } else {
                 "Maestro 指挥台"
-            })));
+            }))
+        });
     });
 }
 
