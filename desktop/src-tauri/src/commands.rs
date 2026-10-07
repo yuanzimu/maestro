@@ -122,7 +122,11 @@ pub async fn steer_task(
     id: String,
     message: String,
 ) -> Result<Value, String> {
-    call(&state, Method::TaskSteer, json!({ "task": id, "message": message }))
+    call(
+        &state,
+        Method::TaskSteer,
+        json!({ "task": id, "message": message }),
+    )
 }
 
 #[tauri::command]
@@ -164,8 +168,15 @@ pub async fn list_inbox(state: State<'_, AppState>) -> Result<Value, String> {
 // ---- 急停 / 恢复 ----
 
 #[tauri::command]
-pub async fn emergency_stop(state: State<'_, AppState>, reason: Option<String>) -> Result<Value, String> {
-    call(&state, Method::ServerEmergencyStop, json!({ "reason": reason.unwrap_or_else(|| "desktop-ui".into()) }))
+pub async fn emergency_stop(
+    state: State<'_, AppState>,
+    reason: Option<String>,
+) -> Result<Value, String> {
+    call(
+        &state,
+        Method::ServerEmergencyStop,
+        json!({ "reason": reason.unwrap_or_else(|| "desktop-ui".into()) }),
+    )
 }
 
 #[tauri::command]
@@ -187,7 +198,11 @@ pub async fn rollback_checkpoint(
     task: String,
     to: String,
 ) -> Result<Value, String> {
-    call(&state, Method::CheckpointRollback, json!({ "task": task, "to": to }))
+    call(
+        &state,
+        Method::CheckpointRollback,
+        json!({ "task": task, "to": to }),
+    )
 }
 
 // ---- 设置 / 探测 ----
@@ -199,12 +214,8 @@ pub async fn get_settings(state: State<'_, AppState>) -> Result<Value, String> {
 }
 
 #[tauri::command]
-pub async fn save_settings(
-    app: AppHandle,
-    settings: Value,
-) -> Result<(), String> {
-    let s: Settings =
-        serde_json::from_value(settings).map_err(|e| format!("设置格式错误: {e}"))?;
+pub async fn save_settings(app: AppHandle, settings: Value) -> Result<(), String> {
+    let s: Settings = serde_json::from_value(settings).map_err(|e| format!("设置格式错误: {e}"))?;
     settings::save(&s).map_err(|e| format!("保存失败: {e}"))?;
     let state = app.state::<AppState>();
     *state.settings.lock().unwrap() = s;
@@ -318,8 +329,7 @@ pub async fn task_diff(state: State<'_, AppState>, id: String) -> Result<Value, 
     let numstat = baseline_workdir_diff(&workdir, baseline, "numstat")?;
     let (files, ins, del) = parse_numstat(&numstat);
 
-    let patch_bytes = baseline_workdir_diff(&workdir, baseline, "patch")?
-        .into_bytes();
+    let patch_bytes = baseline_workdir_diff(&workdir, baseline, "patch")?.into_bytes();
     let truncated = patch_bytes.len() > MAX_PATCH_BYTES;
     let patch = clamp_utf8(&patch_bytes, MAX_PATCH_BYTES);
 
@@ -424,12 +434,23 @@ fn baseline_workdir_diff(
         let now_tree = run(&["write-tree"])?;
         match mode {
             "numstat" => run(&[
-                "-c", "core.quotepath=false", "diff-tree", "--no-commit-id",
-                "-r", "--numstat", baseline, &now_tree,
+                "-c",
+                "core.quotepath=false",
+                "diff-tree",
+                "--no-commit-id",
+                "-r",
+                "--numstat",
+                baseline,
+                &now_tree,
             ]),
             _ => run(&[
-                "diff-tree", "--no-commit-id", "-r", "-p", "--no-color",
-                baseline, &now_tree,
+                "diff-tree",
+                "--no-commit-id",
+                "-r",
+                "-p",
+                "--no-color",
+                baseline,
+                &now_tree,
             ]),
         }
     })();
@@ -453,7 +474,10 @@ fn split_patch(patch: &str) -> Vec<FileDiff> {
             if let Some(f) = cur.take() {
                 files.push(f);
             }
-            cur = Some(FileDiff { header: vec![line.to_string()], hunks: Vec::new() });
+            cur = Some(FileDiff {
+                header: vec![line.to_string()],
+                hunks: Vec::new(),
+            });
         } else if let Some(f) = cur.as_mut() {
             if line.starts_with("@@") {
                 f.hunks.push(String::new());
@@ -528,9 +552,7 @@ fn followup_prompt(task_title: &str, patch: &str, reject: &[usize], reason: &str
             .header
             .iter()
             .find_map(|l| l.strip_prefix("+++ b/"))
-            .or_else(|| {
-                f.header.iter().find_map(|l| l.strip_prefix("--- a/"))
-            })
+            .or_else(|| f.header.iter().find_map(|l| l.strip_prefix("--- a/")))
             .unwrap_or("(未知文件)");
         for (i, h) in f.hunks.iter().enumerate() {
             if reject.contains(&(idx + i)) {
@@ -598,7 +620,9 @@ pub async fn task_diff_revert(
         .unwrap()
         .write_all(sub.as_bytes())
         .map_err(|e| format!("write patch: {e}"))?;
-    let out = apply.wait_with_output().map_err(|e| format!("wait git: {e}"))?;
+    let out = apply
+        .wait_with_output()
+        .map_err(|e| format!("wait git: {e}"))?;
     if !out.status.success() {
         return Err(format!(
             "git apply --reverse 失败（工作区可能已变化）：\n{}",

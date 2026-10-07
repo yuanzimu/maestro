@@ -24,10 +24,7 @@ fn exe_suffix() -> &'static str {
 fn tool_candidates(name: &str) -> Vec<String> {
     let triple = env!("MAESTRO_TARGET");
     let sfx = exe_suffix();
-    vec![
-        format!("{name}-{triple}{sfx}"),
-        format!("{name}{sfx}"),
-    ]
+    vec![format!("{name}-{triple}{sfx}"), format!("{name}{sfx}")]
 }
 
 /// PATH 拆分（Windows `;` / Unix `:`；空段滤掉 —— `a;;b` 不产生 "" 段）
@@ -125,7 +122,10 @@ mod tests {
             // Windows 分号列表在 Unix 是单一路径，不误拆。样例须不含盘符
             // 冒号 —— `C:\...` 的冒号在 Unix 恰是分隔符必被拆（此前该断言
             // 只在 Windows 分支跑过，Linux 首跑即挂）
-            assert_eq!(path_entries("\\\\srv\\share;\\\\srv2\\sh2"), vec!["\\\\srv\\share;\\\\srv2\\sh2"]);
+            assert_eq!(
+                path_entries("\\\\srv\\share;\\\\srv2\\sh2"),
+                vec!["\\\\srv\\share;\\\\srv2\\sh2"]
+            );
         }
     }
 }

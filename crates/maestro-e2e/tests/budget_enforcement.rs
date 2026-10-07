@@ -61,16 +61,17 @@ fn hard_budget_cost_exceeded_freezes_and_suspends() {
         .replay_all()
         .iter()
         .filter_map(|e| match &e.event {
-            maestro_protocol::events::Event::NarrativeSnapshot { task: tt, milestone, .. }
-                if tt == &t =>
-            {
-                Some(milestone.clone())
-            }
+            maestro_protocol::events::Event::NarrativeSnapshot {
+                task: tt,
+                milestone,
+                ..
+            } if tt == &t => Some(milestone.clone()),
             _ => None,
         })
         .collect::<Vec<_>>();
     assert!(
-        narr.iter().any(|m| m.contains("预算超限") && m.contains("预算")),
+        narr.iter()
+            .any(|m| m.contains("预算超限") && m.contains("预算")),
         "应有预算超限叙事快照: {narr:?}"
     );
 

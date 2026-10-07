@@ -256,8 +256,8 @@ mod tests {
         use crate::core::Ctx;
         use crate::eventhub::EventHub;
         use maestro_protocol::events::Event;
-        use maestro_protocol::types::{TaskId, WorkerId};
         use maestro_protocol::events::Task;
+        use maestro_protocol::types::{TaskId, WorkerId};
         use std::sync::Arc;
 
         fn ctx_with(done: bool) -> (Ctx, TaskId) {
@@ -274,7 +274,10 @@ mod tests {
                 created_at: 0,
             };
             let worker = WorkerId::new("w-1");
-            ctx.publish(Event::TaskCreated { task, prompt: "p".into() });
+            ctx.publish(Event::TaskCreated {
+                task,
+                prompt: "p".into(),
+            });
             ctx.publish(Event::WorkerSpawned {
                 worker: worker.clone(),
                 task: task_id.clone(),

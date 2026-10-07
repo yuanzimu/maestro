@@ -137,7 +137,11 @@ fn handle_connection(mut stream: TcpStream, state: &UiState) -> std::io::Result<
 /// 路由：返回 (状态码, Content-Type, body)
 fn route(method: &str, path: &str, body: &[u8], state: &UiState) -> (u16, &'static str, Vec<u8>) {
     match (method, path) {
-        ("GET", "/") => (200, "text/html; charset=utf-8", INDEX_HTML.as_bytes().to_vec()),
+        ("GET", "/") => (
+            200,
+            "text/html; charset=utf-8",
+            INDEX_HTML.as_bytes().to_vec(),
+        ),
         ("GET", "/api/status") => api_json(state, Method::ServerStatus, serde_json::json!({})),
         ("GET", "/api/tasks") => api_json(state, Method::TaskList, serde_json::json!({})),
         ("GET", "/api/inbox") => api_json(state, Method::InboxList, serde_json::json!({})),
@@ -145,7 +149,11 @@ fn route(method: &str, path: &str, body: &[u8], state: &UiState) -> (u16, &'stat
             if let Some(id) = query_param(p, "id") {
                 api_json(state, Method::TaskGet, serde_json::json!({ "task": id }))
             } else {
-                (400, "application/json", b"{\"error\":\"missing ?id=\"}".to_vec())
+                (
+                    400,
+                    "application/json",
+                    b"{\"error\":\"missing ?id=\"}".to_vec(),
+                )
             }
         }
         ("GET", p) if p.starts_with("/api/events") => {
@@ -169,7 +177,11 @@ fn route(method: &str, path: &str, body: &[u8], state: &UiState) -> (u16, &'stat
         }
         ("POST", "/api/steer") => {
             let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
-                return (400, "application/json", b"{\"error\":\"bad json\"}".to_vec());
+                return (
+                    400,
+                    "application/json",
+                    b"{\"error\":\"bad json\"}".to_vec(),
+                );
             };
             let (Some(task), Some(message)) = (
                 v["task"].as_str().map(String::from),
@@ -191,17 +203,29 @@ fn route(method: &str, path: &str, body: &[u8], state: &UiState) -> (u16, &'stat
         ("POST", "/api/task/resume") => post_task_action(state, body, Method::TaskResume),
         ("POST", "/api/task/cancel") => post_task_action(state, body, Method::TaskCancel),
         ("GET", _) => (404, "text/plain; charset=utf-8", b"not found".to_vec()),
-        _ => (405, "text/plain; charset=utf-8", b"method not allowed".to_vec()),
+        _ => (
+            405,
+            "text/plain; charset=utf-8",
+            b"method not allowed".to_vec(),
+        ),
     }
 }
 
 /// POST {task: "..."} → daemon 方法
 fn post_task_action(state: &UiState, body: &[u8], method: Method) -> (u16, &'static str, Vec<u8>) {
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
-        return (400, "application/json", b"{\"error\":\"bad json\"}".to_vec());
+        return (
+            400,
+            "application/json",
+            b"{\"error\":\"bad json\"}".to_vec(),
+        );
     };
     let Some(task) = v["task"].as_str() else {
-        return (400, "application/json", b"{\"error\":\"need task\"}".to_vec());
+        return (
+            400,
+            "application/json",
+            b"{\"error\":\"need task\"}".to_vec(),
+        );
     };
     api_json(state, method, serde_json::json!({ "task": task }))
 }
@@ -221,8 +245,7 @@ fn api_json(
         Err(e) => (
             502,
             "application/json",
-            serde_json::to_vec(&serde_json::json!({ "error": e.to_string() }))
-                .unwrap_or_default(),
+            serde_json::to_vec(&serde_json::json!({ "error": e.to_string() })).unwrap_or_default(),
         ),
     }
 }

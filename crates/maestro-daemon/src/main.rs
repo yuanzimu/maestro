@@ -59,7 +59,8 @@ fn main() -> anyhow::Result<()> {
         None => {
             // 默认 echo worker（占位演示用）：平台各自的 shell
             #[cfg(unix)]
-            let (dprog, dargs): (&str, Vec<&str>) = ("/bin/sh", vec!["-c", "echo maestro-worker-v0"]);
+            let (dprog, dargs): (&str, Vec<&str>) =
+                ("/bin/sh", vec!["-c", "echo maestro-worker-v0"]);
             #[cfg(windows)]
             let (dprog, dargs): (&str, Vec<&str>) = ("cmd", vec!["/C", "echo maestro-worker-v0"]);
             (
@@ -83,7 +84,11 @@ fn main() -> anyhow::Result<()> {
     let budget = maestro_daemon::budget::TaskBudget::from_env();
     tracing::info!(
         "model gateway: {}",
-        if gateway.enabled() { &gateway.url } else { "disabled (direct)" }
+        if gateway.enabled() {
+            &gateway.url
+        } else {
+            "disabled (direct)"
+        }
     );
 
     // 恢复 or 全新启动：数据目录有事件库则恢复。

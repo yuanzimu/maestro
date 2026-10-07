@@ -239,7 +239,12 @@ fn next_seq(worktree: &Path, task: &TaskId) -> Result<u32, String> {
     // 基于**现存最大序号** +1，而非数量 +1：gc 会物理删除早期 ref 而不
     // 压缩序号，len+1 会在 gc 之后产生与现存 ref 碰撞的序号，
     // update-ref 静默覆盖旧 checkpoint（历史丢失、谱系错乱）。
-    Ok(list(worktree, task).iter().map(|i| i.seq).max().unwrap_or(0) + 1)
+    Ok(list(worktree, task)
+        .iter()
+        .map(|i| i.seq)
+        .max()
+        .unwrap_or(0)
+        + 1)
 }
 
 fn latest_commit(worktree: &Path, task: &TaskId) -> Option<String> {
@@ -404,7 +409,9 @@ mod tests {
         h.join().unwrap();
         assert!(cp.is_ok(), "瞬时锁释放后应急快照应成功: {cp:?}");
         assert!(
-            git(p, &["status", "--porcelain"]).unwrap().contains("?? dirty.txt"),
+            git(p, &["status", "--porcelain"])
+                .unwrap()
+                .contains("?? dirty.txt"),
             "成功后工作区应保持原状"
         );
         assert!(!lock.exists(), "成功后不应残留 index.lock");

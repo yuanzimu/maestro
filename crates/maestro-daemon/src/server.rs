@@ -217,7 +217,10 @@ fn handle_events_conn(
     if !live {
         while let Ok(env) = subscription.rx.try_recv() {
             let line = serde_json::to_string(&env).unwrap_or_default();
-            if writeln!(stream, "{line}").and_then(|_| stream.flush()).is_err() {
+            if writeln!(stream, "{line}")
+                .and_then(|_| stream.flush())
+                .is_err()
+            {
                 break; // 客户端已断开
             }
         }

@@ -235,14 +235,8 @@ pub fn bind_endpoints(data_dir: &Path) -> io::Result<(Listener, Listener, Addr)>
         let ev_l = std::net::TcpListener::bind(("127.0.0.1", 0))?;
         let api_addr = api_l.local_addr()?;
         let ev_addr = ev_l.local_addr()?;
-        std::fs::write(
-            data_dir.join("maestro.api.port"),
-            format!("{api_addr}\n"),
-        )?;
-        std::fs::write(
-            data_dir.join("maestro.events.port"),
-            format!("{ev_addr}\n"),
-        )?;
+        std::fs::write(data_dir.join("maestro.api.port"), format!("{api_addr}\n"))?;
+        std::fs::write(data_dir.join("maestro.events.port"), format!("{ev_addr}\n"))?;
         Ok((
             Listener::Tcp(api_l),
             Listener::Tcp(ev_l),

@@ -27,7 +27,11 @@ impl BudgetLimit {
     pub fn describe(self) -> String {
         match self {
             BudgetLimit::CostExceeded { spent, max } => {
-                format!("花费 ${:.2} 超预算上限 ${:.2}", spent as f64 / 100.0, max as f64 / 100.0)
+                format!(
+                    "花费 ${:.2} 超预算上限 ${:.2}",
+                    spent as f64 / 100.0,
+                    max as f64 / 100.0
+                )
             }
             BudgetLimit::WallTimeExceeded { elapsed, max } => format!(
                 "耗时 {:.1} 分钟超预算上限 {:.1} 分钟",
@@ -123,7 +127,10 @@ mod tests {
         let hit = b.check(501, 0).unwrap();
         assert!(matches!(
             hit,
-            BudgetLimit::CostExceeded { spent: 501, max: 500 }
+            BudgetLimit::CostExceeded {
+                spent: 501,
+                max: 500
+            }
         ));
         // 恰好等于上限不算超
         assert!(b.check(500, 0).is_none());

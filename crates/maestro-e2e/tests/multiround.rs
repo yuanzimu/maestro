@@ -1044,10 +1044,7 @@ fn task_get_narrative_line() {
         "坏schema 应终态 Failed，实际: {:?}",
         d.task_state(&t0)
     );
-    let v0 = d.api(
-        Method::TaskGet,
-        serde_json::json!({ "task": t0.as_str() }),
-    );
+    let v0 = d.api(Method::TaskGet, serde_json::json!({ "task": t0.as_str() }));
     assert_eq!(v0["narrative"].as_str().unwrap(), "已结束（无轮账）");
 
     // 多轮任务：注入「结束」快速收敛 → narrative 聚合轮数/工具/成本/摘要

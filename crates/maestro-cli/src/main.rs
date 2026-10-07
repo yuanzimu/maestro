@@ -376,10 +376,19 @@ fn fmt_event_human(env: &maestro_protocol::events::Envelope) -> String {
             format!("⚑ {task} 轮数预算耗尽（{rounds} 轮）——maestro task resume 续跑")
         }
         Event::Suspended { task, reason, .. } => format!("{task} 挂起（{}）", reason_str(reason)),
-        Event::AcceptanceGatePassed { task, round, output } => {
+        Event::AcceptanceGatePassed {
+            task,
+            round,
+            output,
+        } => {
             format!("✓ {task} 验收通过（轮 {round}）：{output}")
         }
-        Event::AcceptanceGateFailed { task, failures, output, .. } => {
+        Event::AcceptanceGateFailed {
+            task,
+            failures,
+            output,
+            ..
+        } => {
             format!("⚑ {task} 验收失败（{failures}/3 次假完成）：{output}")
         }
         Event::TaskCompleted { task, summary, .. } => format!("✓ {task} 完成：{summary}"),

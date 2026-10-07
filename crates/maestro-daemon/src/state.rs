@@ -407,7 +407,11 @@ mod tests {
                 r as u64,
             );
         }
-        assert_eq!(a.get(&TaskId::new("t1")).unwrap().round, 3, "3 条轮进度 = 累计 3");
+        assert_eq!(
+            a.get(&TaskId::new("t1")).unwrap().round,
+            3,
+            "3 条轮进度 = 累计 3"
+        );
         // respawn 续接：rounder 重启从 1 重计 —— 累计值继续增长（4）
         a.apply(
             &Event::RoundProgress {

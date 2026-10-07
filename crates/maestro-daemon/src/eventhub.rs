@@ -345,9 +345,7 @@ mod tests {
     fn replay_after_restart_recovery() {
         let hub = EventHub::new();
         // 模拟重启恢复：历史 seq 1..=3 已在事件库（上次会话），本次未广播
-        let history: Vec<Envelope> = (1..=3u64)
-            .map(|s| Envelope::new(s, ev(s)))
-            .collect();
+        let history: Vec<Envelope> = (1..=3u64).map(|s| Envelope::new(s, ev(s))).collect();
         hub.set_seq_floor(4);
         hub.set_broadcast_floor(3);
 
@@ -373,7 +371,9 @@ mod tests {
             .unwrap();
         assert_eq!(d.seq, 4);
         assert!(
-            sub.rx.recv_timeout(std::time::Duration::from_millis(200)).is_err(),
+            sub.rx
+                .recv_timeout(std::time::Duration::from_millis(200))
+                .is_err(),
             "不应有重复投递"
         );
     }

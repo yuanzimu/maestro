@@ -114,8 +114,7 @@ mod tests {
             .unwrap()
             .saturating_sub(std::time::Duration::from_secs(hours as u64 * 3600));
         let ts = TimeSpec::from_duration(past);
-        utimensat(None, p, &ts, &ts, UtimensatFlags::FollowSymlink)
-            .expect("utimensat 设置 mtime");
+        utimensat(None, p, &ts, &ts, UtimensatFlags::FollowSymlink).expect("utimensat 设置 mtime");
     }
 
     #[test]
@@ -180,7 +179,13 @@ mod tests {
         }
         mk_dir(Path::new(&work), "t-blocked");
         let records: Vec<(TaskId, WorkerState, String)> = (0..=KEEP_PER_WORKDIR)
-            .map(|i| (TaskId::new(format!("t-done-{i}")), WorkerState::Done, work.clone()))
+            .map(|i| {
+                (
+                    TaskId::new(format!("t-done-{i}")),
+                    WorkerState::Done,
+                    work.clone(),
+                )
+            })
             .chain(std::iter::once((
                 TaskId::new("t-blocked"),
                 WorkerState::Blocked,
@@ -188,7 +193,11 @@ mod tests {
             )))
             .collect();
         let report = gc_from_records(records.iter().map(|(a, b, c)| (a, *b, c.as_str())));
-        assert_eq!(report.removed.len(), 1, "KEEP+1 个终态应恰好删 1: {report:?}");
+        assert_eq!(
+            report.removed.len(),
+            1,
+            "KEEP+1 个终态应恰好删 1: {report:?}"
+        );
         assert!(
             state_dir(Path::new(&work), "t-blocked").exists(),
             "非终态目录（resume 凭据）不得删"
@@ -198,9 +207,13 @@ mod tests {
     #[test]
     fn empty_workdir_noop() {
         let report = gc_from_records(
-            [(TaskId::new("t-1"), WorkerState::Done, "/nonexistent/dir".to_string())]
-                .iter()
-                .map(|(a, b, c)| (a, *b, c.as_str())),
+            [(
+                TaskId::new("t-1"),
+                WorkerState::Done,
+                "/nonexistent/dir".to_string(),
+            )]
+            .iter()
+            .map(|(a, b, c)| (a, *b, c.as_str())),
         );
         assert!(report.removed.is_empty());
     }

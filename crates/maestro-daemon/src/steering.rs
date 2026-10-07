@@ -130,7 +130,8 @@ impl SteeringQueue {
             .entry(task.clone())
             .or_default()
             .push_back(msg.clone());
-        self.persist_append(&msg).map_err(|e| format!("轻推持久化失败: {e}"))?;
+        self.persist_append(&msg)
+            .map_err(|e| format!("轻推持久化失败: {e}"))?;
         Ok(msg)
     }
 

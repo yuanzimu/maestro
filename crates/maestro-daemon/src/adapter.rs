@@ -312,7 +312,9 @@ impl Dialect for CodexDialect {
             let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
                 continue;
             };
-            let Some(t) = v["type"].as_str() else { continue };
+            let Some(t) = v["type"].as_str() else {
+                continue;
+            };
             if !out.event_types.iter().any(|e| e == t) {
                 out.event_types.push(t.to_string());
             }
@@ -432,7 +434,9 @@ impl Dialect for GeminiDialect {
             let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
                 continue;
             };
-            let Some(t) = v["type"].as_str() else { continue };
+            let Some(t) = v["type"].as_str() else {
+                continue;
+            };
             if !out.event_types.iter().any(|e| e == t) {
                 out.event_types.push(t.to_string());
             }
@@ -539,7 +543,9 @@ impl Dialect for OpenCodeDialect {
             let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
                 continue;
             };
-            let Some(t) = v["type"].as_str() else { continue };
+            let Some(t) = v["type"].as_str() else {
+                continue;
+            };
             if !out.event_types.iter().any(|e| e == t) {
                 out.event_types.push(t.to_string());
             }
@@ -868,9 +874,16 @@ mod tests {
         assert_eq!(oc.usage_in, 350);
         assert_eq!(oc.cache_read, Some(600));
         assert_eq!(oc.cache_creation, Some(50));
-        assert_eq!(oc.usage_in + oc.cache_read.unwrap() + oc.cache_creation.unwrap(), 1000);
+        assert_eq!(
+            oc.usage_in + oc.cache_read.unwrap() + oc.cache_creation.unwrap(),
+            1000
+        );
         assert_eq!(oc.usage_out, 80);
-        assert!(d.schema_drift(&oc).is_empty(), "要素齐全: {:?}", d.schema_drift(&oc));
+        assert!(
+            d.schema_drift(&oc).is_empty(),
+            "要素齐全: {:?}",
+            d.schema_drift(&oc)
+        );
         // 退出码：codex 无特殊正常码（默认仅 0）
         assert!(!d.accepts_exit(Some(53)));
     }
@@ -908,7 +921,11 @@ mod tests {
         let d = CodexDialect;
         assert_eq!(
             d.round_args("做点事", None),
-            vec!["exec".to_string(), "--json".to_string(), "做点事".to_string()]
+            vec![
+                "exec".to_string(),
+                "--json".to_string(),
+                "做点事".to_string()
+            ]
         );
         assert_eq!(
             d.round_args("继续", Some("th-9")),
@@ -1011,7 +1028,11 @@ mod tests {
             r#"{"type":"step_finish","sessionID":"ses-1","part":{"reason":"stop","cost":0.0123,"tokens":{"input":200,"output":40}}}"#,
         ]);
         let oc = d.parse_round(&stdout);
-        assert_eq!(oc.session_id.as_deref(), Some("ses-1"), "每行 sessionID，首见为准");
+        assert_eq!(
+            oc.session_id.as_deref(),
+            Some("ses-1"),
+            "每行 sessionID，首见为准"
+        );
         assert_eq!(oc.answer, "正在执行，完成", "text 事件聚合");
         assert_eq!(oc.tools_used, vec!["read"]);
         assert_eq!(oc.usage_in, 200);
@@ -1034,7 +1055,12 @@ mod tests {
 
         assert_eq!(
             d.round_args("做点事", None),
-            vec!["run".to_string(), "--format".to_string(), "json".to_string(), "做点事".to_string()]
+            vec![
+                "run".to_string(),
+                "--format".to_string(),
+                "json".to_string(),
+                "做点事".to_string()
+            ]
         );
         assert_eq!(
             d.round_args("继续", Some("ses-9")),
@@ -1053,11 +1079,12 @@ mod tests {
     #[test]
     fn opencode_dialect_drift() {
         let d = OpenCodeDialect;
-        let stdout = stream(&[
-            r#"{"type":"text","sessionID":"ses-1","part":{"text":"ok"}}"#,
-        ]);
+        let stdout = stream(&[r#"{"type":"text","sessionID":"ses-1","part":{"text":"ok"}}"#]);
         let oc = d.parse_round(&stdout);
         let drifts = d.schema_drift(&oc);
-        assert!(drifts.iter().any(|x| x.contains("step_finish")), "{drifts:?}");
+        assert!(
+            drifts.iter().any(|x| x.contains("step_finish")),
+            "{drifts:?}"
+        );
     }
 }

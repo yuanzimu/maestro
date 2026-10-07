@@ -39,7 +39,7 @@ fn spawn_socket_daemon(data_dir: &std::path::Path) -> (Arc<Mutex<Core>>, std::pa
     let (guard, api_addr) = server::serve(hub, core_tx, data_dir, store).expect("serve");
     core.lock().unwrap().cfg.socket_path = api_addr.to_env_value();
     let _ = guard; // 停机句柄随测试进程生命周期（同生产 daemon）
-    // Core 主循环线程
+                   // Core 主循环线程
     {
         let c = core.clone();
         std::thread::spawn(move || {
@@ -249,8 +249,14 @@ fn events_replay_without_follow_returns() {
             true
         })
         .expect("subscribe 应正常返回");
-    assert!(start.elapsed() < std::time::Duration::from_secs(5), "非 follow 不应阻塞");
-    assert!(count >= 2, "重放应完整（task_created + worker_spawned 至少 2 条），实际 {count}");
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "非 follow 不应阻塞"
+    );
+    assert!(
+        count >= 2,
+        "重放应完整（task_created + worker_spawned 至少 2 条），实际 {count}"
+    );
 }
 
 /// stale socket 清理：假 socket 文件不阻碍新 daemon 起服务

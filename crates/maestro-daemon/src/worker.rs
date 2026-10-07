@@ -368,15 +368,14 @@ mod imp {
     use std::time::{Duration, Instant};
 
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
-    use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent};
+    use windows_sys::Win32::System::Console::{GenerateConsoleCtrlEvent, CTRL_BREAK_EVENT};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, Thread32First, Thread32Next, THREADENTRY32,
-        TH32CS_SNAPTHREAD,
+        CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
     };
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicProcessIdList,
-        JobObjectExtendedLimitInformation, QueryInformationJobObject,
-        SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
+        TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
         JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     };
     use windows_sys::Win32::System::Threading::{
@@ -491,10 +490,13 @@ mod imp {
                 CloseHandle(job);
                 return;
             }
-            jobs()
-                .lock()
-                .unwrap()
-                .insert(child.id(), JobCell { job: job as Raw, frozen: vec![] });
+            jobs().lock().unwrap().insert(
+                child.id(),
+                JobCell {
+                    job: job as Raw,
+                    frozen: vec![],
+                },
+            );
         }
     }
 
@@ -624,7 +626,9 @@ mod imp {
         }
         let job = jobs().lock().unwrap().get(&pgid).map(|c| c.job);
         match job {
-            Some(job) => unsafe { TerminateJobObject(job as _, 1); },
+            Some(job) => unsafe {
+                TerminateJobObject(job as _, 1);
+            },
             None => {
                 let _ = kill_pid(pgid);
             }
@@ -685,7 +689,11 @@ mod imp {
                         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                         .map(|d| d.as_millis() as u64)
                         .unwrap_or(0);
-                    out.push((e.file_name().to_string_lossy().into_owned(), md.len(), mtime));
+                    out.push((
+                        e.file_name().to_string_lossy().into_owned(),
+                        md.len(),
+                        mtime,
+                    ));
                 }
             }
         }
@@ -1074,8 +1082,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (tx, _rx) = mpsc::channel();
         let script = "for /l %i in (1,0,1) do (echo x >> tick.txt)";
-        let meta =
-            spawn_worker(spec("cmd", &["/c", script], tmp.path()), "pipe", tx).unwrap();
+        let meta = spawn_worker(spec("cmd", &["/c", script], tmp.path()), "pipe", tx).unwrap();
         let tick = tmp.path().join("tick.txt");
         wait_grow(&tick, 5000);
 
@@ -1100,9 +1107,9 @@ mod tests {
     fn win_job_terminate_kills_grandchildren() {
         let tmp = tempfile::tempdir().unwrap();
         let (tx, _rx) = mpsc::channel();
-        let script = "start /b cmd /c ping -n 60 127.0.0.1 & for /l %i in (1,0,1) do (echo x >> tick.txt)";
-        let meta =
-            spawn_worker(spec("cmd", &["/c", script], tmp.path()), "pipe", tx).unwrap();
+        let script =
+            "start /b cmd /c ping -n 60 127.0.0.1 & for /l %i in (1,0,1) do (echo x >> tick.txt)";
+        let meta = spawn_worker(spec("cmd", &["/c", script], tmp.path()), "pipe", tx).unwrap();
         let tick = tmp.path().join("tick.txt");
         wait_grow(&tick, 5000);
 
@@ -1135,8 +1142,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (tx, _rx) = mpsc::channel();
         let script = "for /l %i in (1,0,1) do (echo x >> tick.txt)";
-        let meta =
-            spawn_worker(spec("cmd", &["/c", script], tmp.path()), "pipe", tx).unwrap();
+        let meta = spawn_worker(spec("cmd", &["/c", script], tmp.path()), "pipe", tx).unwrap();
         wait_grow(&tmp.path().join("tick.txt"), 5000);
 
         graceful_kill_group(meta.pgid);
@@ -1156,8 +1162,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (tx, _rx) = mpsc::channel();
         let script = "for /l %i in (1,0,1) do (echo x >> tick.txt)";
-        let meta =
-            spawn_worker(spec("cmd", &["/c", script], tmp.path()), "pipe", tx).unwrap();
+        let meta = spawn_worker(spec("cmd", &["/c", script], tmp.path()), "pipe", tx).unwrap();
         wait_grow(&tmp.path().join("tick.txt"), 5000);
         assert!(is_our_process(meta.pid, meta.start_time));
         assert!(hard_kill_group(meta.pgid));

@@ -15,7 +15,6 @@ use maestro_protocol::types::*;
 use maestro_testkit::r3::write_mock_cli;
 use serial_test::serial;
 
-
 fn task_state_dir(work: &std::path::Path, task: &TaskId) -> std::path::PathBuf {
     work.join(".maestro").join(task.as_str())
 }

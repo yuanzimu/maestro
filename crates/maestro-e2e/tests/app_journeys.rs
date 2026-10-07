@@ -22,7 +22,6 @@ use serial_test::serial;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
-
 fn task_state_dir(work: &std::path::Path, task: &TaskId) -> std::path::PathBuf {
     work.join(".maestro").join(task.as_str())
 }
@@ -33,7 +32,11 @@ fn task_state_dir(work: &std::path::Path, task: &TaskId) -> std::path::PathBuf {
 
 fn http_get(port: u16, path: &str) -> (u16, String) {
     let mut s = TcpStream::connect(("127.0.0.1", port)).expect("connect ui");
-    write!(s, "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").unwrap();
+    write!(
+        s,
+        "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
     read_response(&mut s)
 }
 
@@ -101,8 +104,15 @@ fn s1_first_task_lifecycle_visible() {
     );
 
     // 完成
-    d.api(Method::TaskSteer, serde_json::json!({ "task": t.as_str(), "message": "结束" }));
-    assert!(d.wait_state(&t, WorkerState::Done, 20000), "实际: {:?}", d.task_state(&t));
+    d.api(
+        Method::TaskSteer,
+        serde_json::json!({ "task": t.as_str(), "message": "结束" }),
+    );
+    assert!(
+        d.wait_state(&t, WorkerState::Done, 20000),
+        "实际: {:?}",
+        d.task_state(&t)
+    );
 
     // 界面同步终态
     let (code, body) = http_get(port, "/api/tasks");
@@ -110,7 +120,9 @@ fn s1_first_task_lifecycle_visible() {
     let tasks: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(tasks["tasks"][0]["state"], "done", "界面应显示完成: {body}");
     assert!(
-        tasks["tasks"][0]["narrative"].as_str().is_some_and(|n| n.contains("轮")),
+        tasks["tasks"][0]["narrative"]
+            .as_str()
+            .is_some_and(|n| n.contains("轮")),
         "界面任务卡应带进度叙事: {body}"
     );
 }
@@ -151,10 +163,16 @@ fn s2_web_dashboard_steer_mid_flight() {
     let (code, body) = http_post_json(
         port,
         "/api/steer",
-        &format!("{{\"task\":\"{}\",\"message\":\"补充指示：从现在起每句输出加前缀 [W]\"}}", t.as_str()),
+        &format!(
+            "{{\"task\":\"{}\",\"message\":\"补充指示：从现在起每句输出加前缀 [W]\"}}",
+            t.as_str()
+        ),
     );
     assert_eq!(code, 200, "{body}");
-    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["queued"], true);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).unwrap()["queued"],
+        true
+    );
 
     // 注入轮真正执行后再发结束（时序确定化：与 U4 测试同法）
     let rounds_path = task_state_dir(&work, &t).join("rounds.jsonl");
@@ -173,7 +191,11 @@ fn s2_web_dashboard_steer_mid_flight() {
         &format!("{{\"task\":\"{}\",\"message\":\"结束\"}}", t.as_str()),
     );
     assert_eq!(code, 200, "{body}");
-    assert!(d.wait_state(&t, WorkerState::Done, 20000), "实际: {:?}", d.task_state(&t));
+    assert!(
+        d.wait_state(&t, WorkerState::Done, 20000),
+        "实际: {:?}",
+        d.task_state(&t)
+    );
 
     // 轻推影响了下一轮输出（用户看得见方向被改了）
     let rounds = std::fs::read_to_string(&rounds_path).unwrap();
@@ -186,7 +208,9 @@ fn s2_web_dashboard_steer_mid_flight() {
         .position(|r| r["prompt"].as_str().unwrap_or("").contains("补充指示"))
         .expect("应有注入轮");
     assert!(
-        recs[inj + 1..].iter().any(|r| r["answer"].as_str().unwrap_or("").contains("[W]")),
+        recs[inj + 1..]
+            .iter()
+            .any(|r| r["answer"].as_str().unwrap_or("").contains("[W]")),
         "注入后轮输出应带 [W] 前缀"
     );
 }
@@ -223,7 +247,10 @@ fn s3_rounds_exhausted_ui_recovery_path() {
     assert_eq!(code, 200);
     let tasks: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(tasks["tasks"][0]["state"], "blocked");
-    assert_eq!(tasks["tasks"][0]["blocked_kind"], "rounds_exhausted", "{body}");
+    assert_eq!(
+        tasks["tasks"][0]["blocked_kind"], "rounds_exhausted",
+        "{body}"
+    );
 
     // 收件箱 API（行动建议数据源）
     let (code, body) = http_get(port, "/api/inbox");
@@ -235,10 +262,21 @@ fn s3_rounds_exhausted_ui_recovery_path() {
     );
 
     // 用户选择「恢复」→ 续接跑完
-    let (code, body) = http_post_json(port, "/api/task/resume", &format!("{{\"task\":\"{}\"}}", t.as_str()));
+    let (code, body) = http_post_json(
+        port,
+        "/api/task/resume",
+        &format!("{{\"task\":\"{}\"}}", t.as_str()),
+    );
     assert_eq!(code, 200, "{body}");
-    d.api(Method::TaskSteer, serde_json::json!({ "task": t.as_str(), "message": "结束" }));
-    assert!(d.wait_state(&t, WorkerState::Done, 20000), "实际: {:?}", d.task_state(&t));
+    d.api(
+        Method::TaskSteer,
+        serde_json::json!({ "task": t.as_str(), "message": "结束" }),
+    );
+    assert!(
+        d.wait_state(&t, WorkerState::Done, 20000),
+        "实际: {:?}",
+        d.task_state(&t)
+    );
 
     // 续接不换会话
     let rounds = std::fs::read_to_string(task_state_dir(&work, &t).join("rounds.jsonl")).unwrap();
@@ -247,7 +285,10 @@ fn s3_rounds_exhausted_ui_recovery_path() {
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
         .map(|r| r["session_id"].as_str().unwrap().to_string())
         .collect();
-    assert!(sids.windows(2).all(|w| w[0] == w[1]), "恢复应续接: {sids:?}");
+    assert!(
+        sids.windows(2).all(|w| w[0] == w[1]),
+        "恢复应续接: {sids:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -267,19 +308,35 @@ fn s4_disconnect_auto_recovers_via_ui_view() {
     assert!(d.wait_state(&t, WorkerState::Working, 5000));
 
     // 注入网络故障 → 挂起（界面黄点，用户被告知原因）
-    d.api(Method::TaskSteer, serde_json::json!({ "task": t.as_str(), "message": "网络故障模拟：本轮触发连接失败" }));
+    d.api(
+        Method::TaskSteer,
+        serde_json::json!({ "task": t.as_str(), "message": "网络故障模拟：本轮触发连接失败" }),
+    );
     assert!(d.wait_state(&t, WorkerState::Suspended, 10000));
     let (code, body) = http_get(port, "/api/tasks");
     assert_eq!(code, 200);
     let tasks: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(tasks["tasks"][0]["state"], "suspended", "{body}");
-    assert_eq!(tasks["tasks"][0]["suspend_reason"], "network_lost", "界面应说原因: {body}");
+    assert_eq!(
+        tasks["tasks"][0]["suspend_reason"], "network_lost",
+        "界面应说原因: {body}"
+    );
 
     // 自动恢复（推时钟过退避）→ 完成 —— 用户全程没动手
     d.clock.advance_secs(31);
-    assert!(d.wait_state(&t, WorkerState::Working, 5000), "退避到点自动恢复");
-    d.api(Method::TaskSteer, serde_json::json!({ "task": t.as_str(), "message": "结束" }));
-    assert!(d.wait_state(&t, WorkerState::Done, 20000), "实际: {:?}", d.task_state(&t));
+    assert!(
+        d.wait_state(&t, WorkerState::Working, 5000),
+        "退避到点自动恢复"
+    );
+    d.api(
+        Method::TaskSteer,
+        serde_json::json!({ "task": t.as_str(), "message": "结束" }),
+    );
+    assert!(
+        d.wait_state(&t, WorkerState::Done, 20000),
+        "实际: {:?}",
+        d.task_state(&t)
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -324,7 +381,10 @@ fn s5_multi_task_dashboard_overview() {
     assert_eq!(code, 200);
     let detail: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(detail["id"], t_done.as_str());
-    assert!(detail["narrative"].as_str().is_some(), "详情应带进度: {body}");
+    assert!(
+        detail["narrative"].as_str().is_some(),
+        "详情应带进度: {body}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -341,9 +401,16 @@ fn s6_ledger_answers_cost_question() {
     let (d, _port) = start_with_ui(&rounder_bin(), &["--", cli.to_str().unwrap()]);
 
     let t = d.create_task_with_prompt("对账任务", "费用自洽", &work);
-    assert!(d.wait_state(&t, WorkerState::Done, 20000), "实际: {:?}", d.task_state(&t));
+    assert!(
+        d.wait_state(&t, WorkerState::Done, 20000),
+        "实际: {:?}",
+        d.task_state(&t)
+    );
 
-    let v = d.api(Method::TaskLedger, serde_json::json!({ "task": t.as_str() }));
+    let v = d.api(
+        Method::TaskLedger,
+        serde_json::json!({ "task": t.as_str() }),
+    );
     let rounds = v["rounds"].as_u64().unwrap();
     assert!(rounds >= 1);
     // token 计量闭环：每轮 in=200 out=40
@@ -355,7 +422,10 @@ fn s6_ledger_answers_cost_question() {
     // 费用自洽（自报 $0.01 = 牌价 1¢）→ 无 CostDrift 事件
     let (code, body) = http_get(_port, "/api/events?from=0");
     assert_eq!(code, 200);
-    assert!(!body.contains("cost_drift"), "对账一致不应有漂移事件: {body}");
+    assert!(
+        !body.contains("cost_drift"),
+        "对账一致不应有漂移事件: {body}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -398,7 +468,11 @@ fn s7_ui_page_and_daemon_down_graceful() {
     let mock_tmp = tempfile::tempdir().unwrap();
     let cli = mock_tmp.path().join("mock-claude");
     write_mock_cli(&cli, &mock_tmp.path().join("state"));
-    let d = TestDaemon::start_with(&rounder_bin(), &["--", cli.to_str().unwrap()], Some(tmp.path().to_path_buf()));
+    let d = TestDaemon::start_with(
+        &rounder_bin(),
+        &["--", cli.to_str().unwrap()],
+        Some(tmp.path().to_path_buf()),
+    );
     let t = d.create_task_with_prompt("后起任务", "结束", &work);
     assert!(d.wait_state(&t, WorkerState::Done, 20000));
     // 等缓冲线程的下一次重连周期（≤1s + 轮询余量）
@@ -408,7 +482,10 @@ fn s7_ui_page_and_daemon_down_graceful() {
         if code == 200 && body.contains("\"done\"") {
             break;
         }
-        assert!(std::time::Instant::now() < deadline, "UI 应在 daemon 起后自动接上: {code} {body}");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "UI 应在 daemon 起后自动接上: {code} {body}"
+        );
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
 }

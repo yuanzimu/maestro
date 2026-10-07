@@ -263,9 +263,7 @@ pub fn priced_usage_entry(
         .checked_add(p.cache_write_per_m.checked_mul(cache_w)?)?
         .checked_add(p.output_per_m.checked_mul(output_tokens)?)?;
     // counterfactual = 同内容冷跑：三桶全部按输入价
-    let total_in = cold_in
-        .checked_add(cache_r)?
-        .checked_add(cache_w)?;
+    let total_in = cold_in.checked_add(cache_r)?.checked_add(cache_w)?;
     let cf_mc = p
         .input_per_m
         .checked_mul(total_in)?

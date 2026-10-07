@@ -435,12 +435,18 @@ impl Core {
             Method::LedgerSummary => self.api_ledger_summary(&req),
             Method::TaskFeedback => {
                 // 👎 必填理由：负面反馈无理由 = 无法沉淀教训
-                let params: TaskFeedbackParams = match serde_json::from_value(req.params.clone())
-                {
+                let params: TaskFeedbackParams = match serde_json::from_value(req.params.clone()) {
                     Ok(p) => p,
                     Err(e) => return self.err(&req, -400, &format!("bad params: {e}")),
                 };
-                if !params.positive && params.reason.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                if !params.positive
+                    && params
+                        .reason
+                        .as_deref()
+                        .map(str::trim)
+                        .unwrap_or("")
+                        .is_empty()
+                {
                     return self.err(&req, -400, "negative feedback requires a reason");
                 }
                 self.api_task_feedback(&req, params)
@@ -557,10 +563,16 @@ impl Core {
                                         let (round, ts) = c
                                             .meta
                                             .as_ref()
-                                            .map(|m| (serde_json::json!(m.round),
-                                                      serde_json::json!(m.ts)))
-                                            .unwrap_or((serde_json::Value::Null,
-                                                        serde_json::Value::Null));
+                                            .map(|m| {
+                                                (
+                                                    serde_json::json!(m.round),
+                                                    serde_json::json!(m.ts),
+                                                )
+                                            })
+                                            .unwrap_or((
+                                                serde_json::Value::Null,
+                                                serde_json::Value::Null,
+                                            ));
                                         serde_json::json!({
                                             "seq": c.seq, "reason": c.reason,
                                             "ref": c.full_ref, "commit": c.commit,
@@ -686,7 +698,12 @@ impl Core {
                 .as_deref()
                 .map(|r| format!("理由：{}", flat(r)))
                 .unwrap_or_else(|| {
-                    if params.positive { "（无备注）" } else { "（未提供）" }.to_string()
+                    if params.positive {
+                        "（无备注）"
+                    } else {
+                        "（未提供）"
+                    }
+                    .to_string()
                 }),
         );
         let write = std::fs::OpenOptions::new()
@@ -978,7 +995,10 @@ impl Core {
             worker,
             reason: SuspendReason::BudgetExceeded,
             session_ref: t.session_ref.clone().unwrap_or_else(|| SessionRef::new("")),
-            checkpoint_ref: t.checkpoint_ref.clone().unwrap_or_else(|| CheckpointRef::new("")),
+            checkpoint_ref: t
+                .checkpoint_ref
+                .clone()
+                .unwrap_or_else(|| CheckpointRef::new("")),
             round: t.round,
         });
     }
@@ -1120,10 +1140,7 @@ impl Core {
             .as_ref()
             .map(|s| s.lock().unwrap().replay_all())
             .unwrap_or_default();
-        let window_start = self
-            .ctx
-            .now_ms()
-            .saturating_sub(30 * 86_400_000);
+        let window_start = self.ctx.now_ms().saturating_sub(30 * 86_400_000);
         let (mut all, mut recent) = (Agg::default(), Agg::default());
         for env in &events {
             let in_window = env.ts >= window_start;
@@ -1293,7 +1310,10 @@ impl Core {
             let anchor = crate::checkpoints::list(workdir, task)
                 .into_iter()
                 .filter(|c| {
-                    matches!(c.reason, Some(CpReason::RoundStart) | Some(CpReason::Baseline))
+                    matches!(
+                        c.reason,
+                        Some(CpReason::RoundStart) | Some(CpReason::Baseline)
+                    )
                 })
                 .max_by_key(|c| c.seq);
             let mut rolled_back = false;
@@ -1704,7 +1724,10 @@ impl Core {
 
     /// workdir 读回采样（统一排除 daemon 数据目录）
     fn workdir_readback(&self, workdir: &str) -> crate::acceptance::Readback {
-        crate::acceptance::snapshot(std::path::Path::new(workdir), std::slice::from_ref(&self.cfg.data_dir))
+        crate::acceptance::snapshot(
+            std::path::Path::new(workdir),
+            std::slice::from_ref(&self.cfg.data_dir),
+        )
     }
 
     /// 自动恢复计时到点：探测网络 → 恢复 or 记尝试次数并重排
@@ -1954,8 +1977,7 @@ fn read_tail(path: &std::path::Path, cap: usize) -> Option<String> {
 /// 两层皆缺 → None（prompt 原样，零开销）；每层尾部至多 8KB。
 fn memory_prefix(user_home: Option<&std::path::Path>, workdir: &std::path::Path) -> Option<String> {
     const CAP: usize = 8 * 1024;
-    let user = user_home
-        .and_then(|h| read_tail(&h.join(".maestro").join("memory.md"), CAP));
+    let user = user_home.and_then(|h| read_tail(&h.join(".maestro").join("memory.md"), CAP));
     let project = read_tail(&workdir.join("MAESTRO_MEMORY.md"), CAP);
     let mut s = String::new();
     if let Some(u) = user {
@@ -2079,7 +2101,10 @@ mod tests {
 
         // 负面无理由 → 400（教训无法沉淀）
         assert!(matches!(
-            fb(&mut c, serde_json::json!({"task": "t-1", "positive": false})),
+            fb(
+                &mut c,
+                serde_json::json!({"task": "t-1", "positive": false})
+            ),
             Response::Err { .. }
         ));
         // 未知任务 → 404
@@ -2106,7 +2131,10 @@ mod tests {
             .replay_all();
         assert!(matches!(
             envs.last().map(|e| &e.event),
-            Some(Event::FeedbackRecorded { positive: false, .. })
+            Some(Event::FeedbackRecorded {
+                positive: false,
+                ..
+            })
         ));
 
         // 记忆：条目落 MAESTRO_MEMORY.md，标题/理由换行已压平
@@ -2208,7 +2236,10 @@ mod tests {
             round_report_ok(&mut c, "t-1", r);
         }
         let cps = crate::checkpoints::list(&wd, &t);
-        let rs: Vec<_> = cps.iter().filter(|c| c.reason == Some(CpReason::RoundStart)).collect();
+        let rs: Vec<_> = cps
+            .iter()
+            .filter(|c| c.reason == Some(CpReason::RoundStart))
+            .collect();
         assert_eq!(rs.len(), 3, "滚动 GC 后应只剩最近 3 个锚点: {cps:?}");
         assert_eq!(
             rs.iter().map(|c| c.seq).max().unwrap(),
@@ -2263,7 +2294,10 @@ mod tests {
             "v1",
             "已修改文件应回滚到锚点内容"
         );
-        assert!(!wd.join("junk.txt").exists(), "失败轮 untracked 半成品应被 clean -fd 清除");
+        assert!(
+            !wd.join("junk.txt").exists(),
+            "失败轮 untracked 半成品应被 clean -fd 清除"
+        );
         assert_eq!(
             std::fs::read_to_string(sdir.join("session")).unwrap(),
             "sid-1",
@@ -2271,15 +2305,11 @@ mod tests {
         );
 
         // 重新入队已入账（事件流为证；spawn 必败会再次 TaskFailed，不影响本断言）
-        let envs = c
-            .event_store_handle()
-            .unwrap()
-            .lock()
-            .unwrap()
-            .replay_all();
+        let envs = c.event_store_handle().unwrap().lock().unwrap().replay_all();
         assert!(
-            envs.iter()
-                .any(|e| matches!(&e.event, Event::TaskRequeued { task, from_kind: None } if task == &t)),
+            envs.iter().any(
+                |e| matches!(&e.event, Event::TaskRequeued { task, from_kind: None } if task == &t)
+            ),
             "应发布 TaskRequeued（from_kind=None）"
         );
     }
@@ -2309,12 +2339,7 @@ mod tests {
             panic!("无锚点也应放行续跑（worker 自行清理残留）");
         };
         assert_eq!(result["rolled_back"], false);
-        let envs = c
-            .event_store_handle()
-            .unwrap()
-            .lock()
-            .unwrap()
-            .replay_all();
+        let envs = c.event_store_handle().unwrap().lock().unwrap().replay_all();
         assert!(
             envs.iter()
                 .any(|e| matches!(&e.event, Event::TaskRequeued { task, .. } if task == &t)),
@@ -2403,7 +2428,10 @@ mod tests {
 
         // 无记忆：轻推紧贴正文，无记忆包装
         let plain = compose_spawn_prompt(None, &t, Some("轻推XYZ".into()));
-        assert!(plain.contains("轻推XYZ\n\nTASK-BODY-正文"), "轻推应紧贴正文: {plain}");
+        assert!(
+            plain.contains("轻推XYZ\n\nTASK-BODY-正文"),
+            "轻推应紧贴正文: {plain}"
+        );
         assert!(!plain.contains("历史记忆"), "无记忆不应有包装: {plain}");
 
         // 有项目记忆：记忆最前，轻推次之，正文最后
@@ -2502,7 +2530,10 @@ mod tests {
             panic!("ledger_summary 应成功");
         };
         assert_eq!(result["all_time"]["entries"], 2, "全量不受窗口影响");
-        assert_eq!(result["last_30d"]["entries"], 0, "远未来时钟下事件应全在窗口外");
+        assert_eq!(
+            result["last_30d"]["entries"], 0,
+            "远未来时钟下事件应全在窗口外"
+        );
         assert_eq!(result["last_30d"]["tasks_completed"], 0);
     }
 
