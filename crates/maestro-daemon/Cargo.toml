@@ -4,6 +4,9 @@ description = "Maestro 守护进程：事件循环、Worker 运行时、急停�
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+# 双 bin 包（maestro-daemon / maestro-rounder）：不指定 default-run 时
+# `cargo run -p maestro-daemon` 因 bin 歧义报错（doctor 提示语给的就是这条）
+default-run = "maestro-daemon"
 
 [dependencies]
 maestro-protocol.workspace = true
