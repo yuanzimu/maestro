@@ -57,7 +57,7 @@ description: "Maestro Windows 客户端的同步-审计-构建-测试-发布闭�
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File "C:\dev\maestro\desktop\scripts\rebuild-all.ps1"
 ```
-串联 `prepare-sidecars.ps1`（release daemon/rounder/mock-cli 三件套→`src-tauri\bin\*-aarch64-pc-windows-msvc.exe`）+ `build-installer.ps1`（Tauri build → NSIS）。放后台跑并等结束标记。
+串联 `prepare-sidecars.ps1`（dev 三件套 daemon/rounder/mock-cli →`src-tauri\bin\*-aarch64-pc-windows-msvc.exe`；mock-cli 已是根 workspace crate，决策 33）+ `build-installer.ps1`（Tauri build → NSIS）。**发布出包必须带 overlay**：`npx tauri build --config src-tauri\tauri.release.conf.json`（externalBin 收敛 daemon+rounder 两件，mock-cli 不进发行包；dev 安装/回归不受影响）。放后台跑并等结束标记。
 产物：`C:\cargo-target\maestro-desktop\release\bundle\nsis\Maestro_<ver>_arm64-setup.exe`。
 
 ## 步骤 4：测试
@@ -88,7 +88,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "C:\dev\maestro\desktop\scri
   新事件类型，注意 macOS Swift 端靠 switch/default 容错，旧端安全忽略）。
 - ~~急停时 git 快照偶发失败~~（v0.2.4 已修：checkpoints 锁冲突退避重试）。
 - ~~Windows 无进程组/信号，freeze 为 no-op~~（Sprint C C1 已落地 Job Objects 真冻结）。
-- C1-7 mock-cli 是否出发布包待产品决策（当前保留：演示模式内置 worker）。
+- ~~C1-7 mock-cli 是否出发布包待产品决策~~（决策 33 已落地 2026-10-07：mock-cli
+  抽为根 workspace crate（dev-only，仓库/CI 保留），发行包经
+  tauri.release.conf.json overlay 三端剔除；CI deb 冒烟有防回归断言）。
 - C1-6 Authenticode 需真实证书（sign-windows.ps1 降级契约已就绪）。
 - release.yml 的 windows-11-arm job 依赖 GitHub ARM64 runner 配额（私有仓库
   注意 larger-runner 配置；首跑 3 失败已修：mock-cli manifest-path / Linux 复用

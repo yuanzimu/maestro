@@ -89,4 +89,4 @@
 |---|---|---|
 | Windows 代码签名证书（Authenticode） | win 平台 C1-6 | 采购证书 → .env 真值 |
 | Apple Developer Program + Developer ID + notarytool 凭据 | mac 平台 C2 全链 | 加入开发者计划、生成证书与 App-specific password |
-| ~~mock-cli 发布语义~~ **已决策（2026-10-06）：dev-only** | ~~win 平台 C1-7~~ | 决策 33：仓库/CI 保留、发行包剔除（release 外部二进制清单调整待实施 + 包体复测） |
+| ~~mock-cli 发布语义~~ **已决策（2026-10-06）：dev-only** | ~~win 平台 C1-7~~ | 决策 33：仓库/CI 保留、发行包剔除。**已实施（2026-10-07）**：mock-cli 抽为根 workspace crate + tauri.release.conf.json overlay 三端出包（desktop crate 内 bin 会被 Tauri 全量打包，externalBin 剔除不了）；包体复测留 release 实跑 |

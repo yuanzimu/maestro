@@ -604,7 +604,7 @@ B0 共享契约（先做，一次性）
 | 平台 | 现状 | 缺口 |
 |---|---|---|
 | Windows 进程控制 | [worker.rs](../crates/maestro-daemon/src/worker.rs) `#[cfg(windows)] mod imp`：Child 注册表 + waiter 轮询；`freeze_group`/`unfreeze_group` 为 **no-op**；graceful=直接 TerminateProcess；无 windows-sys 直接依赖 | 急停 FREEZE 在 Win 上不静止 → [emergency.rs](../crates/maestro-daemon/src/emergency.rs) 快照前提（FS 静止）不成立；孙进程泄漏；无三级优雅关闭 |
-| Windows 安装包 | Tauri 仅 `nsis`，currentUser 免管理员；prepare-sidecars 默认 triple 为 aarch64 | 无 Authenticode → SmartScreen 告警；x64/arm64 矩阵未统一；mock-cli 未剔除 |
+| Windows 安装包 | Tauri 仅 `nsis`，currentUser 免管理员；prepare-sidecars 默认 triple 为 aarch64 | 无 Authenticode → SmartScreen 告警；x64/arm64 矩阵未统一；~~mock-cli 未剔除~~（决策 33 已落地，第十轮） |
 | macOS 原生 | [build.sh](../clients/macos/build.sh) 手搓 .app + 内嵌三个 Rust bin + ad-hoc 签名 + DMG；单架构（uname -m）；菜单栏常驻已实现 | 无 Developer ID / hardened runtime / entitlements / notarytool / staple；DMG 未签；无 lipo universal；Bundle ID 与 Tauri 不一致 |
 | Tauri 壳 | [lib.rs](../desktop/src-tauri/src/lib.rs) 仅 setup+invoke；Cargo.toml 未启用 `tray-icon` feature | 无托盘、关窗即退（与「关窗任务照跑」承诺不符）；tools.rs 为 Windows 中心写法（.exe / `;`）；无 macOS sidecar 脚本 |
 | Linux | AppImage/deb/rpm 已可出（复用 Tauri） | 无 SNI 托盘；无 deb/rpm GPG；fcitx5/xrdp 与 X11/Wayland 快捷键未实测 |
@@ -710,8 +710,8 @@ C1 + C2 + C3 + C4 全部完成 → C5 三端发版演练（一次性验收）
 | ✅ | C0-4 [release.yml](../../.github/workflows/release.yml) | tag 触发骨架：Win x64+arm64 / macOS / Linux x64 矩阵构建 → 签名槽 → 产物归档 → dry-run 门；发布仍走本地流水线（C5 收口） |
 | ✅ | C0-1 发布矩阵 | 落在 release.yml 矩阵注释（CI 变量形态，任务书允许的二选一）；prepare-sidecars 两脚本均已 -Triple 参数化 |
 | ⬜ | C1-6 Authenticode 实签 | 脚本/降级契约就绪，**等真实证书**（C0-2 凭据到位即可签） |
-| ⬜ | C1-7 mock-cli 剔除 | **计划冲突待决策**：mock-cli 是桌面「演示模式」的内置 worker（[daemon.rs](../desktop/src-tauri/src/daemon.rs) 缺失直接报安装不完整），剔除将破坏无 API key 的体验路径与 GUI 回归基线 —— 需产品层先定义「演示模式」的发布语义（保留 / dev-only 构建 / 移除并改写回归） |
-| ⬜ | C1 包体 <20MB 核验 | 当前 arm64 NSIS ≈3.02MiB（含 mock-cli），达标但按 C1-7 决策后需复测 |
+| ✅ | C1-7 mock-cli 剔除 | **决策 33 落地（2026-10-07，第十轮）**：新增 [tauri.release.conf.json](../desktop/src-tauri/tauri.release.conf.json) overlay（externalBin 收敛 daemon+rounder 两件），[build-linux.sh](../desktop/scripts/build-linux.sh) 与 release.yml NSIS 段均走 `--config` 出包；CI deb 冒烟加 `! ls /usr/bin/mock-cli` 防回归断言。Demo 模式缺失的降级：worker_config 报「切换模式」引导文案 + engine_error 查询通道（见第十轮） |
+| ⬜ | C1 包体 <20MB 复测 | arm64 NSIS 上轮 ≈3.02MiB（含 mock-cli）已达标；剔除后需 release 实跑复测留档 |
 | ✅ | C3-1~C3-3 [tray.rs](../desktop/src-tauri/src/tray.rs) + [lib.rs](../desktop/src-tauri/src/lib.rs) + [events.rs](../desktop/src-tauri/src/events.rs) | tray-icon feature 托盘常驻：菜单六项 + 左键恢复；关窗 = prevent_close + hide（任务照跑）；急停态/未读数随事件桥与既有 poller 刷新（无新增轮询），菜单动作经 `maestro://tray` 交前端复用确认流 |
 | ✅ | C3-4 [tools.rs](../desktop/src-tauri/src/tools.rs) | 后缀/PATH 分隔符/claude 候选按平台分支（triple 候选在前）；dev 布局双候选目录探测；+2 单测 |
 | ⬜ | C2 全部（macOS 签名/公证/universal） | 需 Apple 凭据 + Mac 侧执行（C0-2 模板已含 notarytool 三元组占位）；**由 macOS 端另行开发** |
@@ -815,6 +815,18 @@ Linux 实测面剩余清单（手动）：GNOME/KDE SNI 托盘可见性（C4-1�
 
 验证（第七轮，Linux 本机）：desktop 8 项全绿（跨平台断言修复后）、workspace 126 项 0 失败、desktop/workspace clippy -D warnings 零告警、tsc 0 错、Xvfb GUI 冒烟无 panic、`--version` headless 探针 exit 0、deb/rpm 双包实出（各 6.53 MiB）且 deb 全链（安装→元数据断言→GUI→/usr/bin daemon 拉起→XDG 数据目录→卸载无残留）与 CI 冒烟断言集本机预演全 PASS。
 
+第十轮迭代（2026-10-07，决策 33 落地 + CI 静态检查补位）：
+
+| 状态 | 交付 | 说明 |
+|---|---|---|
+| ✅ | **发行包剔除 mock-cli（决策 33 / C1-7）** | 两层落地：① mock-cli 从 maestro-desktop 抽出为根 workspace crate（[crates/mock-cli](../crates/mock-cli)，仅 serde_json 依赖）——**Tauri 打包 app crate 的全部 cargo bin，externalBin overlay 剔除不了包内 bin**（overlay 实测 AppDir 仍含 mock-cli 后定位），必须移出 crate；② 出包统一 `tauri build --config [tauri.release.conf.json](../desktop/src-tauri/tauri.release.conf.json)`（externalBin 收敛 daemon+rounder），[build-linux.sh](../desktop/scripts/build-linux.sh) 与 release.yml NSIS 段同源；dev 构建仍三件套（prepare-sidecars.sh/.ps1 从根 workspace 构建 mock-cli 并 staging，GUI resolve_tool 走 src-tauri/bin 候选目录不受影响）。CI deb 冒烟补 `! ls /usr/bin/mock-cli` 防回归断言 |
+| ✅ | **引擎失败可见化（engine_error 查询通道）** | 剔除 mock-cli 后 release 首跑默认 Demo 模式必失败，而 setup 期 `maestro://daemon-error` 事件早于 React listen() 注册必丢（bridge_ready 同款教训）→ AppState 记 engine_error，sync 轮询载荷与 daemon_status command 携带（shortcut_status 同款「挂载后查询」模式），daemon 存活自动清除；StatusBar 顶栏 ⚠ 摘要 + 设置页失败原因全文；SettingsDialog 演示模式按钮在 mock 缺失时标注引导 |
+| ✅ | **CI 补 desktop fmt/clippy（lint job）** | desktop/src-tauri 被根 workspace exclude，`cargo clippy --workspace` 与 fmt 均不覆盖（desktop 侧 rustfmt 漂移已实证）→ 新增 `lint` job：双工作区 `cargo fmt --all --check` + desktop `cargo clippy --all-targets -D warnings`（含 webkit2gtk apt 依赖） |
+| ✅ | maestro-daemon `default-run` | 双 bin 包（daemon/rounder）无 default-run 时 `cargo run -p maestro-daemon` 因 bin 歧义报错（doctor 提示语给的正是这条命令）→ Cargo.toml 加 `default-run = "maestro-daemon"` |
+| ✅ | C4-3 复检修复（Wayland 检测 + 最小化 toggle） | Wayland 会话（WAYLAND_DISPLAY/XDG_SESSION_TYPE 判定）前置跳过 Alt+M 注册：global-hotkey 0.8 Linux 后端仅 X11，XWayland 下注册「成功」但 GTK3 默认 Wayland 后端收不到键，误报比不注册更糟；is_wayland_session 判定纯函数化入 commands.rs（可单测） |
+
+验证（第十轮，Linux 本机全链）：workspace 224 测试 0 失败（含新 mock-cli crate 成员）、desktop 9 测试全绿（含 Wayland 判定 +2）、双工作区 fmt/clippy -D warnings 零告警、tsc 0 错。**mock-cli 剔除实证**：三形态出包（AppImage 82M / deb 6.37M / rpm 6.36M）后逐一核验——AppDir usr/bin 与 deb 解包、rpm -qlp、AppImage --appimage-extract 均仅 daemon/desktop/rounder 三件、无 mock-cli；deb 装→CI 断言集（.desktop 元数据/版本/sidecars/**! ls /usr/bin/mock-cli**）→卸载无残留全 PASS。**dev 路径回归**：staged 三件套（prepare-sidecars 从根 workspace 构建）按 GUI 同款 env 拉起 daemon → 建任务 3 轮完成（Write×2·Edit×1、0 假完成）——演示模式端到端不受抽出影响；SNI 托盘 mock 自动化 6 断言全 PASS。出包期间 linuxdeploy 偶发 failed to run（编译重负载下瞬时 exec 失败，重跑即过、与改动无关）。
+
 ### 10.5 模型目录：运行一次即获取免费 / 低价 token 的 API 与模型
 
 > 解决「去哪找不要钱和便宜的模型、在客户端怎么填」的问题。
@@ -871,7 +883,7 @@ Linux 实测面剩余清单（手动）：GNOME/KDE SNI 托盘可见性（C4-1�
 | 30 | **【v2.7】Windows 冻结选 Job Objects + 逐线程挂起，不用 NtSuspendProcess 单进程方案** | 急停语义是整组（含内层 CLI 派生的孙进程）静止；仅挂直接子进程会让快照期孙进程继续写盘，emergency 快照前提不成立。Job 统一收纳进程树，句柄挂现有 Child 注册表，`imp` 模块内闭环、门面与 emergency 调用方零改动 |
 | 31 | **【v2.7】macOS 走 Developer ID + notarytool 官方公证链，universal 以 lipo 合并产出** | ad-hoc 包在 Apple Silicon 新机被 Gatekeeper 直接拦截，无法公开分发；公证要求 bundle 内全部可执行文件（含三个 sidecar）由内向外签名，故 sidecar 先双架构构建再 lipo，一个 DMG 覆盖 Intel/Apple Silicon |
 | 32 | **【v2.7】Tauri 壳启用 tray-icon，关窗最小化到托盘（三端一致）** | daemon 已独立常驻且支持接管，但壳层关窗即退与「关窗任务照跑」承诺矛盾；托盘行为对齐 macOS 已实现的 NSStatusItem，菜单/角标三端统一，复用事件桥刷新而不新增轮询 |
-| 33 | **【v2.8】mock-cli 定为 dev-only：保留在仓库与 CI（演示/基准 mock 模式），不进发行包** | 演示模式与 C7 基准 mock 模式都依赖确定性 worker；发行包剔除（release 外部二进制清单待实施）后包体 <20MB 达标且不向用户暴露假费用口径（平台 C1-7 决策落地，用户 2026-10-06 确认） |
+| 33 | **【v2.8】mock-cli 定为 dev-only：保留在仓库与 CI（演示/基准 mock 模式），不进发行包** | 演示模式与 C7 基准 mock 模式都依赖确定性 worker；发行包剔除后包体 <20MB 达标且不向用户暴露假费用口径（平台 C1-7 决策落地，用户 2026-10-06 确认）。**已实施（2026-10-07 第十轮，tauri.release.conf.json overlay 三端出包）** |
 
 ## 十二、下一步
 
