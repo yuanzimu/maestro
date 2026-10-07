@@ -56,26 +56,21 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Build sidecars (daemon/rounder/mock-cli)
+      - name: Build sidecars (daemon/rounder; mock-cli dev-only per 决策 33)
         shell: pwsh
         run: |
           cargo build --release --target ${{ matrix.triple }} -p maestro-daemon --bin maestro-daemon --bin maestro-rounder
-          # 顺序契约（B4 脚本同款）：tauri 的 build.rs 校验 externalBin 三件套
-          # 齐全 —— 先摆 daemon/rounder 真身 + mock-cli 占位，再构建真身后覆盖
+          # 出包走 tauri.release.conf.json overlay（externalBin 两件套）——
+          # mock-cli 不构建不落包；tauri build.rs 校验的即 overlay 合并后清单
           $bin = "desktop/src-tauri/bin"
           New-Item -ItemType Directory -Force $bin | Out-Null
           Copy-Item "target/${{ matrix.triple }}/release/maestro-daemon.exe" "$bin/maestro-daemon-${{ matrix.triple }}.exe" -Force
           Copy-Item "target/${{ matrix.triple }}/release/maestro-rounder.exe" "$bin/maestro-rounder-${{ matrix.triple }}.exe" -Force
-          New-Item -ItemType File -Force "$bin/mock-cli-${{ matrix.triple }}.exe" | Out-Null
-          # mock-cli 属 desktop crate（独立 workspace）—— 按 manifest 构建，
-          # 产物在 desktop/src-tauri/target/<triple>/release/
-          cargo build --release --target ${{ matrix.triple }} --manifest-path desktop/src-tauri/Cargo.toml --bin mock-cli
-          Copy-Item "desktop/src-tauri/target/${{ matrix.triple }}/release/mock-cli.exe" "$bin/mock-cli-${{ matrix.triple }}.exe" -Force
-      - name: Build installer (NSIS)
+      - name: Build installer (NSIS, release overlay without mock-cli)
         working-directory: desktop
         run: |
           npm ci
-          npx tauri build
+          npx tauri build --config src-tauri/tauri.release.conf.json
       - name: Sign installer (degrades to unsigned without secrets)
         shell: pwsh
         working-directory: desktop

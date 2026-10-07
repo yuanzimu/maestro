@@ -1,0 +1,10 @@
+[package]
+name = "mock-cli"
+description = "Maestro 演示模式 worker：模拟 claude CLI headless 子集（决策 33：dev-only，不进发行包）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# 仅用于 result 字符串的 JSON 转义（demo 叙事文本可能含引号/换行）
+serde_json.workspace = true

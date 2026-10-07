@@ -3,6 +3,8 @@
 # (the "-<triple>" suffix is a hard convention of Tauri externalBin).
 # Linux counterpart of prepare-sidecars.ps1. Produces:
 #   maestro-daemon-<triple>, maestro-rounder-<triple>, mock-cli-<triple>
+# mock-cli is a root-workspace crate since 决策 33 (dev-only; release
+# bundles drop it via tauri.release.conf.json overlay in build-linux.sh).
 # IMPORTANT: build everything first, copy only at the end. Tauri's build
 # script validates that ALL externalBin files exist; copying one early
 # while another is still missing makes the mock-cli build fail.
@@ -16,7 +18,6 @@ SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DESKTOP="$(cd "$SCRIPT/.." && pwd)"
 REPO="$(cd "$DESKTOP/.." && pwd)"
 BIN="$DESKTOP/src-tauri/bin"
-DESKTOP_TARGET="$DESKTOP/target"
 mkdir -p "$BIN"
 
 # Resolve engine target dir
@@ -36,17 +37,13 @@ for name in maestro-daemon maestro-rounder mock-cli; do
   fi
 done
 
-echo "== 2/3 build engine pair + demo worker =="
-cargo build --release -p maestro-daemon --manifest-path "$REPO/Cargo.toml"
-(
-  cd "$DESKTOP/src-tauri"
-  CARGO_TARGET_DIR="$DESKTOP_TARGET" cargo build --release --bin mock-cli
-)
+echo "== 2/3 build engine pair + demo worker (root workspace) =="
+cargo build --release -p maestro-daemon -p mock-cli --manifest-path "$REPO/Cargo.toml"
 
 echo "== 3/3 overwrite placeholders with real sidecars =="
 cp -f "$ENGINE_REL/maestro-daemon" "$BIN/maestro-daemon-$TRIPLE"
 cp -f "$ENGINE_REL/maestro-rounder" "$BIN/maestro-rounder-$TRIPLE"
-cp -f "$DESKTOP_TARGET/release/mock-cli" "$BIN/mock-cli-$TRIPLE"
+cp -f "$ENGINE_REL/mock-cli" "$BIN/mock-cli-$TRIPLE"
 
 chmod 755 "$BIN"/*
 echo "sidecars ready in $BIN:"

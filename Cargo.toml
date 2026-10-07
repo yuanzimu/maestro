@@ -8,6 +8,7 @@ members = [
     "crates/maestro-testkit",
     "crates/maestro-e2e",
     "crates/maestro-bench",
+    "crates/mock-cli",
 ]
 exclude = ["reference/herdr", "desktop/src-tauri"]
 

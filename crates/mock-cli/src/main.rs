@@ -1,4 +1,9 @@
-//! mock-cli：桌面端「演示模式」的内置 worker（跨平台、零依赖）。
+//! mock-cli：桌面端「演示模式」的内置 worker（跨平台）。
+//!
+//! **决策 33（dev-only）**：独立 crate 挂根 workspace —— 仓库/CI 保留（演示
+//! 模式与 dev 构建需要），但不进发行包：Tauri 会打包 app crate 的全部 cargo
+//! bin，故从 maestro-desktop 抽出（externalBin overlay 只能收敛 sidecar 清单，
+//! 剔除不了包内 bin）；出包走 [tauri.release.conf.json] overlay 三端一致剔除。
 //!
 //! 模拟 claude CLI headless 子集（对齐 adapter.rs ClaudeDialect 三要素：
 //! system.session_id / result.result / result.usage）：
@@ -56,9 +61,17 @@ fn main() {
     let task = std::env::var("MAESTRO_TASK_ID").unwrap_or_default();
     let dir: String = task
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
-    let rounds_file = std::path::Path::new(".maestro").join(&dir).join("rounds.jsonl");
+    let rounds_file = std::path::Path::new(".maestro")
+        .join(&dir)
+        .join("rounds.jsonl");
     let done_rounds = std::fs::read_to_string(&rounds_file)
         .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count())
         .unwrap_or(0);
@@ -94,7 +107,13 @@ fn main() {
         r#"{{"type":"system","subtype":"init","session_id":"{sid}","model":"{model}"}}"#
     );
     // 工具调用（U3 叙事素材：RoundProgress.tools_used）
-    let tool = if no_output { "Think" } else if round.is_multiple_of(2) { "Edit" } else { "Write" };
+    let tool = if no_output {
+        "Think"
+    } else if round.is_multiple_of(2) {
+        "Edit"
+    } else {
+        "Write"
+    };
     let _ = writeln!(
         out,
         r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","name":"{tool}","id":"tu_{round}"}}]}}}}"#
