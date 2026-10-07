@@ -163,6 +163,8 @@ export interface DaemonStatus {
   pid: number;
   uptime_secs: number;
   event_seq: number;
+  /** 最近一次拉起失败原因（null = 无/已恢复；决策 33 查询通道） */
+  error: string | null;
 }
 
 export type WorkerMode = "demo" | "claude" | "custom";

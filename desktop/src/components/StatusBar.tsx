@@ -36,12 +36,17 @@ export default function StatusBar() {
 
   return (
     <header>
-      <span className={`dot ${state.daemon.running ? "on" : ""}`} title={state.daemon.running ? "引擎在线" : "引擎未连接"} />
+      <span
+        className={`dot ${state.daemon.running ? "on" : ""}`}
+        title={state.daemon.running ? "引擎在线" : state.daemon.error ?? "引擎未连接"}
+      />
       <span className="logo">Maestro 指挥台</span>
-      <span className="hint">
+      <span className="hint" title={state.daemon.error ?? undefined}>
         {state.daemon.running
           ? `引擎 v${state.daemon.version || "?"} · 已运行 ${fmtUptime(state.daemon.uptime_secs)}`
-          : "引擎未连接"}
+          : state.daemon.error
+            ? `⚠ 引擎启动失败：${truncate(state.daemon.error, 60)}`
+            : "引擎未连接"}
       </span>
       <span className="counts">
         进行中 <b>{counts.working ?? 0}</b> · 排队 <b>{counts.queued ?? 0}</b> · 待处理{" "}
@@ -74,4 +79,10 @@ function fmtUptime(secs: number): string {
   if (secs < 60) return `${secs}s`;
   if (secs < 3600) return `${Math.floor(secs / 60)}m`;
   return `${Math.floor(secs / 3600)}h${Math.floor((secs % 3600) / 60)}m`;
+}
+
+// 超时路径的错误含日志尾部（长文）——顶栏只露首行摘要，全量在 title
+function truncate(s: string, n: number): string {
+  const firstLine = s.split("\n")[0] ?? s;
+  return firstLine.length > n ? `${firstLine.slice(0, n)}…` : firstLine;
 }

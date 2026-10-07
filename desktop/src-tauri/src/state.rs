@@ -35,9 +35,7 @@ pub fn app_root() -> PathBuf {
     let base = std::env::var_os("XDG_DATA_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share"))
-        })
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
         .unwrap_or_else(std::env::temp_dir);
     base.join(name)
 }
@@ -61,6 +59,12 @@ pub struct AppState {
     /// 首订阅是瞬时的，必现竞态）
     pub bridge_start: Arc<AtomicBool>,
     pub settings: Arc<Mutex<settings::Settings>>,
+    /// 最近一次引擎拉起失败的原因（决策 33：mock-cli 出包剔除后 Demo
+    /// 模式缺失会在此给出切换引导）。setup 期 `maestro://daemon-error`
+    /// 事件早于 React listen() 注册必丢（bridge_ready 同款教训）→ 走
+    /// shortcut_status 同款「挂载后查询」模式：sync 轮询与 daemon_status
+    /// 携带，daemon 存活时清除。
+    engine_error: Arc<Mutex<Option<String>>>,
 }
 
 impl AppState {
@@ -75,7 +79,22 @@ impl AppState {
             managed: Arc::new(AtomicBool::new(false)),
             bridge_start: Arc::new(AtomicBool::new(false)),
             settings: Arc::new(Mutex::new(settings)),
+            engine_error: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// 引擎拉起失败原因（None = 无失败/已恢复）
+    pub fn engine_error(&self) -> Option<String> {
+        self.engine_error.lock().unwrap().clone()
+    }
+
+    pub fn set_engine_error(&self, msg: String) {
+        *self.engine_error.lock().unwrap() = Some(msg);
+    }
+
+    /// daemon 存活即清除（外部拉起接管 / 重启成功路径由调用方清除）
+    pub fn clear_engine_error(&self) {
+        *self.engine_error.lock().unwrap() = None;
     }
 
     pub fn is_managed(&self) -> bool {

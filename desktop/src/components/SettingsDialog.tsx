@@ -50,7 +50,10 @@ export default function SettingsDialog() {
               onClick={() => setMode("demo")}
             >
               <b>🧪 演示模式</b>
-              <span>内置 mock worker（无需任何 AI key），3 轮模拟产出后完成 —— 用来体验全流程</span>
+              <span>
+                内置 mock worker（无需任何 AI key），3 轮模拟产出后完成 —— 用来体验全流程
+                {probe && !probe.mock_path && <b className="dim">—— 发行包未携带演示 worker，请改用下方模式</b>}
+              </span>
             </button>
             <button
               className={`mode ${s.worker_mode === "claude" ? "sel" : ""}`}
@@ -103,6 +106,12 @@ export default function SettingsDialog() {
                 ? `运行中 · v${state.daemon.version || "?"} · pid ${state.daemon.pid} · ${state.daemon.managed ? "由本应用托管" : "外部启动（接管）"}`
                 : "未运行"}
             </span>
+            {!state.daemon.running && state.daemon.error && (
+              <>
+                <span className="k">失败原因</span>
+                <span className="v">{state.daemon.error}</span>
+              </>
+            )}
             {probe?.data_dir && (
               <>
                 <span className="k">数据目录</span>

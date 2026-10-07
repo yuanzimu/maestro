@@ -53,6 +53,8 @@ pub async fn daemon_status(state: State<'_, AppState>) -> Result<Value, String> 
             "pid": 0,
             "uptime_secs": 0,
             "event_seq": 0,
+            // 最近一次拉起失败原因（None = 无）；决策 33 配套的查询通道
+            "error": state.engine_error(),
         }));
     }
     let status = c
@@ -65,6 +67,7 @@ pub async fn daemon_status(state: State<'_, AppState>) -> Result<Value, String> 
         "pid": status["pid"],
         "uptime_secs": status["uptime_secs"],
         "event_seq": status["event_seq"],
+        "error": null,
     }))
 }
 

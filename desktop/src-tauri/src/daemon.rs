@@ -29,8 +29,11 @@ fn worker_config(state: &AppState) -> Result<(String, String), String> {
     // CreateProcess os error 123。安装目录无空格，此约定安全
     match s.worker_mode {
         WorkerMode::Demo => {
-            let mock = tools::resolve_tool("mock-cli")
-                .ok_or("未找到演示 worker（mock-cli）—— 安装不完整")?;
+            // 决策 33：mock-cli 定 dev-only，发行包不带 —— 缺失时给切换
+            // 引导而非「安装不完整」（release 首跑默认 Demo 模式的必经路径）
+            let mock = tools::resolve_tool("mock-cli").ok_or(
+                "演示 worker（mock-cli）不随发布包分发 —— 请在「设置 → Worker 引擎」切换到 Claude Code 或自定义命令",
+            )?;
             Ok((rounder, format!("-- {}", mock.to_string_lossy())))
         }
         WorkerMode::Claude => Ok((rounder, "-- claude".to_string())),
@@ -49,18 +52,32 @@ fn worker_config(state: &AppState) -> Result<(String, String), String> {
     }
 }
 
-/// 确保引擎在线：已在线则接管；否则拉起 sidecar 并等待就绪
+/// 确保引擎在线：已在线则接管；否则拉起 sidecar 并等待就绪。
+/// 失败原因记入 AppState::engine_error（setup 期 daemon-error 事件早于
+/// React 监听注册必丢 → 查询模式兜底，见 state.rs 注释）
 pub fn ensure_daemon(app: &tauri::AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    state.clear_engine_error();
+    let res = ensure_daemon_inner(app);
+    if let Err(e) = &res {
+        state.set_engine_error(e.clone());
+    }
+    res
+}
+
+fn ensure_daemon_inner(app: &tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     let client = MaestroClient::new(&state.data_dir);
     if client.is_daemon_alive() {
-        state.managed.store(false, std::sync::atomic::Ordering::SeqCst);
+        state
+            .managed
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         let _ = app.emit("maestro://daemon", serde_json::json!({ "alive": true }));
         return Ok(());
     }
 
-    let daemon_exe = tools::resolve_tool("maestro-daemon")
-        .ok_or("未找到 maestro-daemon 引擎 —— 安装不完整")?;
+    let daemon_exe =
+        tools::resolve_tool("maestro-daemon").ok_or("未找到 maestro-daemon 引擎 —— 安装不完整")?;
     let (worker_program, worker_args) = worker_config(&state)?;
 
     // 日志文件（append）
@@ -74,7 +91,8 @@ pub fn ensure_daemon(app: &tauri::AppHandle) -> Result<(), String> {
         .map_err(|e| format!("打开日志失败: {e}"))?;
 
     let mut cmd = Command::new(&daemon_exe);
-    cmd.arg("--data-dir").arg(&state.data_dir)
+    cmd.arg("--data-dir")
+        .arg(&state.data_dir)
         .env("MAESTRO_WORKER_PROGRAM", &worker_program)
         .env("MAESTRO_WORKER_ARGS", &worker_args)
         .env("MAESTRO_ROUND_GAP_MS", "1200") // 演示节奏（rounder 轮间隔）
@@ -111,9 +129,16 @@ pub fn ensure_daemon(app: &tauri::AppHandle) -> Result<(), String> {
     let tail = tools::log_tail(2048);
     let msg = format!(
         "引擎 15s 内未就绪。{}",
-        if tail.is_empty() { String::new() } else { format!("日志尾部：\n{tail}") },
+        if tail.is_empty() {
+            String::new()
+        } else {
+            format!("日志尾部：\n{tail}")
+        },
     );
-    let _ = app.emit("maestro://daemon-error", serde_json::json!({ "message": msg }));
+    let _ = app.emit(
+        "maestro://daemon-error",
+        serde_json::json!({ "message": msg }),
+    );
     Err(msg)
 }
 
@@ -122,7 +147,11 @@ pub fn shutdown(app: &tauri::AppHandle, grace_ms: u64) -> Result<(), String> {
     let state = app.state::<AppState>();
     let client = MaestroClient::new(&state.data_dir);
     if client.is_daemon_alive() {
-        let _ = client.call("shutdown", maestro_protocol::api::Method::ServerShutdown, serde_json::json!({}));
+        let _ = client.call(
+            "shutdown",
+            maestro_protocol::api::Method::ServerShutdown,
+            serde_json::json!({}),
+        );
     }
     if !state.wait_daemon_down(grace_ms) {
         state.kill_child();
@@ -131,7 +160,9 @@ pub fn shutdown(app: &tauri::AppHandle, grace_ms: u64) -> Result<(), String> {
         if let Some(mut c) = state.child.lock().unwrap().take() {
             let _ = c.wait();
         }
-        state.managed.store(false, std::sync::atomic::Ordering::SeqCst);
+        state
+            .managed
+            .store(false, std::sync::atomic::Ordering::SeqCst);
     }
     let _ = app.emit("maestro://daemon", serde_json::json!({ "alive": false }));
     Ok(())

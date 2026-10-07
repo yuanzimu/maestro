@@ -45,7 +45,8 @@ export interface AppState {
 
 type Action =
   | { type: "daemon"; status: DaemonStatus }
-  | { type: "sync"; status: ServerStatus | null; tasks: TaskSummary[]; inbox: InboxItem[]; workers: WorkerItem[]; managed?: boolean }
+  | { type: "sync"; status: ServerStatus | null; tasks: TaskSummary[]; inbox: InboxItem[]; workers: WorkerItem[]; managed?: boolean; engine_error?: string | null }
+  | { type: "engine-error"; message: string }
   | { type: "event"; env: Envelope }
   | { type: "select"; id: string | null }
   | { type: "dialog"; dialog: AppState["dialog"] }
@@ -62,6 +63,7 @@ const initial: AppState = {
     pid: 0,
     uptime_secs: 0,
     event_seq: 0,
+    error: null,
   },
   tasks: {},
   taskOrder: [],
@@ -129,10 +131,16 @@ function reducer(state: AppState, a: Action): AppState {
         inbox: a.inbox,
         workers: a.workers,
         daemon: a.status
-          ? { ...state.daemon, running: true, version: a.status.version, pid: a.status.pid, uptime_secs: a.status.uptime_secs, event_seq: a.status.event_seq, managed: a.managed ?? state.daemon.managed }
-          : { ...state.daemon, running: false },
+          ? { ...state.daemon, running: true, version: a.status.version, pid: a.status.pid, uptime_secs: a.status.uptime_secs, event_seq: a.status.event_seq, managed: a.managed ?? state.daemon.managed, error: null }
+          : { ...state.daemon, running: false, error: a.engine_error ?? state.daemon.error },
       };
     }
+
+    case "engine-error":
+      return {
+        ...state,
+        daemon: { ...state.daemon, running: false, error: a.message },
+      };
 
     case "event": {
       const env = a.env;
@@ -227,7 +235,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       }
     });
     // 兜底轮询（Rust 侧 5s 推 server_status + task_list 快照）
-    const un2 = listen<{ status: ServerStatus | null; tasks: TaskSummary[]; inbox: InboxItem[]; workers: WorkerItem[]; managed?: boolean }>(
+    const un2 = listen<{ status: ServerStatus | null; tasks: TaskSummary[]; inbox: InboxItem[]; workers: WorkerItem[]; managed?: boolean; engine_error?: string | null }>(
       "maestro://sync",
       (e) => dispatch({ type: "sync", ...e.payload })
     );
@@ -238,6 +246,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         status: { ...initial.daemon, running: e.payload.alive },
       })
     );
+    // 引擎拉起失败（restart 等监听已就位的场景即时呈现；setup 期首发
+    // 事件早于本注册必丢 —— 兜底靠 sync 载荷的 engine_error 查询通道）
+    const un4 = listen<{ message: string }>("maestro://daemon-error", (e) =>
+      dispatch({ type: "engine-error", message: e.payload.message })
+    );
     // All three listeners are now registered -> release the Rust bridge to do
     // its first subscribe. Without this, the daemon's instant replay burst on
     // the take-alive path is emitted before any listener exists and is lost.
@@ -246,6 +259,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       un1.then((f) => f());
       un2.then((f) => f());
       un3.then((f) => f());
+      un4.then((f) => f());
     };
   }, []);
 

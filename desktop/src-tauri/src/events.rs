@@ -32,6 +32,9 @@ pub fn spawn_bridge(app: tauri::AppHandle) {
                 continue;
             }
             let _ = app.emit("maestro://daemon", serde_json::json!({ "alive": true }));
+            // 存活即清陈旧失败原因（外部拉起接管 / 恢复路径）——
+            // sync 载荷的 engine_error 以此为准，避免常驻误导
+            state.clear_engine_error();
 
             // 首连（last_seq=0）→ 1 = 全量重放；重连 → last_seq+1 续订
             let from = {
@@ -82,6 +85,8 @@ pub fn spawn_poller(app: tauri::AppHandle) {
                     "tasks": [],
                     "inbox": [],
                     "workers": [],
+                    // 引擎未在线的原因（5s 兜底通道；前端 StatusBar/设置页呈现）
+                    "engine_error": state.engine_error(),
                 }),
             );
         } else {
@@ -114,6 +119,7 @@ pub fn spawn_poller(app: tauri::AppHandle) {
                     // 前端 managed 仅此通道更新 —— 否则设置页引擎永远误显
                     // 「外部启动（接管）」（daemon_status command 无人轮询）
                     "managed": state.is_managed(),
+                    "engine_error": null,
                 }),
             );
         }
