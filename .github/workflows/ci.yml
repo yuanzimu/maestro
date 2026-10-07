@@ -125,6 +125,9 @@ jobs:
           test -x /usr/bin/maestro-desktop && /usr/bin/maestro-desktop --version
           # sidecar 裸名同目录落包（tools.rs resolve_tool 第二候选命中）
           test -x /usr/bin/maestro-daemon && test -x /usr/bin/maestro-rounder
+          # 决策 33：mock-cli 定 dev-only，发行包不携带（build-linux.sh 出包
+          # 走 release overlay）——防回归断言
+          ! ls /usr/bin/mock-cli 2>/dev/null
           # 依赖解析干净（deb depends 声明有效性）
           dpkg -s maestro | grep -E '^Status: install ok installed$'
       - name: Uninstall & verify clean
@@ -133,6 +136,35 @@ jobs:
           # 卸载无残留：desktop 项与二进制随包移除
           ! find /usr/share/applications -iname 'maestro.desktop' | grep -q .
           ! ls /usr/bin/maestro-desktop /usr/bin/maestro-daemon /usr/bin/maestro-rounder 2>/dev/null
+
+  # fmt + desktop clippy（2026-10-07 补）：desktop/src-tauri 被根 workspace
+  # exclude，此前 fmt/clippy 均无 CI 覆盖（desktop 侧 rustfmt 漂移实证过）。
+  # fmt 双工作区各查一遍；clippy 走 desktop 独立清单（需 webkit2gtk 头文件）。
+  lint:
+    name: fmt + desktop clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            desktop/src-tauri
+      - name: rustfmt (root workspace + desktop)
+        run: |
+          cargo fmt --all --check
+          cargo fmt --all --check --manifest-path desktop/src-tauri/Cargo.toml
+      - name: Install GUI build deps (webkit2gtk 4.1)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf
+      - name: Clippy desktop (deny warnings)
+        run: cargo clippy --manifest-path desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
 
   # C7 效果基准集（mock 模式）：10 任务全链跑 + 验收通过率 ≥98% 作门禁
   # （maestro-bench 退出码 1 = 套件退化 → 本 job 失败）。确定性可复跑
