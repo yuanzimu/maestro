@@ -8,9 +8,16 @@
 # IMPORTANT: build everything first, copy only at the end. Tauri's build
 # script validates that ALL externalBin files exist; copying one early
 # while another is still missing makes the mock-cli build fail.
-# Usage: ./prepare-sidecars.sh [triple] [workspace target dir]
+# Usage: ./prepare-sidecars.sh [--placeholders-only] [triple] [workspace target dir]
+#   --placeholders-only: 只打 dummy 占位不构建（tauri-build 只校验存在性；
+#     CI lint job 等只跑 clippy/fmt 的场景用，省去引擎全量 release 构建）
 set -euo pipefail
 
+PLACEHOLDERS_ONLY=0
+if [ "${1:-}" = "--placeholders-only" ]; then
+  PLACEHOLDERS_ONLY=1
+  shift
+fi
 TRIPLE="${1:-x86_64-unknown-linux-gnu}"
 WORKSPACE_TARGET="${2:-}"
 
@@ -38,6 +45,10 @@ for name in maestro-daemon maestro-rounder mock-cli; do
 done
 
 echo "== 2/3 build engine pair + demo worker (root workspace) =="
+if [ "$PLACEHOLDERS_ONLY" = "1" ]; then
+  echo "placeholders-only: skip engine build, done."
+  exit 0
+fi
 cargo build --release -p maestro-daemon -p mock-cli --manifest-path "$REPO/Cargo.toml"
 
 echo "== 3/3 overwrite placeholders with real sidecars =="
